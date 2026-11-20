@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["crates/sql_db", "crates/sql_editor"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.1"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+sql_db = { path = "crates/sql_db" }
+sql_text = { path = "crates/sql_text" }
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mssql-tds = { version = "=0.4.0", default-features = false }
+azure_identity = "1"
+azure_core = "1"
+gpui-kit = { version = "=0.10.0", features = ["tree-sitter-sql"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+print_stdout = "deny"
+redundant_clone = "deny"
+wildcard_enum_match_arm = "warn"
+mod_module_files = "deny"
