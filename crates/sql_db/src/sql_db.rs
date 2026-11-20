@@ -1,10 +1,12 @@
 //! Database drivers behind one result shape, so the UI never sees driver types.
 
+mod csv_export;
 mod tds;
 
 use std::fmt;
 use std::sync::Arc;
 
+pub use csv_export::write_csv;
 pub use tds::{FabricConfig, TdsConnection};
 
 #[derive(Debug, thiserror::Error)]

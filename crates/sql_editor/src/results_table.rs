@@ -3,6 +3,8 @@ use gpui_kit::component::table::{Column, TableDelegate, TableState};
 use gpui_kit::{
     App, Context, IntoElement, ParentElement as _, SharedString, Styled as _, Window, div, px,
 };
+use std::sync::Arc;
+
 use sql_db::{ResultSet, Value};
 
 const CHARACTER_WIDTH: f32 = 7.5;
@@ -13,12 +15,12 @@ const WIDTH_SAMPLE_ROWS: usize = 200;
 
 #[derive(Default)]
 pub struct ResultsTable {
-    result: ResultSet,
+    result: Arc<ResultSet>,
     columns: Vec<Column>,
 }
 
 impl ResultsTable {
-    pub fn set_result(&mut self, result: ResultSet) {
+    pub fn set_result(&mut self, result: Arc<ResultSet>) {
         self.columns = result
             .columns
             .iter()
@@ -56,7 +58,7 @@ impl ResultsTable {
     }
 
     pub fn clear(&mut self) {
-        self.set_result(ResultSet::default());
+        self.set_result(Arc::default());
     }
 }
 

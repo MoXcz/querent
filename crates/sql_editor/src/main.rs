@@ -8,7 +8,7 @@ mod workspace;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
-use crate::query_tab::{CancelQuery, RunAll, RunQuery};
+use crate::query_tab::{CancelQuery, ExportCsv, RunAll, RunQuery};
 use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
 
 const KEY_CONTEXT: &str = "SqlEditor";
@@ -50,6 +50,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(run_all, RunAll, Some(KEY_CONTEXT)),
         KeyBinding::new(run_all, RunAll, Some("Input")),
         KeyBinding::new("ctrl-shift-c", CancelQuery, Some(KEY_CONTEXT)),
+        KeyBinding::new("ctrl-shift-e", ExportCsv, Some(KEY_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(WORKSPACE_CONTEXT)),

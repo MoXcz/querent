@@ -34,6 +34,7 @@ Keys:
 | `Ctrl+Enter` | Run the selection, or the statement under the cursor |
 | `Ctrl+Shift+Enter` | Run everything in the tab |
 | `Ctrl+Shift+C` | Cancel the running query |
+| `Ctrl+Shift+E` | Export the result as CSV |
 | `Ctrl+T` / `Ctrl+W` | New tab / close tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 

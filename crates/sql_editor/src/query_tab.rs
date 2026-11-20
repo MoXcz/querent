@@ -1,7 +1,9 @@
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
 use gpui_kit::component::table::{DataTable, TableState};
@@ -9,11 +11,11 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Task, Window, actions, div,
-    px,
+    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Task, WeakEntity, Window, actions, div, px,
 };
-use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, TdsConnection};
+use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, ResultSet, TdsConnection};
 use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
@@ -28,7 +30,9 @@ actions!(
         /// Run everything in the editor.
         RunAll,
         /// Ask the server to stop the running query.
-        CancelQuery
+        CancelQuery,
+        /// Save the shown result as a CSV file.
+        ExportCsv
     ]
 );
 
@@ -85,6 +89,11 @@ pub struct QueryTab {
     query_generation: u64,
     /// Which lines the last run sent, shown in the status line.
     ran_lines: Option<SharedString>,
+    /// The result set in the grid; shared with the grid and CSV export.
+    shown_result: Option<Arc<ResultSet>>,
+    /// Outcome of the last export, shown in the status line until the next run.
+    export_notice: Option<SharedString>,
+    export_task: Option<Task<()>>,
 }
 
 impl QueryTab {
@@ -125,6 +134,9 @@ impl QueryTab {
             running_query: None,
             query_generation: 0,
             ran_lines: None,
+            shown_result: None,
+            export_notice: None,
+            export_task: None,
         }
     }
 
@@ -221,6 +233,7 @@ impl QueryTab {
 
     fn start_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_running_query(cx);
+        self.export_notice = None;
         let config = match self.connection_config(cx) {
             Ok(config) => config,
             Err(message) => {
@@ -278,7 +291,8 @@ impl QueryTab {
         self.state = match outcome {
             Ok(Ok((connection, Ok(output)))) => {
                 self.connection = Some(connection);
-                let shown = output.result_sets.last().cloned().unwrap_or_default();
+                let shown = Arc::new(output.result_sets.last().cloned().unwrap_or_default());
+                self.shown_result = Some(shown.clone());
                 self.results.update(cx, |table, cx| {
                     table.delegate_mut().set_result(shown);
                     table.refresh(cx);
@@ -308,6 +322,7 @@ impl QueryTab {
             }
         };
         if matches!(self.state, QueryState::Failed { .. }) {
+            self.shown_result = None;
             self.results.update(cx, |table, cx| {
                 table.delegate_mut().clear();
                 table.refresh(cx);
@@ -324,8 +339,62 @@ impl QueryTab {
         }
     }
 
+    fn export_csv(&mut self, _: &ExportCsv, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(result_set) = self
+            .shown_result
+            .clone()
+            .filter(|result| !result.columns.is_empty())
+        else {
+            self.export_notice = Some("Nothing to export: run a query that returns rows.".into());
+            cx.notify();
+            return;
+        };
+        let directory = export_directory();
+        let suggested_name = export_file_name(self.number, &self.connection_fields(cx).database);
+        let chosen_path = cx.prompt_for_new_path(&directory, Some(&suggested_name));
+
+        self.export_task = Some(cx.spawn(async move |this, cx| {
+            let path = match chosen_path.await {
+                Ok(Ok(Some(path))) => path,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    let notice = format!("Export failed: no save dialog ({error}).");
+                    report_export(&this, notice, cx);
+                    return;
+                }
+            };
+            let written = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    let result_set = result_set.clone();
+                    async move { write_csv_file(&path, &result_set) }
+                })
+                .await;
+            let notice = match written {
+                Ok(()) => {
+                    let mut notice = format!(
+                        "Exported {} rows to {}",
+                        result_set.rows.len(),
+                        path.display()
+                    );
+                    if result_set.truncated {
+                        notice.push_str(" (only the rows shown; the result was truncated)");
+                    }
+                    notice
+                }
+                Err(error) => format!("Export failed: {error:#}"),
+            };
+            report_export(&this, notice, cx);
+        }));
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let running = matches!(self.state, QueryState::Running { .. });
+        let exportable = self
+            .shown_result
+            .as_ref()
+            .is_some_and(|result| !result.columns.is_empty());
         h_flex()
             .gap_2()
             .p_2()
@@ -361,6 +430,16 @@ impl QueryTab {
                         this.cancel_query(&CancelQuery, window, cx);
                     })),
             )
+            .child(
+                Button::new("export-csv")
+                    .small()
+                    .label("Export CSV")
+                    .tooltip("Save the result as CSV (Ctrl+Shift+E)")
+                    .disabled(!exportable)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.export_csv(&ExportCsv, window, cx);
+                    })),
+            )
     }
 
     fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -388,6 +467,14 @@ impl QueryTab {
     }
 
     pub fn status_text(&self) -> String {
+        let status = self.query_status_text();
+        match &self.export_notice {
+            Some(notice) => format!("{status} · {notice}"),
+            None => status,
+        }
+    }
+
+    fn query_status_text(&self) -> String {
         match &self.state {
             QueryState::Idle => "Ready".to_owned(),
             QueryState::Running { .. } => "Running…".to_owned(),
@@ -437,6 +524,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run_query))
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::cancel_query))
+            .on_action(cx.listener(Self::export_csv))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
@@ -452,6 +540,53 @@ impl Render for QueryTab {
                         .child(resizable_panel().child(self.render_results(cx))),
                 ),
             )
+    }
+}
+
+fn report_export(this: &WeakEntity<QueryTab>, notice: String, cx: &mut AsyncApp) {
+    let updated = this.update(cx, |tab, cx| {
+        tab.export_notice = Some(notice.into());
+        cx.notify();
+    });
+    if let Err(error) = updated {
+        tracing::debug!(%error, "tab closed before the export finished");
+    }
+}
+
+fn write_csv_file(path: &Path, result_set: &ResultSet) -> anyhow::Result<()> {
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    sql_db::write_csv(result_set, std::io::BufWriter::new(file))
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Downloads, else home, else the working directory.
+fn export_directory() -> PathBuf {
+    directories::UserDirs::new()
+        .and_then(|directories| {
+            directories
+                .download_dir()
+                .map(Path::to_path_buf)
+                .or_else(|| Some(directories.home_dir().to_path_buf()))
+        })
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn export_file_name(tab_number: usize, database: &str) -> String {
+    let stem: String = database
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character == '_' || character == '-' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if stem.is_empty() {
+        format!("query-{tab_number}.csv")
+    } else {
+        format!("{stem}-query-{tab_number}.csv")
     }
 }
 
@@ -474,6 +609,15 @@ fn line_span(text: &str, range: &Range<usize>) -> SharedString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_file_name_is_safe() {
+        assert_eq!(export_file_name(2, ""), "query-2.csv");
+        assert_eq!(
+            export_file_name(3, "dbo/sales data"),
+            "dbo_sales_data-query-3.csv"
+        );
+    }
 
     #[test]
     fn describes_line_span() {

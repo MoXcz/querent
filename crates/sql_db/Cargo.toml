@@ -11,6 +11,7 @@ path = "src/sql_db.rs"
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
+csv.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
