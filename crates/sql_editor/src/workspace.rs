@@ -314,7 +314,7 @@ impl Workspace {
                     .ghost()
                     .xsmall()
                     .icon(IconName::Close)
-                    .tooltip("Close tab (Ctrl+W)")
+                    .tooltip("Close tab (Ctrl+Shift+W)")
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         this.close_tab_at(index, window, cx);
@@ -336,7 +336,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .icon(IconName::Plus)
-                        .tooltip("New tab (Ctrl+T)")
+                        .tooltip("New tab (Ctrl+N)")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.new_tab(&NewTab, window, cx);
                         })),

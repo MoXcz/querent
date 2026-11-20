@@ -48,7 +48,8 @@ Keys:
 | `Ctrl+Shift+Enter` | Run everything in the tab |
 | `Ctrl+Shift+C` | Cancel the running query |
 | `Ctrl+Shift+E` | Export the result as CSV |
-| `Ctrl+T` / `Ctrl+W` | New tab / close tab |
+| `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
+| `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 
 Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `information_schema.tables`.

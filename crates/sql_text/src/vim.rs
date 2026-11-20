@@ -350,6 +350,12 @@ impl Vim {
             }
             return Outcome::handled(Vec::new());
         }
+        if key == Key::Ctrl('w') {
+            // Vim's window prefix; there are no windows here, and the editor's own
+            // ctrl-w would delete a word outside insert mode.
+            self.pending.clear();
+            return Outcome::handled(Vec::new());
+        }
         if let Key::Ctrl(character) = key
             && !matches!(character, 'r' | 'd' | 'u')
         {
@@ -2102,6 +2108,34 @@ mod tests {
             outcome.handled,
             "unbound printable keys never reach the text"
         );
+    }
+
+    #[test]
+    fn ctrl_w_is_left_to_the_editor_only_in_insert_mode() {
+        let mut vim = Vim::default();
+        let normal = vim.handle_key(
+            Key::Ctrl('w'),
+            Buffer {
+                text: "a b",
+                cursor: 2,
+            },
+        );
+        assert_eq!(normal, Outcome::handled(Vec::new()));
+        vim.handle_key(
+            Key::Char('i'),
+            Buffer {
+                text: "a b",
+                cursor: 2,
+            },
+        );
+        let insert = vim.handle_key(
+            Key::Ctrl('w'),
+            Buffer {
+                text: "a b",
+                cursor: 2,
+            },
+        );
+        assert!(!insert.handled);
     }
 
     #[test]

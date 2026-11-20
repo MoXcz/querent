@@ -7,6 +7,7 @@ mod themes;
 mod tokio_bridge;
 mod workspace;
 
+use gpui_kit::component::input::DeleteToPreviousWordStart;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
@@ -47,9 +48,9 @@ fn main() -> anyhow::Result<()> {
 
 fn bind_keys(cx: &mut App) {
     let (run, run_all, new_tab, close_tab) = if cfg!(target_os = "macos") {
-        ("cmd-enter", "cmd-shift-enter", "cmd-t", "cmd-w")
+        ("cmd-enter", "cmd-shift-enter", "cmd-n", "cmd-w")
     } else {
-        ("ctrl-enter", "ctrl-shift-enter", "ctrl-t", "ctrl-w")
+        ("ctrl-enter", "ctrl-shift-enter", "ctrl-n", "ctrl-shift-w")
     };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
@@ -61,6 +62,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", ExportCsv, Some(KEY_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
+        // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.
+        KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
         KeyBinding::new("ctrl-tab", NextTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("ctrl-pagedown", NextTab, Some(WORKSPACE_CONTEXT)),
