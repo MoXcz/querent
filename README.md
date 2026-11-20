@@ -17,14 +17,27 @@ Add a connection with `+` in the Connections sidebar: give it a name and paste a
 Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Authentication=ActiveDirectoryInteractive
 ```
 
-A bare server name also works; then type the warehouse or lakehouse name in the tab's database field. Connections are saved in `~/.config/sql-editor/connections.toml`. Sign-in uses your `az login` session whatever Entra method the string names; SQL logins and other sign-in methods are not supported yet.
+The URL form works too:
+
+```text
+sqlserver://<client_id>%40<tenant_id>:<secret>@xxxx.datawarehouse.fabric.microsoft.com:1433?database=my_warehouse&fedauth=ActiveDirectoryServicePrincipal
+```
+
+A bare server name also works; then type the warehouse or lakehouse name in the tab's database field.
+
+| Authentication / fedauth | Sign-in |
+| --- | --- |
+| `ActiveDirectoryDefault`, `ActiveDirectoryInteractive` and other Entra methods | your `az login` session |
+| `ActiveDirectoryServicePrincipal` | client ID and secret from the string; the user is `client_id@tenant_id` (`%40` in the URL form), or add `tenant id=...` |
+
+SQL logins are not supported yet. Connections are saved in `~/.config/sql-editor/connections.toml`, readable only by you, because a service principal string contains its secret.
 
 Click a connection to use it in the current tab, write SQL, and press `Ctrl+Enter`.
 
 Without the UI:
 
 ```sh
-cargo run -p sql_db --example fabric -- <host> <database> "select top 10 * from sys.tables"
+cargo run -p sql_db --example fabric -- "<connection string>" "select top 10 * from sys.tables"
 ```
 
 Keys:

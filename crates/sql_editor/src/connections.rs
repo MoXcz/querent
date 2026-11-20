@@ -1,6 +1,7 @@
 //! Saved connections in `<config dir>/connections.toml`.
 //!
-//! Only Entra ID connection strings are accepted, so the file holds no secrets.
+//! Service principal connection strings carry a client secret, so the file is
+//! owner-only (0600) until the secret can move to the OS keychain.
 
 use std::path::{Path, PathBuf};
 
@@ -128,8 +129,29 @@ fn write(path: &Path, file: &ConnectionsFile) -> anyhow::Result<()> {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("creating {}", directory.display()))?;
     }
-    std::fs::write(path, toml::to_string_pretty(file)?)
-        .with_context(|| format!("writing {}", path.display()))
+    let text = toml::to_string_pretty(file)?;
+    write_owner_only(path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+}
+
+#[cfg(unix)]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // `mode` only applies when creating; tighten a file made by an older version.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(bytes)
+}
+
+#[cfg(not(unix))]
+fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)
 }
 
 #[cfg(test)]

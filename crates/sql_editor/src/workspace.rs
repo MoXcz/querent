@@ -1,4 +1,3 @@
-use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputState};
@@ -95,7 +94,7 @@ impl Workspace {
         });
         let string_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=...;Authentication=ActiveDirectoryInteractive")
+                .placeholder("Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=...;Authentication=ActiveDirectoryDefault")
                 .default_value(
                     editing
                         .as_ref()
@@ -203,7 +202,7 @@ impl Workspace {
                                 Button::new(SharedString::from(format!("edit-connection-{index}")))
                                     .ghost()
                                     .xsmall()
-                                    .icon(AssetIcon::SquarePen)
+                                    .icon(IconName::Settings2)
                                     .tooltip("Edit")
                                     .on_click(cx.listener(move |_, _, window, cx| {
                                         cx.stop_propagation();

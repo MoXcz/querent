@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use azure_core::credentials::TokenCredential;
-use azure_identity::DeveloperToolsCredential;
+use std::sync::Arc;
+
+use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
 use mssql_tds::connection::client_context::{ClientContext, TdsAuthenticationMethod};
 use mssql_tds::connection::tds_client::{
     ExecuteOptions, ResultSet as _, StatementResult, TdsClient,
@@ -21,6 +23,37 @@ const APPLICATION_NAME: &str = "sql-editor";
 const TRANSIENT_ERRORS: [u32; 3] = [24804, 6005, 6008];
 const CONNECT_ATTEMPTS: u32 = 2;
 
+/// How to get the Entra ID token for the connection.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum EntraAuth {
+    /// The signed-in Azure CLI (or Azure Developer CLI) session.
+    #[default]
+    AzureCli,
+    /// Client credentials of an app registration.
+    ServicePrincipal {
+        tenant_id: String,
+        client_id: String,
+        client_secret: String,
+    },
+}
+
+impl std::fmt::Debug for EntraAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AzureCli => formatter.write_str("AzureCli"),
+            Self::ServicePrincipal {
+                tenant_id,
+                client_id,
+                ..
+            } => formatter
+                .debug_struct("ServicePrincipal")
+                .field("tenant_id", tenant_id)
+                .field("client_id", client_id)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FabricConfig {
     /// SQL endpoint host, e.g. `xxxx.datawarehouse.fabric.microsoft.com`.
@@ -28,6 +61,7 @@ pub struct FabricConfig {
     pub port: u16,
     /// Warehouse or lakehouse name.
     pub database: String,
+    pub auth: EntraAuth,
     /// Rows kept per result set; the rest are skipped and the set is marked truncated.
     pub max_rows: usize,
 }
@@ -39,6 +73,7 @@ impl FabricConfig {
             host: host.into(),
             port: 1433,
             database: database.into(),
+            auth: EntraAuth::AzureCli,
             max_rows: 50_000,
         }
     }
@@ -62,7 +97,7 @@ impl TdsConnection {
     /// Signs in with the Azure CLI / Azure Developer CLI session (`az login`).
     #[tracing::instrument(skip_all, fields(host = %config.host, database = %config.database))]
     pub async fn connect_fabric(config: FabricConfig) -> Result<Self, QueryError> {
-        let token = fetch_token().await?;
+        let token = fetch_token(&config.auth).await?;
         let mut last_error = None;
         for attempt in 1..=CONNECT_ATTEMPTS {
             match open_client(&config, &token).await {
@@ -72,7 +107,12 @@ impl TdsConnection {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     last_error = Some(error);
                 }
-                Err(error) => return Err(QueryError::Connect(error.to_string())),
+                Err(error) => {
+                    return Err(QueryError::Connect(format!(
+                        "{}:{}: {error}",
+                        config.host, config.port
+                    )));
+                }
             }
         }
         Err(QueryError::Connect(last_error.map_or_else(
@@ -125,13 +165,32 @@ impl TdsConnection {
     }
 }
 
-async fn fetch_token() -> Result<String, QueryError> {
-    let credential =
-        DeveloperToolsCredential::new(None).map_err(|error| QueryError::Auth(error.to_string()))?;
+async fn fetch_token(auth: &EntraAuth) -> Result<String, QueryError> {
+    let auth_error = |error: azure_core::Error| QueryError::Auth(error.to_string());
+    let (credential, hint): (Arc<dyn TokenCredential>, &str) = match auth {
+        EntraAuth::AzureCli => (
+            DeveloperToolsCredential::new(None).map_err(auth_error)?,
+            " Run `az login` and try again.",
+        ),
+        EntraAuth::ServicePrincipal {
+            tenant_id,
+            client_id,
+            client_secret,
+        } => (
+            ClientSecretCredential::new(
+                tenant_id,
+                client_id.clone(),
+                client_secret.clone().into(),
+                None,
+            )
+            .map_err(auth_error)?,
+            " Check the service principal's tenant, client ID and secret.",
+        ),
+    };
     let token = credential
         .get_token(&[SQL_SCOPE], None)
         .await
-        .map_err(|error| QueryError::Auth(format!("{error}. Run `az login` and try again.")))?;
+        .map_err(|error| QueryError::Auth(format!("{error}.{hint}")))?;
     Ok(token.token.secret().to_owned())
 }
 

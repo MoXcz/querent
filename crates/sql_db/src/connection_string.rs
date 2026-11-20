@@ -1,7 +1,7 @@
 //! ADO.NET-style SQL Server connection strings, as SSMS, Azure Data Studio and
 //! the Fabric portal produce them.
 
-use crate::FabricConfig;
+use crate::{EntraAuth, FabricConfig};
 
 const DEFAULT_PORT: u16 = 1433;
 
@@ -16,11 +16,13 @@ pub enum ConnectionStringError {
     #[error("unterminated quote in the value of {0}")]
     UnterminatedQuote(String),
     #[error(
-        "Authentication={0} is not supported yet; use an Entra ID method such as ActiveDirectoryInteractive or ActiveDirectoryDefault"
+        "Authentication={0} is not supported yet; use ActiveDirectoryDefault, ActiveDirectoryInteractive or ActiveDirectoryServicePrincipal"
     )]
     UnsupportedAuthentication(String),
     #[error("SQL logins (User ID and Password) are not supported yet; use Entra ID authentication")]
     SqlLoginNotSupported,
+    #[error("a service principal connection string needs a {0}")]
+    ServicePrincipalField(&'static str),
 }
 
 /// Entra methods that can use the signed-in Azure CLI session's token.
@@ -31,57 +33,173 @@ const ENTRA_METHODS: [&str; 5] = [
     "activedirectorydevicecodeflow",
     "activedirectorymanagedidentity",
 ];
+const SERVICE_PRINCIPAL: &str = "activedirectoryserviceprincipal";
 
-/// Parses a connection string into a Fabric/SQL Server target.
-///
-/// A string with no `=` is taken as a bare server name, which is what the Fabric
-/// portal's "SQL connection string" copy button gives; the database then comes
-/// from elsewhere, so it may be empty.
-pub fn parse_connection_string(text: &str) -> Result<FabricConfig, ConnectionStringError> {
-    let text = text.trim();
-    if !text.contains('=') {
-        let (host, port) = parse_server(text)?;
-        return Ok(FabricConfig {
-            port,
-            ..FabricConfig::new(host, "")
-        });
-    }
+#[derive(Debug, Default)]
+struct Fields {
+    server: Option<String>,
+    database: Option<String>,
+    authentication: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+    tenant: Option<String>,
+}
 
-    let mut server = None;
-    let mut database = None;
-    let mut authentication = None;
-    let mut has_user = false;
-    for (key, value) in pairs(text)? {
-        match normalize_key(&key).as_str() {
+impl Fields {
+    fn set(&mut self, key: &str, value: String) {
+        match normalize_key(key).as_str() {
             "server" | "datasource" | "address" | "addr" | "networkaddress" => {
-                server = Some(value);
+                self.server = Some(value);
             }
-            "database" | "initialcatalog" => database = Some(value),
-            "authentication" => authentication = Some(value),
-            "userid" | "uid" | "user" => has_user = !value.is_empty(),
+            "database" | "initialcatalog" => self.database = Some(value),
+            "authentication" | "fedauth" => self.authentication = Some(value),
+            "userid" | "uid" | "user" => self.user = Some(value),
+            "password" | "pwd" => self.password = Some(value),
+            "tenantid" | "tenant" => self.tenant = Some(value),
             _ => {}
         }
     }
+}
 
-    match authentication {
-        Some(method) => {
-            if !ENTRA_METHODS.contains(&normalize_key(&method).as_str()) {
-                return Err(ConnectionStringError::UnsupportedAuthentication(method));
-            }
+/// Parses a connection string into a Fabric/SQL Server target.
+///
+/// Accepts ADO.NET form (`Server=...;Database=...`), URL form
+/// (`sqlserver://user:password@host:port?database=...&fedauth=...`), or a
+/// bare server name, which is what the Fabric portal's copy button gives; the
+/// database then comes from elsewhere, so it may be empty.
+pub fn parse_connection_string(text: &str) -> Result<FabricConfig, ConnectionStringError> {
+    let text = text.trim();
+    let fields = if has_url_scheme(text) {
+        url_fields(text)
+    } else if text.contains('=') {
+        let mut fields = Fields::default();
+        for (key, value) in pairs(text)? {
+            fields.set(&key, value);
         }
-        None if has_user => return Err(ConnectionStringError::SqlLoginNotSupported),
-        None => {}
-    }
+        fields
+    } else {
+        Fields {
+            server: Some(text.to_owned()),
+            ..Fields::default()
+        }
+    };
+    build(fields)
+}
 
-    let server = server
+fn build(fields: Fields) -> Result<FabricConfig, ConnectionStringError> {
+    let auth = match fields.authentication.as_deref().map(normalize_key) {
+        None if fields.user.as_deref().is_some_and(|user| !user.is_empty()) => {
+            return Err(ConnectionStringError::SqlLoginNotSupported);
+        }
+        None => EntraAuth::AzureCli,
+        Some(method) if ENTRA_METHODS.contains(&method.as_str()) => EntraAuth::AzureCli,
+        Some(method) if method == SERVICE_PRINCIPAL => service_principal(&fields)?,
+        Some(_) => {
+            return Err(ConnectionStringError::UnsupportedAuthentication(
+                fields.authentication.unwrap_or_default(),
+            ));
+        }
+    };
+    let server = fields
+        .server
         .filter(|server| !server.is_empty())
         .ok_or(ConnectionStringError::MissingServer)?;
     let (host, port) = parse_server(&server)?;
-    let database = database.unwrap_or_default();
     Ok(FabricConfig {
         port,
-        ..FabricConfig::new(host, database)
+        auth,
+        ..FabricConfig::new(host, fields.database.unwrap_or_default())
     })
+}
+
+/// The client ID is the user, as `client_id@tenant_id` or with a separate tenant field.
+fn service_principal(fields: &Fields) -> Result<EntraAuth, ConnectionStringError> {
+    let user = fields.user.clone().filter(|user| !user.is_empty()).ok_or(
+        ConnectionStringError::ServicePrincipalField("client ID (the user)"),
+    )?;
+    let (client_id, tenant_id) = match (user.split_once('@'), &fields.tenant) {
+        (_, Some(tenant)) if !tenant.is_empty() => (user.clone(), tenant.clone()),
+        (Some((client, tenant)), _) => (client.to_owned(), tenant.to_owned()),
+        (None, _) => {
+            return Err(ConnectionStringError::ServicePrincipalField(
+                "tenant ID (write the user as client_id@tenant_id)",
+            ));
+        }
+    };
+    let client_secret = fields
+        .password
+        .clone()
+        .filter(|password| !password.is_empty())
+        .ok_or(ConnectionStringError::ServicePrincipalField(
+            "client secret (the password)",
+        ))?;
+    Ok(EntraAuth::ServicePrincipal {
+        tenant_id,
+        client_id,
+        client_secret,
+    })
+}
+
+fn has_url_scheme(text: &str) -> bool {
+    text.get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sqlserver://"))
+}
+
+/// `sqlserver://[user[:password]@]host[:port][/instance][?key=value&...]`, as go-mssqldb and ADBC use.
+fn url_fields(text: &str) -> Fields {
+    let rest = text.get(12..).unwrap_or_default();
+    let (before_query, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let authority = before_query.split('/').next().unwrap_or_default();
+    let (user_info, host_port) = match authority.rsplit_once('@') {
+        Some((user_info, host_port)) => (Some(user_info), host_port),
+        None => (None, authority),
+    };
+    let mut fields = Fields::default();
+    if let Some(user_info) = user_info {
+        let (user, password) = match user_info.split_once(':') {
+            Some((user, password)) => (user, Some(password)),
+            None => (user_info, None),
+        };
+        fields.user = Some(percent_decode(user));
+        fields.password = password.map(percent_decode);
+    }
+    let server = match host_port.rsplit_once(':') {
+        Some((host, port)) => format!("{host},{port}"),
+        None => host_port.to_owned(),
+    };
+    fields.server = Some(percent_decode(&server));
+    for parameter in query.split('&').filter(|parameter| !parameter.is_empty()) {
+        let (key, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        fields.set(&percent_decode(key), percent_decode(value));
+    }
+    fields
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        let hex = bytes
+            .get(index + 1..index + 3)
+            .and_then(|digits| std::str::from_utf8(digits).ok())
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok());
+        match (byte, hex) {
+            (b'%', Some(value)) => {
+                decoded.push(value);
+                index += 3;
+            }
+            (b'+', _) => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            _ => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// Requires a database, for callers with no other place to get one.
@@ -216,6 +334,72 @@ mod tests {
             parse_connection_string_with_database("abc.datawarehouse.fabric.microsoft.com"),
             Err(ConnectionStringError::MissingDatabase)
         );
+    }
+
+    #[test]
+    fn parses_url_form_with_service_principal() {
+        let config = parse_connection_string(
+            "sqlserver://client-id%40x:s%3Acret@abc.datawarehouse.fabric.microsoft.com:1433\
+             ?database=analytics&fedauth=ActiveDirectoryServicePrincipal&tenant%20id=tenant-1",
+        )
+        .unwrap();
+        assert_eq!(config.host, "abc.datawarehouse.fabric.microsoft.com");
+        assert_eq!(config.port, 1433);
+        assert_eq!(config.database, "analytics");
+        assert_eq!(
+            config.auth,
+            EntraAuth::ServicePrincipal {
+                tenant_id: "tenant-1".to_owned(),
+                client_id: "client-id@x".to_owned(),
+                client_secret: "s:cret".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn service_principal_tenant_can_follow_the_client_id() {
+        let config = parse_connection_string(
+            "Server=h;Authentication=Active Directory Service Principal;User ID=app@tenant;Password=pw",
+        )
+        .unwrap();
+        assert_eq!(
+            config.auth,
+            EntraAuth::ServicePrincipal {
+                tenant_id: "tenant".to_owned(),
+                client_id: "app".to_owned(),
+                client_secret: "pw".to_owned(),
+            }
+        );
+        assert!(matches!(
+            parse_connection_string("sqlserver://app:pw@h?fedauth=ActiveDirectoryServicePrincipal"),
+            Err(ConnectionStringError::ServicePrincipalField(_))
+        ));
+        assert!(matches!(
+            parse_connection_string(
+                "sqlserver://app%40t@h?fedauth=ActiveDirectoryServicePrincipal"
+            ),
+            Err(ConnectionStringError::ServicePrincipalField(_))
+        ));
+    }
+
+    #[test]
+    fn url_form_without_credentials_uses_az_login() {
+        let config = parse_connection_string(
+            "SQLSERVER://h.example?database=d&fedauth=ActiveDirectoryDefault",
+        )
+        .unwrap();
+        assert_eq!((config.host.as_str(), config.port), ("h.example", 1433));
+        assert_eq!(config.auth, EntraAuth::AzureCli);
+    }
+
+    #[test]
+    fn service_principal_secret_is_not_printed() {
+        let auth = EntraAuth::ServicePrincipal {
+            tenant_id: "t".to_owned(),
+            client_id: "c".to_owned(),
+            client_secret: "hunter2".to_owned(),
+        };
+        assert!(!format!("{auth:?}").contains("hunter2"));
     }
 
     #[test]
