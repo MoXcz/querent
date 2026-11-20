@@ -13,6 +13,7 @@ use mssql_tds::connection::tds_client::{
 use mssql_tds::connection_provider::tds_connection_provider::TdsConnectionProvider;
 use mssql_tds::core::{EncryptionSetting, TdsResult};
 use mssql_tds::datatypes::column_values::ColumnValues;
+use mssql_tds::datatypes::sql_string::SqlString;
 use mssql_tds::error::Error as TdsError;
 
 use crate::{CancelHandle, Column, QueryError, QueryOutput, ResultSet, Value};
@@ -304,7 +305,7 @@ fn to_value(value: ColumnValues) -> Value {
         ColumnValues::Money(money) => Value::Decimal(format_money(
             (i64::from(money.msb_part) << 32) | i64::from(money.lsb_part.cast_unsigned()),
         )),
-        ColumnValues::String(text) => Value::Text(text.to_string()),
+        ColumnValues::String(text) => Value::Text(decode_sql_string(text)),
         ColumnValues::Xml(xml) => Value::Text(xml.as_string()),
         ColumnValues::Json(json) => Value::Text(String::from_utf8_lossy(&json.bytes).into_owned()),
         ColumnValues::Uuid(uuid) => Value::Text(uuid.to_string()),
@@ -373,6 +374,16 @@ fn format_timestamp_i128(days_since_0001: i64, nanoseconds: i128, scale: u8) -> 
         format_date(i64::try_from(days).unwrap_or(days_since_0001)),
         format_time(u64::try_from(time_of_day).unwrap_or(0), scale)
     )
+}
+
+/// mssql-tds's own `Display` prints `char`/`varchar` with a legacy collation as a
+/// byte list, and `to_utf8_string` panics on invalid UTF-8; decode lossily instead.
+fn decode_sql_string(text: SqlString) -> String {
+    let (bytes, encoding) = text.into_parts();
+    match encoding.encoding() {
+        Some(encoding) => encoding.decode_without_bom_handling(&bytes).0.into_owned(),
+        None => String::from_utf8_lossy(&bytes).into_owned(),
+    }
 }
 
 /// Days from 0001-01-01 to 1900-01-01 in the proleptic Gregorian calendar.
