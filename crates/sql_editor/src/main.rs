@@ -1,5 +1,7 @@
 mod query_window;
 mod results_table;
+mod settings;
+mod themes;
 mod tokio_bridge;
 
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
@@ -24,6 +26,7 @@ fn main() -> anyhow::Result<()> {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            themes::init(cx);
             cx.set_global(runtime);
             bind_keys(cx);
             open_main_window(cx);

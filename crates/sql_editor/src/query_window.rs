@@ -4,19 +4,22 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
+use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Task, Window, actions, div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Task, Window, actions, div,
+    px,
 };
 use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, TdsConnection};
 use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::results_table::ResultsTable;
+use crate::themes::{self, SelectTheme};
 use crate::tokio_bridge;
 
 actions!(
@@ -355,7 +358,7 @@ impl QueryWindow {
 }
 
 impl Focusable for QueryWindow {
-    fn focus_handle(&self, _: &gpui_kit::App) -> FocusHandle {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
@@ -386,15 +389,38 @@ impl Render for QueryWindow {
             )
             .child(
                 h_flex()
+                    .justify_between()
                     .px_2()
                     .py_1()
                     .border_t_1()
-                    .border_color(cx.theme().border)
+                    .border_color(cx.theme().status_bar_border)
+                    .bg(cx.theme().status_bar)
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(self.status_text()),
+                    .child(self.status_text())
+                    .child(render_theme_picker(cx)),
             )
     }
+}
+
+fn render_theme_picker(cx: &App) -> impl IntoElement {
+    let selected = themes::selected(cx);
+    let names = themes::names(cx);
+    Button::new("theme-picker")
+        .ghost()
+        .xsmall()
+        .label(selected.clone())
+        .tooltip("Theme")
+        .dropdown_menu(move |mut menu, _, _| {
+            for name in &names {
+                menu = menu.menu_with_check(
+                    name.clone(),
+                    *name == selected,
+                    Box::new(SelectTheme(name.clone())),
+                );
+            }
+            menu
+        })
 }
 
 /// "line 3" or "lines 3–5", 1-based, for the byte range that ran.

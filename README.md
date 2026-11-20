@@ -1,6 +1,6 @@
 # sql-editor
 
-A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). Version 0.0.1 runs queries against Microsoft Fabric Warehouse and Lakehouse SQL endpoints. `ROADMAP.md` lists what comes next.
+A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against Microsoft Fabric Warehouse and Lakehouse SQL endpoints. `ROADMAP.md` lists what comes next.
 
 ## Run
 
@@ -11,7 +11,7 @@ az login
 cargo run --release
 ```
 
-Fill in the SQL endpoint host (Fabric: workspace settings, or the item's "SQL connection string") and the warehouse or lakehouse name, write SQL, and press `Ctrl+Enter`. With text selected, only the selection runs.
+Fill in the SQL endpoint host (Fabric: workspace settings, or the item's "SQL connection string") and the warehouse or lakehouse name, write SQL, and press `Ctrl+Enter`.
 
 To prefill the connection fields:
 
@@ -27,7 +27,13 @@ Without the UI:
 cargo run -p sql_db --example fabric -- <host> <database> "select top 10 * from sys.tables"
 ```
 
+Keys: `Ctrl+Enter` runs the selection or the statement under the cursor, `Ctrl+Shift+Enter` runs everything, `Ctrl+Shift+C` cancels.
+
 Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `information_schema.tables`.
+
+## Themes
+
+Solitude is built in and is the default. Pick a theme from the status bar; the choice is saved in `~/.config/sql-editor/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/sql-editor/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
 
 ## Linux build dependencies
 
