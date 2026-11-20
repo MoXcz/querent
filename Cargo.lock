@@ -6494,10 +6494,15 @@ dependencies = [
  "anyhow",
  "gpui-kit",
  "sql_db",
+ "sql_text",
  "tokio",
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "sql_text"
+version = "0.0.1"
 
 [[package]]
 name = "stable_deref_trait"

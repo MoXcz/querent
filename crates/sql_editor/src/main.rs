@@ -5,7 +5,7 @@ mod tokio_bridge;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
-use crate::query_window::{CancelQuery, QueryWindow, RunQuery};
+use crate::query_window::{CancelQuery, QueryWindow, RunAll, RunQuery};
 
 const KEY_CONTEXT: &str = "SqlEditor";
 
@@ -33,15 +33,17 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn bind_keys(cx: &mut App) {
-    let run = if cfg!(target_os = "macos") {
-        "cmd-enter"
+    let (run, run_all) = if cfg!(target_os = "macos") {
+        ("cmd-enter", "cmd-shift-enter")
     } else {
-        "ctrl-enter"
+        ("ctrl-enter", "ctrl-shift-enter")
     };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
         KeyBinding::new(run, RunQuery, Some(KEY_CONTEXT)),
         KeyBinding::new(run, RunQuery, Some("Input")),
+        KeyBinding::new(run_all, RunAll, Some(KEY_CONTEXT)),
+        KeyBinding::new(run_all, RunAll, Some("Input")),
         KeyBinding::new("ctrl-shift-c", CancelQuery, Some(KEY_CONTEXT)),
     ]);
 }

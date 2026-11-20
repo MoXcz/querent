@@ -606,7 +606,7 @@ mod tests {
 
     #[test]
     fn picks_statement_under_cursor() {
-        assert_eq!(statement_at("select 1;\nselect 2;", 12), Some(10..19));
+        assert_eq!(statement_at("select 1;\nselect 2;", 12), Some(10..18));
     }
 }
 ```

@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -21,8 +22,10 @@ use crate::tokio_bridge;
 actions!(
     sql_editor,
     [
-        /// Run the selected SQL, or the whole editor when nothing is selected.
+        /// Run the selected SQL, or the statement under the cursor.
         RunQuery,
+        /// Run everything in the editor.
+        RunAll,
         /// Ask the server to stop the running query.
         CancelQuery
     ]
@@ -60,6 +63,8 @@ pub struct QueryWindow {
     connection: Option<SharedConnection>,
     state: QueryState,
     running_query: Option<Task<()>>,
+    /// Which lines the last run sent, shown in the status line.
+    ran_lines: Option<SharedString>,
 }
 
 impl QueryWindow {
@@ -95,6 +100,7 @@ impl QueryWindow {
             connection: None,
             state: QueryState::Idle,
             running_query: None,
+            ran_lines: None,
         }
     }
 
@@ -107,32 +113,59 @@ impl QueryWindow {
         Ok(FabricConfig::new(host, database))
     }
 
-    fn sql_to_run(&self, cx: &Context<Self>) -> String {
+    /// The selection if there is one, else the statement under the cursor.
+    fn sql_under_cursor(&self, cx: &Context<Self>) -> Option<(String, Range<usize>)> {
         let editor = self.editor.read(cx);
-        let selected = editor.selected_value();
-        if selected.trim().is_empty() {
-            editor.value().to_string()
+        let text = editor.value();
+        let selection = editor.selected_range();
+        let range = if selection.is_empty() {
+            sql_text::statement_at(&text, editor.cursor())?
         } else {
-            selected.to_string()
-        }
+            selection
+        };
+        let sql = text.get(range.clone())?;
+        (!sql.trim().is_empty()).then(|| (sql.to_owned(), range))
     }
 
     fn run_query(&mut self, _: &RunQuery, window: &mut Window, cx: &mut Context<Self>) {
+        match self.sql_under_cursor(cx) {
+            Some((sql, range)) => {
+                let text = self.editor.read(cx).value();
+                self.ran_lines = Some(line_span(&text, &range));
+                self.start_query(sql, window, cx);
+            }
+            None => self.show_error("No statement under the cursor.".into(), cx),
+        }
+    }
+
+    fn run_all(&mut self, _: &RunAll, window: &mut Window, cx: &mut Context<Self>) {
+        let sql = self.editor.read(cx).value().to_string();
+        if sql.trim().is_empty() {
+            return;
+        }
+        self.ran_lines = Some("all".into());
+        self.start_query(sql, window, cx);
+    }
+
+    fn show_error(&mut self, message: SharedString, cx: &mut Context<Self>) {
+        if matches!(self.state, QueryState::Running { .. }) {
+            return;
+        }
+        self.state = QueryState::Failed { message };
+        cx.notify();
+    }
+
+    fn start_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.state, QueryState::Running { .. }) {
             return;
         }
         let config = match self.connection_config(cx) {
             Ok(config) => config,
             Err(message) => {
-                self.state = QueryState::Failed { message };
-                cx.notify();
+                self.show_error(message, cx);
                 return;
             }
         };
-        let sql = self.sql_to_run(cx);
-        if sql.trim().is_empty() {
-            return;
-        }
 
         let reusable = self.connection.clone().filter(|connection| {
             connection
@@ -245,7 +278,7 @@ impl QueryWindow {
                     .primary()
                     .small()
                     .label("Run")
-                    .tooltip("Run selection or whole editor (Ctrl+Enter)")
+                    .tooltip("Run statement under cursor or selection (Ctrl+Enter). Run all: Ctrl+Shift+Enter")
                     .disabled(running)
                     .on_click(
                         cx.listener(|this, _, window, cx| this.run_query(&RunQuery, window, cx)),
@@ -293,6 +326,9 @@ impl QueryWindow {
             QueryState::Failed { .. } => "Failed".to_owned(),
             QueryState::Done { output, elapsed } => {
                 let mut parts = Vec::new();
+                if let Some(ran_lines) = &self.ran_lines {
+                    parts.push(ran_lines.to_string());
+                }
                 if let Some(result_set) = output.result_sets.last() {
                     parts.push(format!("{} rows", result_set.rows.len()));
                     if result_set.truncated {
@@ -331,6 +367,7 @@ impl Render for QueryWindow {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::run_query))
+            .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::cancel_query))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
@@ -357,5 +394,33 @@ impl Render for QueryWindow {
                     .text_color(cx.theme().muted_foreground)
                     .child(self.status_text()),
             )
+    }
+}
+
+/// "line 3" or "lines 3–5", 1-based, for the byte range that ran.
+fn line_span(text: &str, range: &Range<usize>) -> SharedString {
+    let line_of = |offset: usize| {
+        text.get(..offset)
+            .map_or(0, |before| before.matches('\n').count())
+            + 1
+    };
+    let first = line_of(range.start);
+    let last = line_of(range.end);
+    if first == last {
+        format!("line {first}").into()
+    } else {
+        format!("lines {first}–{last}").into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_line_span() {
+        let text = "select 1;\nselect\n  2;";
+        assert_eq!(line_span(text, &(0..8)), "line 1");
+        assert_eq!(line_span(text, &(10..20)), "lines 2–3");
     }
 }
