@@ -188,6 +188,31 @@ impl QueryTab {
         self.fill_default_database(name, window, cx);
     }
 
+    pub fn set_database(&mut self, database: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.database_input.update(cx, |input, cx| {
+            input.set_value(database.to_owned(), window, cx);
+        });
+        cx.notify();
+    }
+
+    pub fn set_sql(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.set_value(sql.to_owned(), window, cx);
+        });
+    }
+
+    /// Inserts at the editor's cursor, replacing any selection.
+    pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            editor.replace(text.to_owned(), window, cx);
+            editor.focus(window, cx);
+        });
+    }
+
+    pub fn run_everything(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.run_all(&RunAll, window, cx);
+    }
+
     fn on_connection_selected(
         &mut self,
         _: &Entity<ConnectionSelect>,

@@ -14,6 +14,8 @@ pub struct Settings {
     /// Name of the theme to apply; `None` means the built-in default.
     pub theme: Option<String>,
     pub vim_mode: bool,
+    /// Object explorer shows schema folders, or `schema.name` in one list.
+    pub explorer_group_by_schema: bool,
 }
 
 impl Default for Settings {
@@ -21,6 +23,7 @@ impl Default for Settings {
         Self {
             theme: None,
             vim_mode: true,
+            explorer_group_by_schema: true,
         }
     }
 }
@@ -106,6 +109,7 @@ mod tests {
         let settings = Settings {
             theme: Some("Solitude".to_owned()),
             vim_mode: false,
+            explorer_group_by_schema: false,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);

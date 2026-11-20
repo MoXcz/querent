@@ -4,15 +4,16 @@ use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, h_resizable, resizable_panel,
+    v_flex,
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled as _, Subscription, Window, actions, div, prelude::FluentBuilder as _, px,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div, px,
 };
 
 use crate::connections::{self, SavedConnection};
+use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
 use crate::settings;
 use crate::themes::{self, SelectTheme};
@@ -42,14 +43,20 @@ pub struct Workspace {
     tabs: Vec<OpenTab>,
     active_index: usize,
     next_tab_number: usize,
+    explorer: Entity<ObjectExplorer>,
+    _explorer_subscription: Subscription,
 }
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let explorer = cx.new(|cx| ObjectExplorer::new(window, cx));
+        let explorer_subscription = cx.subscribe_in(&explorer, window, Self::on_explorer_event);
         let mut workspace = Self {
             tabs: Vec::new(),
             active_index: 0,
             next_tab_number: 1,
+            explorer,
+            _explorer_subscription: explorer_subscription,
         };
         let first_connection = connections::names(cx).into_iter().next();
         let fields = ConnectionFields {
@@ -61,6 +68,59 @@ impl Workspace {
             tab.update(cx, |tab, cx| tab.use_connection(&name, window, cx));
         }
         workspace
+    }
+
+    fn on_explorer_event(
+        &mut self,
+        _: &Entity<ObjectExplorer>,
+        event: &ExplorerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ExplorerEvent::UseConnection {
+                connection,
+                database,
+            } => {
+                self.use_connection_in_active_tab(connection, window, cx);
+                if let (Some(database), Some(tab)) = (database, self.active_tab().cloned()) {
+                    tab.update(cx, |tab, cx| tab.set_database(database, window, cx));
+                }
+            }
+            ExplorerEvent::OpenQuery {
+                connection,
+                database,
+                sql,
+                run,
+            } => {
+                self.open_tab(
+                    ConnectionFields {
+                        connection: Some(connection.clone()),
+                        database: database.to_string(),
+                    },
+                    window,
+                    cx,
+                );
+                if let Some(tab) = self.active_tab().cloned() {
+                    tab.update(cx, |tab, cx| {
+                        tab.set_database(database, window, cx);
+                        tab.set_sql(sql, window, cx);
+                        if *run {
+                            tab.run_everything(window, cx);
+                        }
+                    });
+                }
+            }
+            ExplorerEvent::InsertText(text) => {
+                if let Some(tab) = self.active_tab().cloned() {
+                    tab.update(cx, |tab, cx| tab.insert_text(text, window, cx));
+                }
+            }
+            ExplorerEvent::AddConnection => Self::open_connection_dialog(None, window, cx),
+            ExplorerEvent::EditConnection(saved) => {
+                Self::open_connection_dialog(Some(saved.clone()), window, cx);
+            }
+        }
     }
 
     fn use_connection_in_active_tab(
@@ -169,108 +229,6 @@ impl Workspace {
                 })
         });
         window.defer(cx, move |window, cx| name_focus.focus(window, cx));
-    }
-
-    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let active_connection = self
-            .active_tab()
-            .and_then(|tab| tab.read(cx).connection_fields(cx).connection);
-        let rows = connections::all(cx)
-            .iter()
-            .enumerate()
-            .map(|(index, saved)| {
-                let name = SharedString::from(saved.name.clone());
-                let is_active = active_connection.as_ref() == Some(&name);
-                let editing = saved.clone();
-                let removing = saved.name.clone();
-                h_flex()
-                    .id(SharedString::from(format!("connection-{index}")))
-                    .group("connection-row")
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .rounded(cx.theme().radius)
-                    .cursor_pointer()
-                    .when(is_active, |row| row.bg(cx.theme().accent))
-                    .hover(|row| row.bg(cx.theme().list_hover))
-                    .child(div().truncate().child(name.clone()))
-                    .child(
-                        h_flex()
-                            .invisible()
-                            .group_hover("connection-row", StyleRefinement::visible)
-                            .child(
-                                Button::new(SharedString::from(format!("edit-connection-{index}")))
-                                    .ghost()
-                                    .xsmall()
-                                    .icon(IconName::Settings2)
-                                    .tooltip("Edit")
-                                    .on_click(cx.listener(move |_, _, window, cx| {
-                                        cx.stop_propagation();
-                                        Self::open_connection_dialog(
-                                            Some(editing.clone()),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "delete-connection-{index}"
-                                )))
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Delete)
-                                .tooltip("Delete")
-                                .on_click(cx.listener(
-                                    move |_, _, _, cx| {
-                                        cx.stop_propagation();
-                                        connections::remove(cx, &removing);
-                                    },
-                                )),
-                            ),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.use_connection_in_active_tab(&name, window, cx);
-                    }))
-            });
-        v_flex()
-            .w(px(220.))
-            .h_full()
-            .flex_shrink_0()
-            .border_r_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().sidebar)
-            .text_sm()
-            .child(
-                h_flex()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("CONNECTIONS")
-                    .child(
-                        Button::new("add-connection")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::Plus)
-                            .tooltip("Add a connection")
-                            .on_click(cx.listener(|_, _, window, cx| {
-                                Self::open_connection_dialog(None, window, cx);
-                            })),
-                    ),
-            )
-            .child(v_flex().px_1().gap_px().children(rows))
-            .when(connections::all(cx).is_empty(), |sidebar| {
-                sidebar.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Add a connection with +"),
-                )
-            })
     }
 
     fn active_tab(&self) -> Option<&Entity<QueryTab>> {
@@ -446,23 +404,35 @@ impl Render for Workspace {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.render_sidebar(cx))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .child(self.render_tab_bar(cx))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .children(self.active_tab().cloned()),
+                h_flex().flex_1().min_h_0().child(
+                    h_resizable("workspace-split")
+                        .child(
+                            resizable_panel()
+                                .size(px(280.))
+                                .size_range(px(180.)..px(600.))
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .border_r_1()
+                                        .border_color(cx.theme().border)
+                                        .child(self.explorer.clone()),
+                                ),
+                        )
+                        .child(
+                            resizable_panel().child(
+                                v_flex()
+                                    .size_full()
+                                    .min_w_0()
+                                    .child(self.render_tab_bar(cx))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h_0()
+                                            .children(self.active_tab().cloned()),
+                                    ),
                             ),
-                    ),
+                        ),
+                ),
             )
             .child(self.render_status_bar(cx))
     }

@@ -1,4 +1,5 @@
 mod connections;
+mod object_explorer;
 mod query_tab;
 mod results_table;
 mod settings;

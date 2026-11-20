@@ -32,7 +32,7 @@ A bare server name also works; then type the warehouse or lakehouse name in the 
 
 SQL logins are not supported yet. Connections are saved in `~/.config/sql-editor/connections.toml`, readable only by you, because a service principal string contains its secret.
 
-Click a connection to use it in the current tab, write SQL, and press `Ctrl+Enter`.
+Click a connection to use it in the current tab and expand its warehouses and lakehouses, write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 
 Without the UI:
 
