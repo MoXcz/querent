@@ -31,6 +31,7 @@ tokio-postgres = "0.7.18"
 postgres-native-tls = "0.5.3"
 native-tls = "0.2"
 futures-util = "0.3"
+rusqlite = { version = "0.43.0", features = ["bundled", "column_decltype"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

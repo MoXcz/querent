@@ -405,15 +405,17 @@ impl ObjectExplorer {
         self.run_catalog(
             &key.connection,
             cx,
-            move |tds| {
+            move |connection| {
                 Box::pin(async move {
-                    if object.kind == ObjectKind::Table {
-                        let columns = tds.list_columns(&database, &object).await?;
+                    // Only SQLite stores a table's `create` statement; for the
+                    // others it is built from the columns.
+                    if object.kind == ObjectKind::Table && dialect != Dialect::Sqlite {
+                        let columns = connection.list_columns(&database, &object).await?;
                         return Ok(Some(sql_db::create_table_script(
                             dialect, &object, &columns,
                         )));
                     }
-                    tds.object_definition(&database, &object).await
+                    connection.object_definition(&database, &object).await
                 })
             },
             move |_, result, cx| {

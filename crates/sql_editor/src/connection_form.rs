@@ -9,7 +9,8 @@ use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Window,
+    div, prelude::FluentBuilder as _, px,
 };
 use sql_db::{AuthMethod, Authentication, ConnectionSettings, DriverKind, Encryption};
 
@@ -116,7 +117,14 @@ impl ConnectionForm {
             }
         };
         let name = required(&self.name, "connection name")?;
-        let server = required(&self.server, "server")?;
+        let server = required(
+            &self.server,
+            if self.driver.is_file() {
+                "file path"
+            } else {
+                "server"
+            },
+        )?;
         if !value(&self.connection_string).is_empty() {
             return Err("Press Fill from string, or clear the connection string box.".to_owned());
         }
@@ -141,6 +149,7 @@ impl ConnectionForm {
                 client_id: required(&self.client_id, "client ID")?,
                 client_secret: self.client_secret.read(cx).value().to_string(),
             },
+            AuthMethod::None => Authentication::None,
         };
         if let Authentication::ServicePrincipal { client_secret, .. } = &authentication
             && client_secret.is_empty()
@@ -182,7 +191,7 @@ impl ConnectionForm {
                 set_text(&self.user, user, window, cx);
                 set_text(&self.password, password, window, cx);
             }
-            Authentication::AzureCli => {}
+            Authentication::AzureCli | Authentication::None => {}
             Authentication::ServicePrincipal {
                 tenant_id,
                 client_id,
@@ -321,6 +330,11 @@ impl ConnectionForm {
         if driver != self.driver {
             // A port, encryption level or certificate choice made for another
             // driver means something else here, or is hidden.
+            if driver.is_file() != self.driver.is_file() {
+                // A host is not a file path, and a file has no database name.
+                set_text(&self.server, "", window, cx);
+                set_text(&self.database, "", window, cx);
+            }
             set_text(&self.port, "", window, cx);
             self.trust_server_certificate = false;
             self.host_name_in_certificate = None;
@@ -381,7 +395,38 @@ impl ConnectionForm {
                     Input::new(&self.client_secret).mask_toggle(),
                 ),
             ],
+            AuthMethod::None => Vec::new(),
         }
+    }
+
+    fn browse_for_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        let server = self.server.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let path = match chosen.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                Ok(Ok(None)) | Err(_) => None,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "file dialog failed");
+                    None
+                }
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let text = path.display().to_string();
+            if let Err(error) = cx.update(|window, cx| {
+                server.update(cx, |input, cx| input.set_value(text, window, cx));
+            }) {
+                tracing::debug!(%error, "connection form closed before the file was chosen");
+            }
+        })
+        .detach();
     }
 
     fn network_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
@@ -418,7 +463,23 @@ impl Focusable for ConnectionForm {
 
 impl Render for ConnectionForm {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let server_row = if self.driver.has_network_options() {
+        let file = self.driver.is_file();
+        let server_row = if file {
+            row(
+                "File",
+                h_flex()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&self.server)))
+                    .child(
+                        Button::new("browse-file")
+                            .label("Browse…")
+                            .outline()
+                            .on_click(cx.listener(|form, _, window, cx| {
+                                form.browse_for_file(window, cx);
+                            })),
+                    ),
+            )
+        } else if self.driver.has_network_options() {
             row(
                 "Server",
                 h_flex()
@@ -451,8 +512,10 @@ impl Render for ConnectionForm {
             .child(row("Name", Input::new(&self.name)))
             .child(row("Driver", Select::new(&self.driver_select)))
             .child(server_row)
-            .child(row("Database", Input::new(&self.database)))
-            .child(row("Sign-in", Select::new(&self.auth_select)))
+            .when(!file, |form| {
+                form.child(row("Database", Input::new(&self.database)))
+                    .child(row("Sign-in", Select::new(&self.auth_select)))
+            })
             .children(self.sign_in_rows())
             .children(self.network_rows(cx))
     }

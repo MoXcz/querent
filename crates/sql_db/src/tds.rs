@@ -37,8 +37,10 @@ pub enum Authentication {
         client_id: String,
         client_secret: String,
     },
-    /// User name and password: a SQL Server login, later a PostgreSQL or Snowflake user.
+    /// User name and password: a SQL Server login, a PostgreSQL or Snowflake user.
     Password { user: String, password: String },
+    /// No sign-in, for a SQLite file.
+    None,
 }
 
 impl std::fmt::Debug for Authentication {
@@ -58,6 +60,7 @@ impl std::fmt::Debug for Authentication {
                 .debug_struct("Password")
                 .field("user", user)
                 .finish_non_exhaustive(),
+            Self::None => formatter.write_str("None"),
         }
     }
 }
@@ -259,6 +262,11 @@ async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
                 user: user.clone(),
                 password: password.clone(),
             });
+        }
+        Authentication::None => {
+            return Err(QueryError::Auth(
+                "SQL Server and Fabric need a sign-in method".to_owned(),
+            ));
         }
         Authentication::AzureCli => (
             DeveloperToolsCredential::new(None).map_err(auth_error)?,

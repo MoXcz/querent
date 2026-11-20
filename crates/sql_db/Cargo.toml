@@ -23,6 +23,7 @@ tokio-postgres.workspace = true
 postgres-native-tls.workspace = true
 futures-util.workspace = true
 sql_text.workspace = true
+rusqlite.workspace = true
 native-tls.workspace = true
 
 [lints]

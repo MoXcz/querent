@@ -46,6 +46,8 @@ pub enum Dialect {
     TSql,
     /// PostgreSQL: `"name"`, `limit N`.
     Postgres,
+    /// SQLite: quotes and limits like PostgreSQL.
+    Sqlite,
 }
 
 impl Dialect {
@@ -54,7 +56,7 @@ impl Dialect {
     pub fn quote_identifier(self, name: &str) -> String {
         match self {
             Self::TSql => quote_identifier(name),
-            Self::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+            Self::Postgres | Self::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
         }
     }
 }
@@ -280,10 +282,10 @@ pub fn select_script(
     let name = object.qualified_name(dialect);
     match (dialect, top) {
         (Dialect::TSql, Some(rows)) => format!("select top {rows}\n{column_list}\nfrom {name};\n"),
-        (Dialect::Postgres, Some(rows)) => {
+        (Dialect::Postgres | Dialect::Sqlite, Some(rows)) => {
             format!("select\n{column_list}\nfrom {name}\nlimit {rows};\n")
         }
-        (Dialect::TSql | Dialect::Postgres, None) => {
+        (Dialect::TSql | Dialect::Postgres | Dialect::Sqlite, None) => {
             format!("select\n{column_list}\nfrom {name};\n")
         }
     }

@@ -6,6 +6,7 @@ mod connection_settings;
 mod connection_string;
 mod csv_export;
 mod postgres;
+mod sqlite;
 mod tds;
 
 use std::fmt;
@@ -20,6 +21,7 @@ pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
 pub use connection_string::{ConnectionStringError, parse_connection_string};
 pub use csv_export::write_csv;
 pub use postgres::{PgConfig, PgConnection};
+pub use sqlite::{SqliteConfig, SqliteConnection};
 pub use tds::{Authentication, Encryption, TdsConfig, TdsConnection};
 
 #[derive(Debug, thiserror::Error)]

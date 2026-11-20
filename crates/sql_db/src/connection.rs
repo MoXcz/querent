@@ -2,6 +2,7 @@
 
 use crate::catalog::Dialect;
 use crate::postgres::{PgConfig, PgConnection};
+use crate::sqlite::{SqliteConfig, SqliteConnection};
 use crate::{
     CancelHandle, CatalogObject, ColumnInfo, QueryError, QueryOutput, TdsConfig, TdsConnection,
 };
@@ -11,6 +12,7 @@ pub enum ConnectionConfig {
     /// SQL Server and Fabric.
     Tds(TdsConfig),
     Postgres(PgConfig),
+    Sqlite(SqliteConfig),
 }
 
 impl ConnectionConfig {
@@ -19,6 +21,8 @@ impl ConnectionConfig {
         match self {
             Self::Tds(config) => &config.database,
             Self::Postgres(config) => &config.database,
+            // One file; attached databases are named in the SQL itself.
+            Self::Sqlite(_) => "",
         }
     }
 
@@ -26,6 +30,7 @@ impl ConnectionConfig {
         match self {
             Self::Tds(config) => config.database = database,
             Self::Postgres(config) => config.database = database,
+            Self::Sqlite(_) => {}
         }
     }
 
@@ -34,7 +39,7 @@ impl ConnectionConfig {
     pub fn requires_database(&self) -> bool {
         match self {
             Self::Tds(_) => true,
-            Self::Postgres(_) => false,
+            Self::Postgres(_) | Self::Sqlite(_) => false,
         }
     }
 
@@ -43,6 +48,7 @@ impl ConnectionConfig {
         match self {
             Self::Tds(_) => Dialect::TSql,
             Self::Postgres(_) => Dialect::Postgres,
+            Self::Sqlite(_) => Dialect::Sqlite,
         }
     }
 }
@@ -52,6 +58,7 @@ pub enum Connection {
     // Boxed: both clients are hundreds of bytes and the enum is moved into tasks.
     Tds(Box<TdsConnection>),
     Postgres(Box<PgConnection>),
+    Sqlite(SqliteConnection),
 }
 
 impl Connection {
@@ -63,6 +70,9 @@ impl Connection {
             ConnectionConfig::Postgres(config) => PgConnection::connect(config)
                 .await
                 .map(|connection| Self::Postgres(Box::new(connection))),
+            ConnectionConfig::Sqlite(config) => {
+                SqliteConnection::connect(config).await.map(Self::Sqlite)
+            }
         }
     }
 
@@ -74,8 +84,12 @@ impl Connection {
             (Self::Postgres(connection), ConnectionConfig::Postgres(config)) => {
                 connection.config() == config
             }
-            (Self::Tds(_), ConnectionConfig::Postgres(_))
-            | (Self::Postgres(_), ConnectionConfig::Tds(_)) => false,
+            (Self::Sqlite(connection), ConnectionConfig::Sqlite(config)) => {
+                connection.config() == config
+            }
+            (Self::Tds(_), ConnectionConfig::Postgres(_) | ConnectionConfig::Sqlite(_))
+            | (Self::Postgres(_), ConnectionConfig::Tds(_) | ConnectionConfig::Sqlite(_))
+            | (Self::Sqlite(_), ConnectionConfig::Tds(_) | ConnectionConfig::Postgres(_)) => false,
         }
     }
 
@@ -87,6 +101,7 @@ impl Connection {
         match self {
             Self::Tds(connection) => connection.execute(sql, cancel).await,
             Self::Postgres(connection) => connection.execute(sql, cancel).await,
+            Self::Sqlite(connection) => connection.execute(sql, cancel).await,
         }
     }
 
@@ -97,6 +112,10 @@ impl Connection {
                 connection.close();
                 Ok(())
             }
+            Self::Sqlite(connection) => {
+                connection.close();
+                Ok(())
+            }
         }
     }
 
@@ -104,6 +123,7 @@ impl Connection {
         match self {
             Self::Tds(connection) => connection.list_databases().await,
             Self::Postgres(connection) => connection.list_databases().await,
+            Self::Sqlite(connection) => connection.list_databases().await,
         }
     }
 
@@ -111,6 +131,7 @@ impl Connection {
         match self {
             Self::Tds(connection) => connection.list_objects(database).await,
             Self::Postgres(connection) => connection.list_objects(database).await,
+            Self::Sqlite(connection) => connection.list_objects(database).await,
         }
     }
 
@@ -122,6 +143,7 @@ impl Connection {
         match self {
             Self::Tds(connection) => connection.list_columns(database, object).await,
             Self::Postgres(connection) => connection.list_columns(database, object).await,
+            Self::Sqlite(connection) => connection.list_columns(database, object).await,
         }
     }
 
@@ -133,6 +155,7 @@ impl Connection {
         match self {
             Self::Tds(connection) => connection.object_definition(database, object).await,
             Self::Postgres(connection) => connection.object_definition(database, object).await,
+            Self::Sqlite(connection) => connection.object_definition(database, object).await,
         }
     }
 }

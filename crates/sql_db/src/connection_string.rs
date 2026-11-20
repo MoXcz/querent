@@ -379,6 +379,21 @@ fn read_quoted(text: &str, close: char) -> Option<(String, &str)> {
     None
 }
 
+/// The file path from `sqlite://path`, `sqlite:path` or `file:path`.
+pub(crate) fn sqlite_path(text: &str) -> Option<String> {
+    let text = text.trim();
+    let lower = text.to_ascii_lowercase();
+    let rest = ["sqlite://", "sqlite:", "file:"]
+        .iter()
+        .find(|prefix| lower.starts_with(*prefix))
+        .and_then(|prefix| text.get(prefix.len()..))?;
+    // Options such as `?mode=ro` are not supported; better to refuse than ignore them.
+    if rest.contains('?') {
+        return None;
+    }
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
 /// `postgres://` and `postgresql://` URLs, or libpq `key=value` strings separated by spaces.
 pub(crate) fn is_postgres_string(text: &str) -> bool {
     let text = text.trim();

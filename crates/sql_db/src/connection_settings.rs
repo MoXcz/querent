@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::Dialect;
 use crate::connection_string::parse_server;
 use crate::postgres::PgConfig;
+use crate::sqlite::SqliteConfig;
 use crate::{Authentication, ConnectionConfig, ConnectionStringError, Encryption, TdsConfig};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -17,10 +18,11 @@ pub enum DriverKind {
     SqlServer,
     Fabric,
     Postgres,
+    Sqlite,
 }
 
 impl DriverKind {
-    pub const ALL: [Self; 3] = [Self::SqlServer, Self::Fabric, Self::Postgres];
+    pub const ALL: [Self; 4] = [Self::SqlServer, Self::Fabric, Self::Postgres, Self::Sqlite];
 
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -28,6 +30,7 @@ impl DriverKind {
             Self::SqlServer => "SQL Server",
             Self::Fabric => "Microsoft Fabric",
             Self::Postgres => "PostgreSQL",
+            Self::Sqlite => "SQLite",
         }
     }
 
@@ -36,14 +39,16 @@ impl DriverKind {
         match self {
             Self::SqlServer | Self::Fabric => Dialect::TSql,
             Self::Postgres => Dialect::Postgres,
+            Self::Sqlite => Dialect::Sqlite,
         }
     }
 
+    /// SQLite opens a file: no host, port, database name or sign-in.
     #[must_use]
-    pub fn default_port(self) -> u16 {
+    pub fn is_file(self) -> bool {
         match self {
-            Self::SqlServer | Self::Fabric => crate::tds::DEFAULT_PORT,
-            Self::Postgres => crate::postgres::DEFAULT_PORT,
+            Self::SqlServer | Self::Fabric | Self::Postgres => false,
+            Self::Sqlite => true,
         }
     }
 
@@ -60,6 +65,7 @@ impl DriverKind {
                 (Encryption::Optional, "Prefer"),
                 (Encryption::Mandatory, "Require"),
             ],
+            Self::Sqlite => &[],
         }
     }
 
@@ -74,6 +80,7 @@ impl DriverKind {
             ],
             Self::Fabric => &[AuthMethod::AzureCli, AuthMethod::ServicePrincipal],
             Self::Postgres => &[AuthMethod::Password],
+            Self::Sqlite => &[AuthMethod::None],
         }
     }
 
@@ -83,7 +90,7 @@ impl DriverKind {
         match self {
             Self::SqlServer | Self::Postgres => true,
             // Fabric endpoints are always port 1433 with strict encryption.
-            Self::Fabric => false,
+            Self::Fabric | Self::Sqlite => false,
         }
     }
 }
@@ -94,6 +101,7 @@ pub enum AuthMethod {
     Password,
     AzureCli,
     ServicePrincipal,
+    None,
 }
 
 impl AuthMethod {
@@ -101,14 +109,30 @@ impl AuthMethod {
     pub fn label(self, driver: DriverKind) -> &'static str {
         match (self, driver) {
             (Self::Password, DriverKind::SqlServer) => "SQL Server login",
-            (Self::Password, DriverKind::Fabric | DriverKind::Postgres) => "User name and password",
-            (Self::AzureCli, DriverKind::SqlServer | DriverKind::Fabric | DriverKind::Postgres) => {
-                "Entra ID (az login session)"
+            (Self::Password, DriverKind::Fabric | DriverKind::Postgres | DriverKind::Sqlite) => {
+                "User name and password"
             }
-            (
-                Self::ServicePrincipal,
-                DriverKind::SqlServer | DriverKind::Fabric | DriverKind::Postgres,
-            ) => "Entra ID service principal",
+            (Self::AzureCli, _) => "Entra ID (az login session)",
+            (Self::ServicePrincipal, _) => "Entra ID service principal",
+            (Self::None, _) => "None",
+        }
+    }
+
+    /// The method with empty values, for a new connection.
+    #[must_use]
+    pub fn empty(self) -> Authentication {
+        match self {
+            Self::Password => Authentication::Password {
+                user: String::new(),
+                password: String::new(),
+            },
+            Self::AzureCli => Authentication::AzureCli,
+            Self::ServicePrincipal => Authentication::ServicePrincipal {
+                tenant_id: String::new(),
+                client_id: String::new(),
+                client_secret: String::new(),
+            },
+            Self::None => Authentication::None,
         }
     }
 }
@@ -119,6 +143,7 @@ impl From<&Authentication> for AuthMethod {
             Authentication::Password { .. } => Self::Password,
             Authentication::AzureCli => Self::AzureCli,
             Authentication::ServicePrincipal { .. } => Self::ServicePrincipal,
+            Authentication::None => Self::None,
         }
     }
 }
@@ -150,7 +175,10 @@ impl ConnectionSettings {
             server: String::new(),
             port: None,
             database: String::new(),
-            authentication: Authentication::default(),
+            authentication: driver
+                .auth_methods()
+                .first()
+                .map_or_else(Authentication::default, |method| method.empty()),
             encryption: driver
                 .encryption_choices()
                 .first()
@@ -163,6 +191,12 @@ impl ConnectionSettings {
     /// SQL Server and Fabric strings (ADO.NET or `sqlserver://`), or PostgreSQL
     /// strings (`postgres://` URL or libpq `host=... dbname=...`).
     pub fn from_connection_string(text: &str) -> Result<Self, ConnectionStringError> {
+        if let Some(path) = crate::connection_string::sqlite_path(text) {
+            return Ok(Self {
+                server: path,
+                ..Self::new(DriverKind::Sqlite)
+            });
+        }
         if crate::connection_string::is_postgres_string(text) {
             return crate::connection_string::parse_postgres_string(text);
         }
@@ -175,6 +209,13 @@ impl ConnectionSettings {
                 self.tds_config().map(ConnectionConfig::Tds)
             }
             DriverKind::Postgres => self.postgres_config().map(ConnectionConfig::Postgres),
+            DriverKind::Sqlite => {
+                let path = self.server.trim();
+                if path.is_empty() {
+                    return Err(ConnectionStringError::MissingServer);
+                }
+                Ok(ConnectionConfig::Sqlite(SqliteConfig::new(path)))
+            }
         }
     }
 
@@ -206,7 +247,7 @@ impl ConnectionSettings {
             (field, in_server) => field.or(in_server),
         };
         let encryption = match self.driver {
-            DriverKind::SqlServer | DriverKind::Postgres => self.encryption,
+            DriverKind::SqlServer | DriverKind::Postgres | DriverKind::Sqlite => self.encryption,
             // Fabric only speaks TDS 8.0, whatever host name the endpoint uses.
             DriverKind::Fabric => Encryption::Strict,
         };
@@ -343,6 +384,20 @@ mod tests {
             settings.config().unwrap(),
             ConnectionConfig::Postgres(_)
         ));
+    }
+
+    #[test]
+    fn reads_sqlite_paths() {
+        for text in [
+            "sqlite:///tmp/shop.db",
+            "sqlite:/tmp/shop.db",
+            "file:/tmp/shop.db",
+        ] {
+            let settings = ConnectionSettings::from_connection_string(text).unwrap();
+            assert_eq!(settings.driver, DriverKind::Sqlite, "{text}");
+            assert_eq!(settings.server, "/tmp/shop.db", "{text}");
+            assert_eq!(settings.authentication, Authentication::None);
+        }
     }
 
     #[test]
