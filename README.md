@@ -1,17 +1,20 @@
 # sql-editor
 
-A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against Microsoft Fabric Warehouse and Lakehouse SQL endpoints. `ROADMAP.md` lists what comes next.
+A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server and Microsoft Fabric Warehouse and Lakehouse SQL endpoints. `ROADMAP.md` lists what comes next.
 
 ## Run
 
-Sign in once with the Azure CLI; the editor uses that session to get a token.
-
 ```sh
-az login
 cargo run --release
 ```
 
-Add a connection with `+` in the Connections sidebar: give it a name and paste a SQL Server connection string with Entra ID authentication, for example:
+Add a connection with `+` in the Connections sidebar: give it a name and paste a connection string. SQL Server with a SQL login:
+
+```text
+Server=db1,1433;Database=sales;User ID=report;Password=...;TrustServerCertificate=True
+```
+
+Fabric with Entra ID, after `az login`:
 
 ```text
 Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Authentication=ActiveDirectoryInteractive
@@ -21,23 +24,34 @@ The URL form works too:
 
 ```text
 sqlserver://<client_id>%40<tenant_id>:<secret>@xxxx.datawarehouse.fabric.microsoft.com:1433?database=my_warehouse&fedauth=ActiveDirectoryServicePrincipal
+sqlserver://report:<password>@db1/SQLEXPRESS?database=sales&TrustServerCertificate=true
 ```
 
-A bare server name also works; then type the warehouse or lakehouse name in the tab's database field.
+A bare server name also works; then type the database name in the tab's database field.
 
 | Authentication / fedauth | Sign-in |
 | --- | --- |
+| none, with `User ID` and `Password`, or `SqlPassword` | SQL Server login |
 | `ActiveDirectoryDefault`, `ActiveDirectoryInteractive` and other Entra methods | your `az login` session |
 | `ActiveDirectoryServicePrincipal` | client ID and secret from the string; the user is `client_id@tenant_id` (`%40` in the URL form), or add `tenant id=...` |
 
-SQL logins are not supported yet. Connections are saved in `~/.config/sql-editor/connections.toml`, readable only by you, because a service principal string contains its secret.
+Windows authentication (`Integrated Security`) is not supported yet.
 
-Click a connection to use it in the current tab and expand its warehouses and lakehouses, write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
+| Setting | Values |
+| --- | --- |
+| `Server` | `host`, `host,port`, `host\instance` (asks SQL Server Browser for the port), `.` or `(local)` for this machine |
+| `Encrypt` | `True`/`Mandatory` (default), `False`/`Optional`, `Strict` (TDS 8.0). Fabric always uses `Strict`. |
+| `TrustServerCertificate` | `True` for servers with a self-signed certificate |
+| `HostNameInCertificate` | the name the certificate carries, when it differs from the server name |
+
+Connections are saved in `~/.config/sql-editor/connections.toml`, readable only by you, because SQL login and service principal strings contain a password or secret.
+
+Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 
 Without the UI:
 
 ```sh
-cargo run -p sql_db --example fabric -- "<connection string>" "select top 10 * from sys.tables"
+cargo run -p sql_db --example query -- "<connection string>" "select top 10 * from sys.tables"
 ```
 
 Keys:

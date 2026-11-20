@@ -1,6 +1,6 @@
-//! Runs one query against a Fabric SQL endpoint using the `az login` session.
+//! Runs one batch against SQL Server or a Fabric SQL endpoint.
 //!
-//! `cargo run -p sql_db --example fabric -- "<connection string>" "<sql>"`
+//! `cargo run -p sql_db --example query -- "<connection string>" "<sql>"`
 
 use std::io::Write as _;
 
@@ -13,11 +13,11 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let mut arguments = std::env::args().skip(1);
     let (Some(connection_string), Some(sql)) = (arguments.next(), arguments.next()) else {
-        anyhow::bail!("usage: fabric <connection string> <sql>");
+        anyhow::bail!("usage: query <connection string> <sql>");
     };
     let config = sql_db::parse_connection_string_with_database(&connection_string)?;
     let started = std::time::Instant::now();
-    let mut connection = TdsConnection::connect_fabric(config).await?;
+    let mut connection = TdsConnection::connect(config).await?;
     let connected = started.elapsed();
     let output = connection.execute(&sql, &CancelHandle::new()).await?;
     let mut stdout = std::io::stdout().lock();

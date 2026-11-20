@@ -154,7 +154,7 @@ impl Workspace {
         });
         let string_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=...;Authentication=ActiveDirectoryDefault")
+                .placeholder("Server=host,1433;Database=...;User ID=...;Password=...  or  Authentication=ActiveDirectoryDefault")
                 .default_value(
                     editing
                         .as_ref()
@@ -186,7 +186,7 @@ impl Workspace {
                         .child(field_label("Connection string"))
                         .child(Input::new(&string_input))
                         .child(div().text_xs().child(
-                            "Entra ID sign-in only for now. It uses your az login session.",
+                            "SQL login (User ID and Password) or Entra ID (your az login session, or a service principal). Add TrustServerCertificate=True for a self-signed certificate.",
                         )),
                 )
                 .footer(

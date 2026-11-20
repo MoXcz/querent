@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use gpui_kit::{App, BorrowAppContext as _, Global, SharedString};
 use serde::{Deserialize, Serialize};
-use sql_db::{ConnectionStringError, FabricConfig};
+use sql_db::{ConnectionStringError, TdsConfig};
 
 use crate::settings;
 
@@ -21,7 +21,7 @@ pub struct SavedConnection {
 }
 
 impl SavedConnection {
-    pub fn config(&self) -> Result<FabricConfig, ConnectionStringError> {
+    pub fn config(&self) -> Result<TdsConfig, ConnectionStringError> {
         sql_db::parse_connection_string(&self.connection_string)
     }
 }

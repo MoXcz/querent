@@ -17,7 +17,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use sql_db::{CatalogObject, ColumnInfo, FabricConfig, ObjectKind, QueryError, TdsConnection};
+use sql_db::{CatalogObject, ColumnInfo, ObjectKind, QueryError, TdsConfig, TdsConnection};
 use tokio::sync::Mutex;
 
 use crate::connections::{self, ConnectionStore, SavedConnection};
@@ -157,7 +157,7 @@ impl ObjectExplorer {
             .clone()
     }
 
-    fn config_for(name: &str, cx: &Context<Self>) -> Result<FabricConfig, SharedString> {
+    fn config_for(name: &str, cx: &Context<Self>) -> Result<TdsConfig, SharedString> {
         let saved = connections::find(cx, name)
             .ok_or_else(|| SharedString::from(format!("Connection {name} no longer exists.")))?;
         saved
@@ -226,7 +226,7 @@ impl ObjectExplorer {
             let mut guard = catalog.lock().await;
             tracing::debug!(connection = %connection_name, waited_ms = started.elapsed().as_millis(), "catalog lock acquired");
             if guard.is_none() {
-                *guard = Some(TdsConnection::connect_fabric(config).await?);
+                *guard = Some(TdsConnection::connect(config).await?);
                 tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), "catalog connected");
             }
             let Some(tds) = guard.as_mut() else {

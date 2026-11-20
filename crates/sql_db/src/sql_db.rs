@@ -15,7 +15,7 @@ pub use connection_string::{
     ConnectionStringError, parse_connection_string, parse_connection_string_with_database,
 };
 pub use csv_export::write_csv;
-pub use tds::{EntraAuth, FabricConfig, TdsConnection};
+pub use tds::{Authentication, DEFAULT_PORT, Encryption, TdsConfig, TdsConnection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {

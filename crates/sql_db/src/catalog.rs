@@ -83,12 +83,13 @@ const OBJECT_TYPES: &str = "'USER_TABLE', 'VIEW', 'SQL_STORED_PROCEDURE', 'SQL_S
      'SQL_INLINE_TABLE_VALUED_FUNCTION', 'SQL_TABLE_VALUED_FUNCTION'";
 
 impl TdsConnection {
-    /// User databases; on Fabric, the workspace's warehouses and lakehouses.
+    /// User databases the login can open; on Fabric, the workspace's warehouses and lakehouses.
     pub async fn list_databases(&mut self) -> Result<Vec<String>, QueryError> {
         let result = self
             .query_one(
                 "select name from sys.databases \
-                 where name not in ('master', 'tempdb', 'model', 'msdb') order by name",
+                 where name not in ('master', 'tempdb', 'model', 'msdb') \
+                 and has_dbaccess(name) = 1 order by name",
             )
             .await?;
         Ok(result

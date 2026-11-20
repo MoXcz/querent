@@ -20,7 +20,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
-use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, ResultSet, TdsConnection};
+use sql_db::{CancelHandle, QueryError, QueryOutput, ResultSet, TdsConfig, TdsConnection};
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
@@ -126,7 +126,7 @@ impl QueryTab {
         });
         let database_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("warehouse or lakehouse")
+                .placeholder("database")
                 .default_value(fields.database)
         });
         let editor = cx.new(|cx| {
@@ -411,7 +411,7 @@ impl QueryTab {
         }
     }
 
-    fn connection_config(&self, cx: &Context<Self>) -> Result<FabricConfig, SharedString> {
+    fn connection_config(&self, cx: &Context<Self>) -> Result<TdsConfig, SharedString> {
         let ConnectionFields {
             connection,
             database,
@@ -428,7 +428,7 @@ impl QueryTab {
             config.database = database;
         }
         if config.database.is_empty() {
-            return Err("Enter the warehouse or lakehouse name.".into());
+            return Err("Enter the database name.".into());
         }
         Ok(config)
     }
@@ -499,7 +499,7 @@ impl QueryTab {
             async move {
                 let connection = match reusable {
                     Some(connection) => connection,
-                    None => Arc::new(Mutex::new(TdsConnection::connect_fabric(config).await?)),
+                    None => Arc::new(Mutex::new(TdsConnection::connect(config).await?)),
                 };
                 let output = connection.lock().await.execute(&sql, &cancel).await;
                 Ok::<_, QueryError>((connection, output))

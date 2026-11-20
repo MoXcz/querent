@@ -13,7 +13,7 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("usage: catalog <connection string> <database>");
     };
     let config = sql_db::parse_connection_string(&connection_string)?;
-    let mut connection = TdsConnection::connect_fabric(config).await?;
+    let mut connection = TdsConnection::connect(config).await?;
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,

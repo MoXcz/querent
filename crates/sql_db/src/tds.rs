@@ -1,10 +1,9 @@
-//! TDS driver for Microsoft Fabric (and SQL Server in a later version).
+//! TDS driver for SQL Server and Microsoft Fabric.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use azure_core::credentials::TokenCredential;
-use std::sync::Arc;
-
 use azure_identity::{ClientSecretCredential, DeveloperToolsCredential};
 use mssql_tds::connection::client_context::{ClientContext, TdsAuthenticationMethod};
 use mssql_tds::connection::tds_client::{
@@ -20,25 +19,28 @@ use crate::{CancelHandle, Column, QueryError, QueryOutput, ResultSet, Value};
 
 const SQL_SCOPE: &str = "https://database.windows.net/.default";
 const APPLICATION_NAME: &str = "sql-editor";
+pub const DEFAULT_PORT: u16 = 1433;
 /// Fabric reports these when it moves or drops a session; one reconnect usually fixes them.
 const TRANSIENT_ERRORS: [u32; 3] = [24804, 6005, 6008];
 const CONNECT_ATTEMPTS: u32 = 2;
 
-/// How to get the Entra ID token for the connection.
+/// How the connection signs in.
 #[derive(Clone, Default, PartialEq, Eq)]
-pub enum EntraAuth {
-    /// The signed-in Azure CLI (or Azure Developer CLI) session.
+pub enum Authentication {
+    /// Entra ID token from the signed-in Azure CLI (or Azure Developer CLI) session.
     #[default]
     AzureCli,
-    /// Client credentials of an app registration.
+    /// Entra ID token from an app registration's client credentials.
     ServicePrincipal {
         tenant_id: String,
         client_id: String,
         client_secret: String,
     },
+    /// SQL Server login (`User ID` and `Password`).
+    SqlLogin { user: String, password: String },
 }
 
-impl std::fmt::Debug for EntraAuth {
+impl std::fmt::Debug for Authentication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AzureCli => formatter.write_str("AzureCli"),
@@ -51,38 +53,102 @@ impl std::fmt::Debug for EntraAuth {
                 .field("tenant_id", tenant_id)
                 .field("client_id", client_id)
                 .finish_non_exhaustive(),
+            Self::SqlLogin { user, .. } => formatter
+                .debug_struct("SqlLogin")
+                .field("user", user)
+                .finish_non_exhaustive(),
         }
     }
 }
 
+/// `Encrypt=` in a connection string.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Encryption {
+    /// Encrypt only if the server asks for it (`Encrypt=False` or `Optional`).
+    Optional,
+    /// TLS after pre-login (`Encrypt=True` or `Mandatory`), the `SqlClient` default.
+    #[default]
+    Mandatory,
+    /// TDS 8.0: TLS from the first byte (`Encrypt=Strict`).
+    Strict,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FabricConfig {
-    /// SQL endpoint host, e.g. `xxxx.datawarehouse.fabric.microsoft.com`.
+pub struct TdsConfig {
+    /// Server host name or address, e.g. `xxxx.datawarehouse.fabric.microsoft.com`.
     pub host: String,
-    pub port: u16,
-    /// Warehouse or lakehouse name.
+    /// `None` means 1433, or the port SQL Server Browser reports for `instance`.
+    pub port: Option<u16>,
+    /// Named instance, as in `host\SQLEXPRESS`.
+    pub instance: Option<String>,
+    /// Database, warehouse or lakehouse name.
     pub database: String,
-    pub auth: EntraAuth,
+    pub authentication: Authentication,
+    pub encryption: Encryption,
+    /// Skips certificate validation, for servers with self-signed certificates.
+    pub trust_server_certificate: bool,
+    /// Name the certificate must carry when it differs from `host`.
+    pub host_name_in_certificate: Option<String>,
     /// Rows kept per result set; the rest are skipped and the set is marked truncated.
     pub max_rows: usize,
 }
 
-impl FabricConfig {
+impl TdsConfig {
     #[must_use]
     pub fn new(host: impl Into<String>, database: impl Into<String>) -> Self {
         Self {
             host: host.into(),
-            port: 1433,
+            port: None,
+            instance: None,
             database: database.into(),
-            auth: EntraAuth::AzureCli,
+            authentication: Authentication::AzureCli,
+            encryption: Encryption::Mandatory,
+            trust_server_certificate: false,
+            host_name_in_certificate: None,
             max_rows: 50_000,
+        }
+    }
+
+    /// Fabric SQL endpoints only accept TDS 8.0.
+    #[must_use]
+    pub fn is_fabric(&self) -> bool {
+        self.host
+            .to_ascii_lowercase()
+            .ends_with(".fabric.microsoft.com")
+    }
+
+    /// `host,port`, `host\instance` or `host`, for messages.
+    #[must_use]
+    pub fn server_label(&self) -> String {
+        match (&self.instance, self.port) {
+            (_, Some(port)) => format!("{},{port}", self.host),
+            (Some(instance), None) => format!("{}\\{instance}", self.host),
+            (None, None) => self.host.clone(),
+        }
+    }
+
+    fn data_source(&self) -> String {
+        match (&self.instance, self.port) {
+            (Some(instance), None) => format!("{}\\{instance}", self.host),
+            (_, port) => format!("tcp:{},{}", self.host, port.unwrap_or(DEFAULT_PORT)),
+        }
+    }
+
+    fn encryption_setting(&self) -> EncryptionSetting {
+        if self.is_fabric() {
+            return EncryptionSetting::Strict;
+        }
+        match self.encryption {
+            Encryption::Optional => EncryptionSetting::PreferOff,
+            Encryption::Mandatory => EncryptionSetting::On,
+            Encryption::Strict => EncryptionSetting::Strict,
         }
     }
 }
 
 pub struct TdsConnection {
     client: TdsClient,
-    config: FabricConfig,
+    config: TdsConfig,
 }
 
 impl std::fmt::Debug for TdsConnection {
@@ -95,25 +161,24 @@ impl std::fmt::Debug for TdsConnection {
 }
 
 impl TdsConnection {
-    /// Signs in with the Azure CLI / Azure Developer CLI session (`az login`).
-    #[tracing::instrument(skip_all, fields(host = %config.host, database = %config.database))]
-    pub async fn connect_fabric(config: FabricConfig) -> Result<Self, QueryError> {
-        let token = fetch_token(&config.auth).await?;
+    #[tracing::instrument(skip_all, fields(server = %config.server_label(), database = %config.database))]
+    pub async fn connect(config: TdsConfig) -> Result<Self, QueryError> {
+        let token = match &config.authentication {
+            Authentication::AzureCli | Authentication::ServicePrincipal { .. } => {
+                Some(fetch_token(&config.authentication).await?)
+            }
+            Authentication::SqlLogin { .. } => None,
+        };
         let mut last_error = None;
         for attempt in 1..=CONNECT_ATTEMPTS {
-            match open_client(&config, &token).await {
+            match open_client(&config, token.as_deref()).await {
                 Ok(client) => return Ok(Self { client, config }),
                 Err(error) if is_transient(&error) && attempt < CONNECT_ATTEMPTS => {
                     tracing::warn!(attempt, "transient connect error, retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     last_error = Some(error);
                 }
-                Err(error) => {
-                    return Err(QueryError::Connect(format!(
-                        "{}:{}: {error}",
-                        config.host, config.port
-                    )));
-                }
+                Err(error) => return Err(connect_error(&config, &error)),
             }
         }
         Err(QueryError::Connect(last_error.map_or_else(
@@ -123,7 +188,7 @@ impl TdsConnection {
     }
 
     #[must_use]
-    pub fn config(&self) -> &FabricConfig {
+    pub fn config(&self) -> &TdsConfig {
         &self.config
     }
 
@@ -166,14 +231,31 @@ impl TdsConnection {
     }
 }
 
-async fn fetch_token(auth: &EntraAuth) -> Result<String, QueryError> {
+/// Error 18456 is a rejected login; anything else is a network or TLS problem.
+fn connect_error(config: &TdsConfig, error: &TdsError) -> QueryError {
+    let server = config.server_label();
+    if error_numbers(error).contains(&LOGIN_FAILED) {
+        return QueryError::Auth(format!("{server}: {error}"));
+    }
+    let text = error.to_string();
+    let hint = if text.contains("certificate verify failed") && !config.trust_server_certificate {
+        " The server's certificate is not trusted; add TrustServerCertificate=True if you trust this server."
+    } else {
+        ""
+    };
+    QueryError::Connect(format!("{server}: {text}{hint}"))
+}
+
+const LOGIN_FAILED: u32 = 18456;
+
+async fn fetch_token(authentication: &Authentication) -> Result<String, QueryError> {
     let auth_error = |error: azure_core::Error| QueryError::Auth(error.to_string());
-    let (credential, hint): (Arc<dyn TokenCredential>, &str) = match auth {
-        EntraAuth::AzureCli => (
+    let (credential, hint): (Arc<dyn TokenCredential>, &str) = match authentication {
+        Authentication::AzureCli => (
             DeveloperToolsCredential::new(None).map_err(auth_error)?,
             " Run `az login` and try again.",
         ),
-        EntraAuth::ServicePrincipal {
+        Authentication::ServicePrincipal {
             tenant_id,
             client_id,
             client_secret,
@@ -187,6 +269,11 @@ async fn fetch_token(auth: &EntraAuth) -> Result<String, QueryError> {
             .map_err(auth_error)?,
             " Check the service principal's tenant, client ID and secret.",
         ),
+        Authentication::SqlLogin { .. } => {
+            return Err(QueryError::Auth(
+                "a SQL login has no Entra token".to_owned(),
+            ));
+        }
     };
     let token = credential
         .get_token(&[SQL_SCOPE], None)
@@ -195,16 +282,29 @@ async fn fetch_token(auth: &EntraAuth) -> Result<String, QueryError> {
     Ok(token.token.secret().to_owned())
 }
 
-async fn open_client(config: &FabricConfig, token: &str) -> TdsResult<TdsClient> {
+async fn open_client(config: &TdsConfig, token: Option<&str>) -> TdsResult<TdsClient> {
     let mut context = ClientContext::default();
     context.database.clone_from(&config.database);
     APPLICATION_NAME.clone_into(&mut context.application_name);
-    context.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
-    context.access_token = Some(token.to_owned());
-    context.encryption_options.mode = EncryptionSetting::Strict;
-    let datasource = format!("tcp:{},{}", config.host, config.port);
+    match (&config.authentication, token) {
+        (Authentication::SqlLogin { user, password }, _) => {
+            context.tds_authentication_method = TdsAuthenticationMethod::Password;
+            context.user_name.clone_from(user);
+            context.password.clone_from(password);
+        }
+        (Authentication::AzureCli | Authentication::ServicePrincipal { .. }, token) => {
+            context.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
+            context.access_token = token.map(str::to_owned);
+        }
+    }
+    context.encryption_options.mode = config.encryption_setting();
+    context.encryption_options.trust_server_certificate = config.trust_server_certificate;
+    context
+        .encryption_options
+        .host_name_in_cert
+        .clone_from(&config.host_name_in_certificate);
     TdsConnectionProvider {}
-        .create_client(context, &datasource, None)
+        .create_client(context, &config.data_source(), None)
         .await
 }
 
@@ -262,17 +362,22 @@ async fn read_result_set(client: &mut TdsClient, max_rows: usize) -> TdsResult<R
     Ok(result_set)
 }
 
+fn is_transient(error: &TdsError) -> bool {
+    error_numbers(error)
+        .iter()
+        .any(|number| TRANSIENT_ERRORS.contains(number))
+}
+
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "mssql-tds has dozens of error variants; only these matter here"
+    reason = "mssql-tds has dozens of error variants; only server errors carry numbers"
 )]
-fn is_transient(error: &TdsError) -> bool {
+fn error_numbers(error: &TdsError) -> Vec<u32> {
     match error {
-        TdsError::SqlServerError { diagnostics } => diagnostics
-            .errors
-            .iter()
-            .any(|info| TRANSIENT_ERRORS.contains(&info.number)),
-        _ => false,
+        TdsError::SqlServerError { diagnostics } => {
+            diagnostics.errors.iter().map(|info| info.number).collect()
+        }
+        _ => Vec::new(),
     }
 }
 
