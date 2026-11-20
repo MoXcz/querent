@@ -145,16 +145,21 @@ impl Workspace {
                 this.activate(*index, window, cx);
             }))
             .children(tabs)
-            .suffix(
-                Button::new("new-tab")
-                    .ghost()
-                    .xsmall()
-                    .icon(IconName::Plus)
-                    .tooltip("New tab (Ctrl+T)")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.new_tab(&NewTab, window, cx);
-                    })),
+            // gpui-kit draws `last_empty_space` right after the last tab, but only
+            // when the bar has a suffix, so the suffix is an empty spacer.
+            .last_empty_space(
+                div().px_1().child(
+                    Button::new("new-tab")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .tooltip("New tab (Ctrl+T)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.new_tab(&NewTab, window, cx);
+                        })),
+                ),
             )
+            .suffix(div())
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
