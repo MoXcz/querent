@@ -54,7 +54,7 @@ impl Settings {
     }
 }
 
-struct SettingsStore {
+pub struct SettingsStore {
     settings: Settings,
     config_dir: Option<PathBuf>,
 }

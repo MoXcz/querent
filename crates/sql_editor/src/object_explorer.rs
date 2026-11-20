@@ -171,6 +171,7 @@ impl ObjectExplorer {
             return;
         }
         self.expanded.insert(id.clone());
+        tracing::debug!(node = ?id, "explorer node expanded");
         self.ensure_loaded(id, cx);
         cx.notify();
     }
@@ -218,10 +219,15 @@ impl ObjectExplorer {
             }
         };
         let catalog = self.catalog_connection(connection);
+        let connection_name = connection.clone();
         let task = tokio_bridge::spawn(cx, async move {
+            let started = std::time::Instant::now();
+            tracing::debug!(connection = %connection_name, "catalog query queued");
             let mut guard = catalog.lock().await;
+            tracing::debug!(connection = %connection_name, waited_ms = started.elapsed().as_millis(), "catalog lock acquired");
             if guard.is_none() {
                 *guard = Some(TdsConnection::connect_fabric(config).await?);
+                tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), "catalog connected");
             }
             let Some(tds) = guard.as_mut() else {
                 return Err(QueryError::ConnectionLost(
@@ -229,6 +235,7 @@ impl ObjectExplorer {
                 ));
             };
             let result = work(tds).await;
+            tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), ok = result.is_ok(), "catalog query finished");
             if matches!(result, Err(QueryError::ConnectionLost(_))) {
                 *guard = None;
             }

@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use anyhow::Context as _;
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputState, Redo, Undo};
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputState, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, Redo, Undo,
+};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
@@ -18,13 +21,13 @@ use gpui_kit::{
     Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
 use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, ResultSet, TdsConnection};
-use sql_text::vim::{Buffer, Edit, Key, Vim};
+use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
 use crate::results_table::ResultsTable;
-use crate::settings;
+use crate::settings::{self, SettingsStore};
 use crate::tokio_bridge;
 
 actions!(
@@ -44,6 +47,9 @@ actions!(
 );
 
 type SharedConnection = Arc<Mutex<TdsConnection>>;
+
+const BLOCK_CURSOR_OPACITY: f32 = 0.45;
+const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
 /// Outer error: the task died. Middle: connecting failed. Inner: the query failed.
 type QueryOutcome =
     anyhow::Result<Result<(SharedConnection, Result<QueryOutput, QueryError>), QueryError>>;
@@ -93,6 +99,12 @@ pub struct QueryTab {
     export_notice: Option<SharedString>,
     export_task: Option<Task<()>>,
     vim: Vim,
+    /// Fill under the character at the cursor in normal and visual mode.
+    block_cursor: Option<RangeDecorationCollection>,
+    block_cursor_range: Option<Range<usize>>,
+    /// Brief fill over the SQL that was sent to the server.
+    run_highlight: Option<RangeDecorationCollection>,
+    run_highlight_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -146,6 +158,9 @@ impl QueryTab {
             vim_interceptor,
             cx.subscribe_in(&connection_select, window, Self::on_connection_selected),
             cx.observe_global_in::<ConnectionStore>(window, Self::on_connections_changed),
+            // The editor notifies on every cursor move and caret blink.
+            cx.observe(&editor, |this, _, cx| this.update_block_cursor(cx)),
+            cx.observe_global::<SettingsStore>(Self::update_block_cursor),
         ];
 
         Self {
@@ -164,6 +179,10 @@ impl QueryTab {
             export_notice: None,
             export_task: None,
             vim: Vim::default(),
+            block_cursor: None,
+            block_cursor_range: None,
+            run_highlight: None,
+            run_highlight_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -289,9 +308,73 @@ impl QueryTab {
                     apply_vim_edit(editor, edit, window, cx);
                 }
             });
+            self.update_block_cursor(cx);
             cx.notify();
         }
         outcome.handled
+    }
+
+    fn update_block_cursor(&mut self, cx: &mut Context<Self>) {
+        let wanted = if settings::get(cx).vim_mode && self.vim.mode() != Mode::Insert {
+            let editor = self.editor.read(cx);
+            let text = editor.value();
+            let cursor = editor.cursor();
+            let end = text
+                .get(cursor..)
+                .and_then(|rest| rest.chars().next())
+                .filter(|character| *character != '\n')
+                .map(|character| cursor + character.len_utf8());
+            end.map(|end| cursor..end)
+        } else {
+            None
+        };
+        if wanted == self.block_cursor_range {
+            return;
+        }
+        self.block_cursor_range.clone_from(&wanted);
+        let color = cx.theme().caret.opacity(BLOCK_CURSOR_OPACITY);
+        let decorations: Vec<RangeDecoration> = wanted
+            .into_iter()
+            .map(|range| {
+                RangeDecoration::new(range)
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(color)
+            })
+            .collect();
+        if let Some(collection) = &self.block_cursor {
+            collection.set(decorations, cx);
+        } else {
+            let collection = self.editor.update(cx, |editor, cx| {
+                editor.create_range_decorations_collection(decorations, cx)
+            });
+            self.block_cursor = Some(collection);
+        }
+    }
+
+    fn flash_run_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        let decoration = RangeDecoration::new(range)
+            .with_style(RangeDecorationStyle::Fill)
+            .with_color(cx.theme().selection);
+        if let Some(collection) = &self.run_highlight {
+            collection.set(vec![decoration], cx);
+        } else {
+            let collection = self.editor.update(cx, |editor, cx| {
+                editor.create_range_decorations_collection(vec![decoration], cx)
+            });
+            self.run_highlight = Some(collection);
+        }
+        // Replacing the task cancels an older flash's timer.
+        self.run_highlight_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RUN_HIGHLIGHT_DURATION).await;
+            let cleared = this.update(cx, |this, cx| {
+                if let Some(collection) = &this.run_highlight {
+                    collection.clear(cx);
+                }
+            });
+            if let Err(error) = cleared {
+                tracing::debug!(%error, "tab closed before the run highlight cleared");
+            }
+        }));
     }
 
     pub fn editor_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -369,6 +452,7 @@ impl QueryTab {
             Some((sql, range)) => {
                 let text = self.editor.read(cx).value();
                 self.ran_lines = Some(line_span(&text, &range));
+                self.flash_run_range(range, cx);
                 self.start_query(sql, window, cx);
             }
             None => self.show_error("No statement under the cursor.".into(), cx),
@@ -381,6 +465,7 @@ impl QueryTab {
             return;
         }
         self.ran_lines = Some("all".into());
+        self.flash_run_range(0..sql.len(), cx);
         self.start_query(sql, window, cx);
     }
 
