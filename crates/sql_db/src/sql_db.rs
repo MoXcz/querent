@@ -1,5 +1,6 @@
 //! Database drivers behind one result shape, so the UI never sees driver types.
 
+mod catalog;
 mod connection_string;
 mod csv_export;
 mod tds;
@@ -7,6 +8,9 @@ mod tds;
 use std::fmt;
 use std::sync::Arc;
 
+pub use catalog::{
+    CatalogObject, ColumnInfo, ObjectKind, create_table_script, quote_identifier, select_script,
+};
 pub use connection_string::{
     ConnectionStringError, parse_connection_string, parse_connection_string_with_database,
 };
