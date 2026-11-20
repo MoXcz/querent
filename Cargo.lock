@@ -6862,11 +6862,24 @@ dependencies = [
  "serde",
  "serde_json",
  "sql_db",
+ "sql_lsp",
  "sql_text",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "sql_lsp"
+version = "0.0.1"
+dependencies = [
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

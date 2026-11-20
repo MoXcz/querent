@@ -23,6 +23,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 lsp-types.workspace = true
+sql_lsp.workspace = true
 
 [lints]
 workspace = true

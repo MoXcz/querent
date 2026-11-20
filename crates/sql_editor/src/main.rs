@@ -1,5 +1,6 @@
 mod connection_form;
 mod connections;
+mod lsp_servers;
 mod object_explorer;
 mod query_tab;
 mod results_table;
@@ -14,7 +15,7 @@ use gpui_kit::component::input::DeleteToPreviousWordStart;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
-use crate::query_tab::{CancelQuery, ExportCsv, RunAll, RunQuery, ToggleVimMode};
+use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
 use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
 
 const KEY_CONTEXT: &str = "SqlEditor";
@@ -37,6 +38,7 @@ fn main() -> anyhow::Result<()> {
             settings::init(cx);
             connections::init(cx);
             schema_cache::init(cx);
+            lsp_servers::init(cx);
             themes::init(cx);
             cx.on_action(|_: &ToggleVimMode, cx| {
                 settings::update(cx, |settings| settings.vim_mode = !settings.vim_mode);
@@ -51,10 +53,22 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn bind_keys(cx: &mut App) {
-    let (run, run_all, new_tab, close_tab) = if cfg!(target_os = "macos") {
-        ("cmd-enter", "cmd-shift-enter", "cmd-n", "cmd-w")
+    let (run, run_all, new_tab, close_tab, format) = if cfg!(target_os = "macos") {
+        (
+            "cmd-enter",
+            "cmd-shift-enter",
+            "cmd-n",
+            "cmd-w",
+            "cmd-shift-f",
+        )
     } else {
-        ("ctrl-enter", "ctrl-shift-enter", "ctrl-n", "ctrl-shift-w")
+        (
+            "ctrl-enter",
+            "ctrl-shift-enter",
+            "ctrl-n",
+            "ctrl-shift-w",
+            "ctrl-shift-f",
+        )
     };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
@@ -64,6 +78,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(run_all, RunAll, Some("Input")),
         KeyBinding::new("ctrl-shift-c", CancelQuery, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-e", ExportCsv, Some(KEY_CONTEXT)),
+        KeyBinding::new(format, FormatSql, Some(KEY_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.

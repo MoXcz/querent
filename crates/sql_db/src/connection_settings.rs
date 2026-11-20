@@ -12,7 +12,9 @@ use crate::snowflake::SnowflakeConfig;
 use crate::sqlite::SqliteConfig;
 use crate::{Authentication, ConnectionConfig, ConnectionStringError, Encryption, TdsConfig};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverKind {
     #[default]

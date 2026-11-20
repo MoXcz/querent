@@ -63,6 +63,18 @@ Click a connection to use it in the current tab and expand its databases (wareho
 
 While typing, a menu offers tables after `from` and `join`, the columns of `alias.`, and keywords; hover over a table or column to see its columns or type. The tables and columns are read once per database in the background. PostgreSQL, SQLite and Snowflake tabs also underline syntax errors.
 
+### Language servers
+
+A language server adds its completions, hover, diagnostics and formatting (`Ctrl+Shift+F`) to the built-in ones. Choose one per database kind (`sql_server`, `fabric`, `postgres`, `sqlite`, `snowflake`) in `~/.config/sql-editor/settings.toml`:
+
+```toml
+[language_servers.postgres]
+command = "sqls"
+pass_connection = true   # send the connection, including its password, to the server
+```
+
+The status line shows the server's state; a server that stops restarts on next use.
+
 Without the UI:
 
 ```sh
@@ -77,6 +89,7 @@ Keys:
 | `Ctrl+Shift+Enter` | Run everything in the tab |
 | `Ctrl+Shift+C` | Cancel the running query |
 | `Ctrl+Shift+E` | Export the result as CSV |
+| `Ctrl+Shift+F` | Format SQL with the connection's language server |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
 | `Ctrl+N` / `Ctrl+P` with the completion menu open | Next / previous suggestion (`Ctrl+N` opens a tab only when no menu is open) |
 | `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |

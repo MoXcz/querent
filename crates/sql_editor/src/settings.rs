@@ -2,9 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::BTreeMap;
+
 use anyhow::Context as _;
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
+use sql_db::DriverKind;
+
+use crate::lsp_servers::LanguageServerSetting;
 
 const SETTINGS_FILE: &str = "settings.toml";
 
@@ -16,6 +21,9 @@ pub struct Settings {
     pub vim_mode: bool,
     /// Object explorer shows schema folders, or `schema.name` in one list.
     pub explorer_group_by_schema: bool,
+    /// Optional language server per database kind, e.g.
+    /// `[language_servers.postgres]` with `command = "sqls"`.
+    pub language_servers: BTreeMap<DriverKind, LanguageServerSetting>,
 }
 
 impl Default for Settings {
@@ -24,6 +32,7 @@ impl Default for Settings {
             theme: None,
             vim_mode: true,
             explorer_group_by_schema: true,
+            language_servers: BTreeMap::new(),
         }
     }
 }
@@ -110,6 +119,14 @@ mod tests {
             theme: Some("Solitude".to_owned()),
             vim_mode: false,
             explorer_group_by_schema: false,
+            language_servers: BTreeMap::from([(
+                DriverKind::Postgres,
+                LanguageServerSetting {
+                    command: "sqls".to_owned(),
+                    args: Vec::new(),
+                    pass_connection: true,
+                },
+            )]),
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);

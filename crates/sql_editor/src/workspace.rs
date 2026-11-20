@@ -13,6 +13,7 @@ use gpui_kit::{
 
 use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
+use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
 use crate::settings;
@@ -45,6 +46,7 @@ pub struct Workspace {
     next_tab_number: usize,
     explorer: Entity<ObjectExplorer>,
     _explorer_subscription: Subscription,
+    _servers_observation: Subscription,
 }
 
 impl Workspace {
@@ -57,6 +59,8 @@ impl Workspace {
             next_tab_number: 1,
             explorer,
             _explorer_subscription: explorer_subscription,
+            // The status line shows the active tab's language server.
+            _servers_observation: cx.observe_global::<LspServers>(|_, cx| cx.notify()),
         };
         let first_connection = connections::names(cx).into_iter().next();
         let fields = ConnectionFields {
@@ -244,7 +248,10 @@ impl Workspace {
             return;
         }
         let closed = self.tabs.remove(index);
-        closed.view.update(cx, QueryTab::stop_running_query);
+        closed.view.update(cx, |tab, cx| {
+            tab.stop_running_query(cx);
+            tab.release_language_server(cx);
+        });
         if self.tabs.is_empty() {
             let fields = closed.view.read(cx).connection_fields(cx);
             self.open_tab(fields, window, cx);
@@ -314,13 +321,27 @@ impl Workspace {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status, vim_status) = self
+        let (status, vim_status, connection) = self
             .active_tab()
             .map(|tab| {
                 let tab = tab.read(cx);
-                (tab.status_text(), tab.vim_status(cx))
+                (
+                    tab.status_text(),
+                    tab.vim_status(cx),
+                    tab.connection_fields(cx).connection,
+                )
             })
             .unwrap_or_default();
+        let server_status = connection
+            .and_then(|connection| lsp_servers::status(cx, &connection))
+            .map(|(command, status)| match status {
+                ServerStatus::Starting => format!("{command}: starting"),
+                ServerStatus::Running => command,
+                ServerStatus::Failed { message, retry_at } => {
+                    let wait = retry_at.saturating_duration_since(std::time::Instant::now());
+                    format!("{command}: {message}; retry in {}s", wait.as_secs())
+                }
+            });
         let vim_enabled = settings::get(cx).vim_mode;
         h_flex()
             .justify_between()
@@ -342,6 +363,7 @@ impl Workspace {
                     }))
                     .child(status),
             )
+            .children(server_status.map(|text| div().child(text)))
             .child(
                 h_flex()
                     .gap_1()

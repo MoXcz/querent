@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sql_db", "crates/sql_editor", "crates/sql_text"]
+members = ["crates/sql_db", "crates/sql_editor", "crates/sql_lsp", "crates/sql_text"]
 
 [workspace.package]
 edition = "2024"
@@ -11,9 +11,10 @@ publish = false
 [workspace.dependencies]
 sql_db = { path = "crates/sql_db" }
 sql_text = { path = "crates/sql_text" }
+sql_lsp = { path = "crates/sql_lsp" }
 anyhow = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

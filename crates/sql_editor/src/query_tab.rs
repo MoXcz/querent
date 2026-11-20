@@ -14,7 +14,8 @@ use gpui_kit::component::input::{
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, resizable_panel,
+    v_flex, v_resizable,
 };
 use gpui_kit::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
@@ -29,6 +30,7 @@ use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
+use crate::lsp_servers::{self, LspServers};
 use crate::results_table::ResultsTable;
 use crate::settings::{self, SettingsStore};
 use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
@@ -46,7 +48,9 @@ actions!(
         /// Save the shown result as a CSV file.
         ExportCsv,
         /// Turn vim keys in the editor on or off.
-        ToggleVimMode
+        ToggleVimMode,
+        /// Format the editor's SQL with the connection's language server.
+        FormatSql
     ]
 );
 
@@ -111,6 +115,11 @@ pub struct QueryTab {
     block_cursor_range: Option<Range<usize>>,
     /// Brief fill over the SQL that was sent to the server.
     run_highlight: Option<RangeDecorationCollection>,
+    /// This tab's document URI for language servers.
+    document: Option<lsp_types::Uri>,
+    /// The connection whose server has this tab's document open.
+    server_connection: Option<SharedString>,
+    format_task: Option<Task<()>>,
     /// Pending syntax check; replacing it restarts the delay.
     syntax_check: Option<Task<()>>,
     run_highlight_task: Option<Task<()>>,
@@ -145,9 +154,11 @@ impl QueryTab {
                 .soft_wrap(false)
                 .placeholder("select top 100 * from ...")
         });
+        let document = tab_document(number);
         let target = TabTarget {
             connection: connection_select.downgrade(),
             database: database_input.downgrade(),
+            document: document.clone(),
         };
         editor.update(cx, |editor, _| {
             let lsp = editor.lsp_mut();
@@ -182,6 +193,8 @@ impl QueryTab {
             // The editor notifies on every cursor move and caret blink.
             cx.observe(&editor, |this, _, cx| this.update_block_cursor(cx)),
             cx.observe_global::<SettingsStore>(Self::update_block_cursor),
+            // Server diagnostics arrive on their own schedule.
+            cx.observe_global::<LspServers>(Self::check_syntax),
             cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.schedule_syntax_check(cx);
@@ -210,6 +223,9 @@ impl QueryTab {
             run_highlight: None,
             run_highlight_task: None,
             syntax_check: None,
+            document,
+            server_connection: None,
+            format_task: None,
             _subscriptions: subscriptions,
         }
     }
@@ -396,12 +412,27 @@ impl QueryTab {
         } else {
             Vec::new()
         };
+        let connection = self.connection_fields(cx).connection;
+        if self.server_connection != connection {
+            self.release_language_server(cx);
+            self.server_connection.clone_from(&connection);
+        }
+        let server_diagnostics = match (&connection, &self.document) {
+            (Some(connection), Some(document)) => {
+                lsp_servers::sync_document(cx, connection, document, &text);
+                lsp_servers::diagnostics(cx, connection, document.as_str())
+            }
+            _ => Vec::new(),
+        };
         let rope = Rope::from(text.as_str());
         self.editor.update(cx, |editor, cx| {
             let Some(diagnostics) = editor.diagnostics_mut() else {
                 return;
             };
             diagnostics.reset(&rope);
+            for diagnostic in server_diagnostics {
+                diagnostics.push(Diagnostic::from(diagnostic));
+            }
             for error in errors {
                 let range = rope.offset_to_position(error.range.start)
                     ..rope.offset_to_position(error.range.end);
@@ -413,6 +444,85 @@ impl QueryTab {
             }
             cx.notify();
         });
+    }
+
+    /// Closes this tab's document on the language server it was sent to.
+    pub fn release_language_server(&mut self, cx: &mut Context<Self>) {
+        if let (Some(connection), Some(document)) = (self.server_connection.take(), &self.document)
+        {
+            lsp_servers::close_document(cx, &connection, document);
+        }
+    }
+
+    /// Replaces the editor's text with the server's formatting, as one undoable edit.
+    fn format_sql(&mut self, _: &FormatSql, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection_fields(cx).connection else {
+            window.push_notification("Pick a connection first.", cx);
+            return;
+        };
+        let client = lsp_servers::client(cx, &connection);
+        let status = lsp_servers::status(cx, &connection);
+        let (Some(client), Some(document)) = (client, self.document.clone()) else {
+            let message = match status {
+                Some((command, lsp_servers::ServerStatus::Starting)) => {
+                    format!("{command} is starting; try again in a moment.")
+                }
+                Some((command, lsp_servers::ServerStatus::Failed { message, .. })) => {
+                    format!("{command}: {message}")
+                }
+                Some((_, lsp_servers::ServerStatus::Running)) | None => "Format SQL needs a language server for this connection's database (see language_servers in settings.toml).".to_owned(),
+            };
+            window.push_notification(message, cx);
+            return;
+        };
+        if !lsp_servers::can_format(client.capabilities()) {
+            window.push_notification("This language server does not format SQL.", cx);
+            return;
+        }
+        let text = self.editor.read(cx).value().to_string();
+        lsp_servers::sync_document(cx, &connection, &document, &text);
+        let params = lsp_types::DocumentFormattingParams {
+            text_document: lsp_types::TextDocumentIdentifier::new(document),
+            options: lsp_types::FormattingOptions {
+                tab_size: 4,
+                insert_spaces: true,
+                ..lsp_types::FormattingOptions::default()
+            },
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+        };
+        let request = tokio_bridge::spawn(cx, async move {
+            client
+                .request::<lsp_types::request::Formatting>(params)
+                .await
+        });
+        self.format_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let edits = match request.await {
+                Ok(Ok(edits)) => edits.unwrap_or_default(),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "format request");
+                    return;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "format task");
+                    return;
+                }
+            };
+            let applied = this.update_in(cx, |this, window, cx| {
+                let current = this.editor.read(cx).value().to_string();
+                // The user kept typing; these edits are for older text.
+                if current != text || edits.is_empty() {
+                    return;
+                }
+                let formatted = apply_text_edits(&current, &edits);
+                this.editor.update(cx, |editor, cx| {
+                    editor.set_selected_range(0..current.len(), cx);
+                    editor.replace(formatted, window, cx);
+                });
+            });
+            if let Err(error) = applied {
+                tracing::debug!(%error, "tab closed before formatting finished");
+            }
+        }));
     }
 
     fn update_block_cursor(&mut self, cx: &mut Context<Self>) {
@@ -901,6 +1011,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::export_csv))
+            .on_action(cx.listener(Self::format_sql))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
@@ -1037,6 +1148,40 @@ fn line_span(text: &str, range: &Range<usize>) -> SharedString {
     }
 }
 
+/// The URI a language server knows this tab's text by.
+fn tab_document(number: usize) -> Option<lsp_types::Uri> {
+    format!("file:///sql-editor/tab-{number}.sql").parse().ok()
+}
+
+/// `text` with LSP edits applied; edits are applied from the end so earlier offsets stay valid.
+fn apply_text_edits(text: &str, edits: &[lsp_types::TextEdit]) -> String {
+    let rope = Rope::from(text);
+    let mut ranges: Vec<(usize, Range<usize>, &str)> = edits
+        .iter()
+        .enumerate()
+        .map(|(index, edit)| {
+            (
+                index,
+                rope.position_to_offset(&edit.range.start)
+                    ..rope.position_to_offset(&edit.range.end),
+                edit.new_text.as_str(),
+            )
+        })
+        .collect();
+    // From the end; inserts at one position go in reverse so they read in array order.
+    ranges.sort_by_key(|(index, range, _)| std::cmp::Reverse((range.start, *index)));
+    let mut result = text.to_owned();
+    for (_, range, new_text) in ranges {
+        if result.is_char_boundary(range.start)
+            && result.is_char_boundary(range.end)
+            && range.start <= range.end
+        {
+            result.replace_range(range, new_text);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1055,5 +1200,23 @@ mod tests {
         let text = "select 1;\nselect\n  2;";
         assert_eq!(line_span(text, &(0..8)), "line 1");
         assert_eq!(line_span(text, &(10..20)), "lines 2–3");
+    }
+
+    #[test]
+    fn applies_text_edits_from_the_end() {
+        let edit = |line, start, end, text: &str| lsp_types::TextEdit {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, start),
+                lsp_types::Position::new(line, end),
+            ),
+            new_text: text.to_owned(),
+        };
+        let edits = [edit(0, 0, 6, "SELECT"), edit(1, 0, 4, "FROM")];
+        assert_eq!(
+            apply_text_edits("select 1\nfrom t", &edits),
+            "SELECT 1\nFROM t"
+        );
+        let inserts = [edit(0, 0, 0, "a"), edit(0, 0, 0, "b")];
+        assert_eq!(apply_text_edits("x", &inserts), "abx");
     }
 }

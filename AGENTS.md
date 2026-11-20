@@ -21,9 +21,10 @@ crates/
   sql_editor/              # binary: gpui app, views, actions, keymap
   sql_db/                  # Driver trait, Value, one module per database
   sql_text/                # pure logic: statement under cursor, vim state machine
+  sql_lsp/                 # language server client over stdio, no UI
 ```
 
-`sql_text` and `sql_db` never depend on gpui. Logic that can be tested without a window goes in `sql_text`.
+`sql_text`, `sql_db` and `sql_lsp` never depend on gpui. Logic that can be tested without a window goes in `sql_text`.
 
 ## Project rules
 

@@ -16,7 +16,9 @@ use lsp_types::{
 use sql_db::{ColumnInfo, Dialect};
 use sql_text::completion::{self, Expectation, TableRef};
 
+use crate::lsp_servers;
 use crate::schema_cache::{self, Schema};
+use crate::tokio_bridge;
 
 /// Most items shown at once; the menu narrows as the user types.
 const MAX_ITEMS: usize = 200;
@@ -27,7 +29,35 @@ const MAX_ITEMS: usize = 200;
 pub struct TabTarget {
     pub connection: WeakEntity<SelectState<Vec<SharedString>>>,
     pub database: WeakEntity<InputState>,
+    /// The tab's document for a language server.
+    pub document: Option<lsp_types::Uri>,
 }
+
+impl TabTarget {
+    fn connection_name(&self, cx: &App) -> Option<SharedString> {
+        self.connection
+            .upgrade()?
+            .read(cx)
+            .selected_value()
+            .cloned()
+    }
+
+    /// The connection's language server, with this tab's text sent to it.
+    fn server(
+        &self,
+        cx: &mut App,
+        text: &str,
+    ) -> Option<(Arc<sql_lsp::LspClient>, lsp_types::Uri)> {
+        let connection = self.connection_name(cx)?;
+        let document = self.document.clone()?;
+        let client = lsp_servers::client(cx, &connection)?;
+        lsp_servers::sync_document(cx, &connection, &document, text);
+        Some((client, document))
+    }
+}
+
+/// How long completion waits for the server before showing built-in items alone.
+const SERVER_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub struct SqlCompletions {
     pub target: TabTarget,
@@ -39,12 +69,7 @@ pub struct SqlHover {
 
 /// The schema for the tab's connection and database, when loaded.
 fn tab_schema(target: &TabTarget, cx: &mut App) -> Option<Arc<Schema>> {
-    let connection: SharedString = target
-        .connection
-        .upgrade()?
-        .read(cx)
-        .selected_value()
-        .cloned()?;
+    let connection = target.connection_name(cx)?;
     let database = target
         .database
         .upgrade()?
@@ -117,7 +142,45 @@ impl CompletionProvider for SqlCompletions {
                 ..CompletionItem::default()
             })
             .collect();
-        Task::ready(Ok(CompletionResponse::Array(items)))
+        let server = self
+            .target
+            .server(cx, &source)
+            .filter(|(client, _)| client.capabilities().completion_provider.is_some());
+        let Some((client, document)) = server else {
+            return Task::ready(Ok(CompletionResponse::Array(items)));
+        };
+        let params = lsp_types::CompletionParams {
+            text_document_position: lsp_types::TextDocumentPositionParams::new(
+                lsp_types::TextDocumentIdentifier::new(document),
+                text.offset_to_position(offset),
+            ),
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+            context: None,
+        };
+        let request = tokio_bridge::spawn(cx, async move {
+            tokio::time::timeout(
+                SERVER_COMPLETION_TIMEOUT,
+                client.request::<lsp_types::request::Completion>(params),
+            )
+            .await
+        });
+        cx.spawn(async move |_| {
+            let server_items = match request.await {
+                Ok(Ok(Ok(Some(CompletionResponse::Array(items))))) => items,
+                Ok(Ok(Ok(Some(CompletionResponse::List(list))))) => list.items,
+                Ok(Ok(Ok(None)) | Err(_)) => Vec::new(),
+                Ok(Ok(Err(error))) => {
+                    tracing::debug!(%error, "server completion");
+                    Vec::new()
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "server completion task");
+                    Vec::new()
+                }
+            };
+            Ok(CompletionResponse::Array(merge(items, server_items)))
+        })
     }
 
     fn is_completion_trigger(&self, _offset: usize, new_text: &str, _cx: &mut App) -> bool {
@@ -212,6 +275,20 @@ fn candidates(
     candidates
 }
 
+/// Built-in items first, then the server's, skipping labels already offered.
+fn merge(mut items: Vec<CompletionItem>, server_items: Vec<CompletionItem>) -> Vec<CompletionItem> {
+    let mut seen: std::collections::HashSet<String> =
+        items.iter().map(|item| item.label.to_lowercase()).collect();
+    let offset = items.len();
+    for (index, mut item) in server_items.into_iter().enumerate() {
+        if seen.insert(item.label.to_lowercase()) {
+            item.sort_text = Some(format!("{:04}", offset + index));
+            items.push(item);
+        }
+    }
+    items
+}
+
 struct Candidate {
     label: String,
     kind: CompletionItemKind,
@@ -275,20 +352,62 @@ impl HoverProvider for SqlHover {
         cx: &mut App,
     ) -> Task<Result<Option<Hover>>> {
         let Some(schema) = tab_schema(&self.target, cx) else {
-            return Task::ready(Ok(None));
+            return server_hover(&self.target, text, offset, cx);
         };
         let source = text.to_string();
         let markdown = completion::name_at(&source, offset).and_then(|(parts, _)| {
             describe(&schema, &completion::tables_at(&source, offset), &parts)
         });
-        Task::ready(Ok(markdown.map(|value| Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value,
-            }),
-            range: None,
-        })))
+        if let Some(value) = markdown {
+            return Task::ready(Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value,
+                }),
+                range: None,
+            })));
+        }
+        server_hover(&self.target, text, offset, cx)
     }
+}
+
+/// The language server's hover, when the built-in one has nothing.
+fn server_hover(
+    target: &TabTarget,
+    text: &Rope,
+    offset: usize,
+    cx: &mut App,
+) -> Task<Result<Option<Hover>>> {
+    let source = text.to_string();
+    let server = target
+        .server(cx, &source)
+        .filter(|(client, _)| lsp_servers::can_hover(client.capabilities()));
+    let Some((client, document)) = server else {
+        return Task::ready(Ok(None));
+    };
+    let params = lsp_types::HoverParams {
+        text_document_position_params: lsp_types::TextDocumentPositionParams::new(
+            lsp_types::TextDocumentIdentifier::new(document),
+            text.offset_to_position(offset),
+        ),
+        work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+    };
+    let request = tokio_bridge::spawn(cx, async move {
+        client
+            .request::<lsp_types::request::HoverRequest>(params)
+            .await
+    });
+    cx.spawn(async move |_| match request.await {
+        Ok(Ok(hover)) => Ok(hover),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "server hover");
+            Ok(None)
+        }
+        Err(error) => {
+            tracing::debug!(%error, "server hover task");
+            Ok(None)
+        }
+    })
 }
 
 /// Markdown for the table or column `parts` names, if the schema knows it.
