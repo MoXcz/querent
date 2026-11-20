@@ -527,10 +527,6 @@ impl QueryTab {
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let running = matches!(self.state, QueryState::Running { .. });
-        let exportable = self
-            .shown_result
-            .as_ref()
-            .is_some_and(|result| !result.columns.is_empty());
         h_flex()
             .gap_2()
             .p_2()
@@ -570,16 +566,39 @@ impl QueryTab {
                         this.cancel_query(&CancelQuery, window, cx);
                     })),
             )
-            .child(
-                Button::new("export-csv")
-                    .small()
-                    .label("Export CSV")
-                    .tooltip("Save the result as CSV (Ctrl+Shift+E)")
-                    .disabled(!exportable)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.export_csv(&ExportCsv, window, cx);
-                    })),
-            )
+    }
+
+    /// Row count and Export CSV under the grid, shown while it holds a result.
+    fn render_results_footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let result = self
+            .shown_result
+            .as_ref()
+            .filter(|result| !result.columns.is_empty())?;
+        let mut summary = format!("{} rows", result.rows.len());
+        if result.truncated {
+            summary.push_str(" (truncated)");
+        }
+        Some(
+            h_flex()
+                .justify_between()
+                .px_2()
+                .py_1()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(summary)
+                .child(
+                    Button::new("export-csv")
+                        .ghost()
+                        .xsmall()
+                        .label("Export CSV")
+                        .tooltip("Save the result as CSV (Ctrl+Shift+E)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.export_csv(&ExportCsv, window, cx);
+                        })),
+                ),
+        )
     }
 
     fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -599,9 +618,15 @@ impl QueryTab {
                     None => "Statement completed.".to_owned(),
                 })
                 .into_any_element(),
-            QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => div()
+            QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
                 .size_full()
-                .child(DataTable::new(&self.results).stripe(true).bordered(false))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(DataTable::new(&self.results).stripe(true).bordered(false)),
+                )
+                .children(self.render_results_footer(cx))
                 .into_any_element(),
         }
     }
