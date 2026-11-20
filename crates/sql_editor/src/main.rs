@@ -1,3 +1,4 @@
+mod connection_form;
 mod connections;
 mod object_explorer;
 mod query_tab;

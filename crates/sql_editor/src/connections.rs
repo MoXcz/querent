@@ -1,14 +1,14 @@
 //! Saved connections in `<config dir>/connections.toml`.
 //!
-//! Service principal connection strings carry a client secret, so the file is
-//! owner-only (0600) until the secret can move to the OS keychain.
+//! Passwords and service principal secrets are saved here, so the file is
+//! owner-only (0600) until they can move to the OS keychain.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use gpui_kit::{App, BorrowAppContext as _, Global, SharedString};
 use serde::{Deserialize, Serialize};
-use sql_db::{ConnectionStringError, TdsConfig};
+use sql_db::{ConnectionSettings, ConnectionStringError, TdsConfig};
 
 use crate::settings;
 
@@ -17,23 +17,71 @@ const CONNECTIONS_FILE: &str = "connections.toml";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub name: String,
-    pub connection_string: String,
+    pub settings: ConnectionSettings,
 }
 
 impl SavedConnection {
     pub fn config(&self) -> Result<TdsConfig, ConnectionStringError> {
-        sql_db::parse_connection_string(&self.connection_string)
+        self.settings.tds_config()
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct ConnectionsFile {
     #[serde(default, rename = "connection")]
-    connections: Vec<SavedConnection>,
+    connections: Vec<StoredConnection>,
+}
+
+/// Versions before 0.0.11 saved a connection string instead of `settings`.
+/// No `Debug`: `connection_string` may hold a password in plain text.
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredConnection {
+    name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection_string: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    settings: Option<ConnectionSettings>,
+}
+
+impl StoredConnection {
+    /// An entry that cannot be converted comes back unchanged, to be written back as is.
+    #[expect(
+        clippy::result_large_err,
+        reason = "called once per saved connection at startup"
+    )]
+    fn into_saved(self) -> Result<SavedConnection, Self> {
+        let settings = match (&self.settings, &self.connection_string) {
+            (Some(settings), _) => settings.clone(),
+            (None, Some(text)) => match ConnectionSettings::from_connection_string(text) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    tracing::warn!(name = %self.name, %error, "keeping a saved connection whose string no longer parses");
+                    return Err(self);
+                }
+            },
+            (None, None) => return Err(self),
+        };
+        Ok(SavedConnection {
+            name: self.name,
+            settings,
+        })
+    }
+}
+
+impl From<SavedConnection> for StoredConnection {
+    fn from(saved: SavedConnection) -> Self {
+        Self {
+            name: saved.name,
+            connection_string: None,
+            settings: Some(saved.settings),
+        }
+    }
 }
 
 pub struct ConnectionStore {
     connections: Vec<SavedConnection>,
+    /// Entries this version cannot read, kept so saving does not delete them.
+    unreadable: Vec<StoredConnection>,
     path: Option<PathBuf>,
 }
 
@@ -41,8 +89,12 @@ impl Global for ConnectionStore {}
 
 pub fn init(cx: &mut App) {
     let path = settings::config_dir(cx).map(|directory| directory.join(CONNECTIONS_FILE));
-    let connections = path.as_deref().map(load).unwrap_or_default();
-    cx.set_global(ConnectionStore { connections, path });
+    let (connections, unreadable) = path.as_deref().map(load).unwrap_or_default();
+    cx.set_global(ConnectionStore {
+        connections,
+        unreadable,
+        path,
+    });
 }
 
 pub fn all(cx: &App) -> &[SavedConnection] {
@@ -54,6 +106,14 @@ pub fn names(cx: &App) -> Vec<SharedString> {
         .iter()
         .map(|connection| SharedString::from(connection.name.clone()))
         .collect()
+}
+
+/// Names of saved entries this version cannot read; a new connection must not reuse one.
+pub fn is_unreadable_name(cx: &App, name: &str) -> bool {
+    cx.global::<ConnectionStore>()
+        .unreadable
+        .iter()
+        .any(|entry| entry.name == name)
 }
 
 pub fn find<'a>(cx: &'a App, name: &str) -> Option<&'a SavedConnection> {
@@ -96,7 +156,13 @@ fn persist(cx: &mut App) {
         return;
     };
     let file = ConnectionsFile {
-        connections: store.connections.clone(),
+        connections: store
+            .connections
+            .iter()
+            .cloned()
+            .map(StoredConnection::from)
+            .chain(store.unreadable.iter().cloned())
+            .collect(),
     };
     cx.background_executor()
         .spawn(async move {
@@ -107,21 +173,33 @@ fn persist(cx: &mut App) {
         .detach();
 }
 
-fn load(path: &Path) -> Vec<SavedConnection> {
+fn load(path: &Path) -> (Vec<SavedConnection>, Vec<StoredConnection>) {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str::<ConnectionsFile>(&text) {
-            Ok(file) => file.connections,
+            Ok(file) => split(file.connections),
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "ignoring invalid connections file");
-                Vec::new()
+                (Vec::new(), Vec::new())
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), Vec::new()),
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "cannot read connections file");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
+}
+
+fn split(stored: Vec<StoredConnection>) -> (Vec<SavedConnection>, Vec<StoredConnection>) {
+    let mut saved = Vec::new();
+    let mut unreadable = Vec::new();
+    for entry in stored {
+        match entry.into_saved() {
+            Ok(connection) => saved.push(connection),
+            Err(entry) => unreadable.push(entry),
+        }
+    }
+    (saved, unreadable)
 }
 
 fn write(path: &Path, file: &ConnectionsFile) -> anyhow::Result<()> {
@@ -156,19 +234,62 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use sql_db::{Authentication, DriverKind};
+
     use super::*;
 
     #[test]
     fn file_round_trips() {
+        let saved = SavedConnection {
+            name: "BI warehouse".to_owned(),
+            settings: ConnectionSettings {
+                server: "h".to_owned(),
+                database: "a;b".to_owned(),
+                authentication: Authentication::Password {
+                    user: "sa".to_owned(),
+                    password: "pw".to_owned(),
+                },
+                ..ConnectionSettings::new(DriverKind::SqlServer)
+            },
+        };
         let file = ConnectionsFile {
-            connections: vec![SavedConnection {
-                name: "BI warehouse".to_owned(),
-                connection_string: "Server=h;Database='a;b'".to_owned(),
-            }],
+            connections: vec![StoredConnection::from(saved.clone())],
         };
         let text = toml::to_string_pretty(&file).unwrap();
         assert!(text.contains("[[connection]]"));
         let parsed: ConnectionsFile = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.connections, file.connections);
+        let (loaded, unreadable) = split(parsed.connections);
+        assert_eq!(loaded, vec![saved]);
+        assert!(unreadable.is_empty());
+    }
+
+    #[test]
+    fn reads_connection_strings_from_older_versions() {
+        let text = r#"
+[[connection]]
+name = "Fabric"
+connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analytics"
+"#;
+        let parsed: ConnectionsFile = toml::from_str(text).unwrap();
+        let (saved, _) = split(parsed.connections);
+        assert_eq!(saved[0].settings.driver, DriverKind::Fabric);
+        assert_eq!(saved[0].settings.database, "analytics");
+    }
+
+    #[test]
+    fn keeps_strings_it_cannot_read() {
+        let text = r#"
+[[connection]]
+name = "Old"
+connection_string = "Server=h;Integrated Security=SSPI"
+"#;
+        let parsed: ConnectionsFile = toml::from_str(text).unwrap();
+        let (saved, unreadable) = split(parsed.connections);
+        assert_eq!(saved, Vec::new());
+        let rewritten = toml::to_string(&ConnectionsFile {
+            connections: unreadable,
+        })
+        .unwrap();
+        assert!(rewritten.contains("Integrated Security=SSPI"));
     }
 }

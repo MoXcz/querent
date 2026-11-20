@@ -1,6 +1,5 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
@@ -12,6 +11,7 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div, px,
 };
 
+use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
@@ -142,26 +142,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let name_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("BI warehouse")
-                .default_value(
-                    editing
-                        .as_ref()
-                        .map(|saved| saved.name.clone())
-                        .unwrap_or_default(),
-                )
-        });
-        let string_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("Server=host,1433;Database=...;User ID=...;Password=...  or  Authentication=ActiveDirectoryDefault")
-                .default_value(
-                    editing
-                        .as_ref()
-                        .map(|saved| saved.connection_string.clone())
-                        .unwrap_or_default(),
-                )
-        });
+        let form = cx.new(|cx| ConnectionForm::new(editing.as_ref(), window, cx));
         let original_name = editing.map(|saved| saved.name);
         let title = if original_name.is_some() {
             "Edit connection"
@@ -169,26 +150,15 @@ impl Workspace {
             "New connection"
         };
         let workspace = cx.weak_entity();
-        let name_focus = name_input.focus_handle(cx);
+        let name_focus = form.focus_handle(cx);
         window.open_dialog(cx, move |dialog, _, _| {
-            let name_input = name_input.clone();
-            let string_input = string_input.clone();
+            let form = form.clone();
             let original_name = original_name.clone();
             let workspace = workspace.clone();
             dialog
                 .title(title)
                 .w(px(640.))
-                .child(
-                    v_flex()
-                        .gap_3()
-                        .child(field_label("Name"))
-                        .child(Input::new(&name_input))
-                        .child(field_label("Connection string"))
-                        .child(Input::new(&string_input))
-                        .child(div().text_xs().child(
-                            "SQL login (User ID and Password) or Entra ID (your az login session, or a service principal). Add TrustServerCertificate=True for a self-signed certificate.",
-                        )),
-                )
+                .child(form.clone())
                 .footer(
                     DialogFooter::new()
                         .child(
@@ -200,24 +170,22 @@ impl Workspace {
                         ),
                 )
                 .on_ok(move |_, window, cx| {
-                    let name = name_input.read(cx).value().trim().to_owned();
-                    let connection_string = string_input.read(cx).value().trim().to_owned();
-                    if name.is_empty() {
-                        window.push_notification("Give the connection a name.", cx);
+                    let saved = match form.read(cx).saved_connection(cx) {
+                        Ok(saved) => saved,
+                        Err(message) => {
+                            window.push_notification(message, cx);
+                            return false;
+                        }
+                    };
+                    if connections::is_unreadable_name(cx, &saved.name) {
+                        window.push_notification(
+                            "connections.toml has an entry with this name that this version cannot read; choose another name.",
+                            cx,
+                        );
                         return false;
                     }
-                    if let Err(error) = sql_db::parse_connection_string(&connection_string) {
-                        window.push_notification(format!("Connection string: {error}"), cx);
-                        return false;
-                    }
-                    connections::save(
-                        cx,
-                        SavedConnection {
-                            name: name.clone(),
-                            connection_string,
-                        },
-                        original_name.as_deref(),
-                    );
+                    let name = saved.name.clone();
+                    connections::save(cx, saved, original_name.as_deref());
                     let name = SharedString::from(name);
                     let updated = workspace.update(cx, |workspace, cx| {
                         workspace.use_connection_in_active_tab(&name, window, cx);
@@ -456,8 +424,4 @@ fn render_theme_picker(cx: &App) -> impl IntoElement {
             }
             menu
         })
-}
-
-fn field_label(text: &'static str) -> impl IntoElement {
-    div().text_sm().child(text)
 }

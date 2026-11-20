@@ -18,9 +18,11 @@ tracing.workspace = true
 mssql-tds.workspace = true
 azure_identity.workspace = true
 azure_core.workspace = true
+serde.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+toml.workspace = true

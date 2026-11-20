@@ -8,15 +8,20 @@ A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs que
 cargo run --release
 ```
 
-Add a connection with `+` in the Connections sidebar: give it a name and paste a connection string. SQL Server with a SQL login:
+Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server or Microsoft Fabric), fill in the server, database and sign-in method, and the form asks only for that method's values:
+
+| Sign-in | Fields |
+| --- | --- |
+| SQL Server login | user, password |
+| Entra ID (az login session) | none; run `az login` first |
+| Entra ID service principal | tenant ID, client ID, client secret |
+
+SQL Server also has encryption (Mandatory, Optional, Strict) and "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption.
+
+To start from a connection string, paste it in the box at the top of the form and press Fill from string. For example:
 
 ```text
 Server=db1,1433;Database=sales;User ID=report;Password=...;TrustServerCertificate=True
-```
-
-Fabric with Entra ID, after `az login`:
-
-```text
 Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Authentication=ActiveDirectoryInteractive
 ```
 
@@ -44,7 +49,7 @@ Windows authentication (`Integrated Security`) is not supported yet.
 | `TrustServerCertificate` | `True` for servers with a self-signed certificate |
 | `HostNameInCertificate` | the name the certificate carries, when it differs from the server name |
 
-Connections are saved in `~/.config/sql-editor/connections.toml`, readable only by you, because SQL login and service principal strings contain a password or secret.
+Connections are saved as fields in `~/.config/sql-editor/connections.toml`, readable only by you, because they hold passwords and client secrets.
 
 Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 

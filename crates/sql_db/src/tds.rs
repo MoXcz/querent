@@ -19,13 +19,14 @@ use crate::{CancelHandle, Column, QueryError, QueryOutput, ResultSet, Value};
 
 const SQL_SCOPE: &str = "https://database.windows.net/.default";
 const APPLICATION_NAME: &str = "sql-editor";
-pub const DEFAULT_PORT: u16 = 1433;
+const DEFAULT_PORT: u16 = 1433;
 /// Fabric reports these when it moves or drops a session; one reconnect usually fixes them.
 const TRANSIENT_ERRORS: [u32; 3] = [24804, 6005, 6008];
 const CONNECT_ATTEMPTS: u32 = 2;
 
-/// How the connection signs in.
-#[derive(Clone, Default, PartialEq, Eq)]
+/// How the connection signs in. Saved in `connections.toml`, tagged by `method`.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
 pub enum Authentication {
     /// Entra ID token from the signed-in Azure CLI (or Azure Developer CLI) session.
     #[default]
@@ -36,8 +37,8 @@ pub enum Authentication {
         client_id: String,
         client_secret: String,
     },
-    /// SQL Server login (`User ID` and `Password`).
-    SqlLogin { user: String, password: String },
+    /// User name and password: a SQL Server login, later a PostgreSQL or Snowflake user.
+    Password { user: String, password: String },
 }
 
 impl std::fmt::Debug for Authentication {
@@ -53,8 +54,8 @@ impl std::fmt::Debug for Authentication {
                 .field("tenant_id", tenant_id)
                 .field("client_id", client_id)
                 .finish_non_exhaustive(),
-            Self::SqlLogin { user, .. } => formatter
-                .debug_struct("SqlLogin")
+            Self::Password { user, .. } => formatter
+                .debug_struct("Password")
                 .field("user", user)
                 .finish_non_exhaustive(),
         }
@@ -62,7 +63,8 @@ impl std::fmt::Debug for Authentication {
 }
 
 /// `Encrypt=` in a connection string.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Encryption {
     /// Encrypt only if the server asks for it (`Encrypt=False` or `Optional`).
     Optional,
@@ -163,15 +165,10 @@ impl std::fmt::Debug for TdsConnection {
 impl TdsConnection {
     #[tracing::instrument(skip_all, fields(server = %config.server_label(), database = %config.database))]
     pub async fn connect(config: TdsConfig) -> Result<Self, QueryError> {
-        let token = match &config.authentication {
-            Authentication::AzureCli | Authentication::ServicePrincipal { .. } => {
-                Some(fetch_token(&config.authentication).await?)
-            }
-            Authentication::SqlLogin { .. } => None,
-        };
+        let login = login(&config.authentication).await?;
         let mut last_error = None;
         for attempt in 1..=CONNECT_ATTEMPTS {
-            match open_client(&config, token.as_deref()).await {
+            match open_client(&config, &login).await {
                 Ok(client) => return Ok(Self { client, config }),
                 Err(error) if is_transient(&error) && attempt < CONNECT_ATTEMPTS => {
                     tracing::warn!(attempt, "transient connect error, retrying");
@@ -248,9 +245,21 @@ fn connect_error(config: &TdsConfig, error: &TdsError) -> QueryError {
 
 const LOGIN_FAILED: u32 = 18456;
 
-async fn fetch_token(authentication: &Authentication) -> Result<String, QueryError> {
+/// What goes into the login packet; resolved once, so a retry reuses the token.
+enum Login {
+    Password { user: String, password: String },
+    Token(String),
+}
+
+async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
     let auth_error = |error: azure_core::Error| QueryError::Auth(error.to_string());
     let (credential, hint): (Arc<dyn TokenCredential>, &str) = match authentication {
+        Authentication::Password { user, password } => {
+            return Ok(Login::Password {
+                user: user.clone(),
+                password: password.clone(),
+            });
+        }
         Authentication::AzureCli => (
             DeveloperToolsCredential::new(None).map_err(auth_error)?,
             " Run `az login` and try again.",
@@ -269,32 +278,27 @@ async fn fetch_token(authentication: &Authentication) -> Result<String, QueryErr
             .map_err(auth_error)?,
             " Check the service principal's tenant, client ID and secret.",
         ),
-        Authentication::SqlLogin { .. } => {
-            return Err(QueryError::Auth(
-                "a SQL login has no Entra token".to_owned(),
-            ));
-        }
     };
     let token = credential
         .get_token(&[SQL_SCOPE], None)
         .await
         .map_err(|error| QueryError::Auth(format!("{error}.{hint}")))?;
-    Ok(token.token.secret().to_owned())
+    Ok(Login::Token(token.token.secret().to_owned()))
 }
 
-async fn open_client(config: &TdsConfig, token: Option<&str>) -> TdsResult<TdsClient> {
+async fn open_client(config: &TdsConfig, login: &Login) -> TdsResult<TdsClient> {
     let mut context = ClientContext::default();
     context.database.clone_from(&config.database);
     APPLICATION_NAME.clone_into(&mut context.application_name);
-    match (&config.authentication, token) {
-        (Authentication::SqlLogin { user, password }, _) => {
+    match login {
+        Login::Password { user, password } => {
             context.tds_authentication_method = TdsAuthenticationMethod::Password;
             context.user_name.clone_from(user);
             context.password.clone_from(password);
         }
-        (Authentication::AzureCli | Authentication::ServicePrincipal { .. }, token) => {
+        Login::Token(token) => {
             context.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
-            context.access_token = token.map(str::to_owned);
+            context.access_token = Some(token.clone());
         }
     }
     context.encryption_options.mode = config.encryption_setting();

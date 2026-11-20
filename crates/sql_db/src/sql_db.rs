@@ -1,6 +1,7 @@
 //! Database drivers behind one result shape, so the UI never sees driver types.
 
 mod catalog;
+mod connection_settings;
 mod connection_string;
 mod csv_export;
 mod tds;
@@ -11,11 +12,12 @@ use std::sync::Arc;
 pub use catalog::{
     CatalogObject, ColumnInfo, ObjectKind, create_table_script, quote_identifier, select_script,
 };
+pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
 pub use connection_string::{
     ConnectionStringError, parse_connection_string, parse_connection_string_with_database,
 };
 pub use csv_export::write_csv;
-pub use tds::{Authentication, DEFAULT_PORT, Encryption, TdsConfig, TdsConnection};
+pub use tds::{Authentication, Encryption, TdsConfig, TdsConnection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {

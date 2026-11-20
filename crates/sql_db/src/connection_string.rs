@@ -11,6 +11,8 @@ pub enum ConnectionStringError {
     MissingDatabase,
     #[error("invalid port in Server: {0}")]
     InvalidPort(String),
+    #[error("the port field says {0} but the server name says {1}")]
+    ConflictingPorts(u16, u16),
     #[error("unterminated quote in the value of {0}")]
     UnterminatedQuote(String),
     #[error("invalid value for {key}: {value}")]
@@ -165,7 +167,7 @@ fn sql_login(fields: &Fields) -> Result<Authentication, ConnectionStringError> {
         .clone()
         .filter(|user| !user.is_empty())
         .ok_or(ConnectionStringError::MissingUser)?;
-    Ok(Authentication::SqlLogin {
+    Ok(Authentication::Password {
         user,
         password: fields.password.clone().unwrap_or_default(),
     })
@@ -299,15 +301,15 @@ fn normalize_key(key: &str) -> String {
         .collect()
 }
 
-struct Server {
-    host: String,
-    port: Option<u16>,
-    instance: Option<String>,
+pub(crate) struct Server {
+    pub(crate) host: String,
+    pub(crate) port: Option<u16>,
+    pub(crate) instance: Option<String>,
 }
 
 /// `tcp:host,port`, `host\instance`, `host\instance,port`, `host,port`, or `host`.
 /// `.` and `(local)` mean this machine.
-fn parse_server(server: &str) -> Result<Server, ConnectionStringError> {
+pub(crate) fn parse_server(server: &str) -> Result<Server, ConnectionStringError> {
     let server = server.trim();
     let server = server
         .get(..4)
@@ -504,7 +506,7 @@ mod tests {
             parse_connection_string("Server=h;Database=d;User ID=sa;Password='p;w'")
                 .unwrap()
                 .authentication,
-            Authentication::SqlLogin {
+            Authentication::Password {
                 user: "sa".to_owned(),
                 password: "p;w".to_owned(),
             }
@@ -513,7 +515,7 @@ mod tests {
             parse_connection_string("sqlserver://sa:p%40ss@h:1433?database=d")
                 .unwrap()
                 .authentication,
-            Authentication::SqlLogin {
+            Authentication::Password {
                 user: "sa".to_owned(),
                 password: "p@ss".to_owned(),
             }
@@ -522,7 +524,7 @@ mod tests {
             parse_connection_string("Server=h;Authentication=SqlPassword"),
             Err(ConnectionStringError::MissingUser)
         );
-        let auth = Authentication::SqlLogin {
+        let auth = Authentication::Password {
             user: "sa".to_owned(),
             password: "hunter2".to_owned(),
         };
