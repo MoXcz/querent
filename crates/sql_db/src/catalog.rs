@@ -48,6 +48,8 @@ pub enum Dialect {
     Postgres,
     /// SQLite: quotes and limits like PostgreSQL.
     Sqlite,
+    /// Snowflake: quotes and limits like PostgreSQL; unquoted names are stored uppercase.
+    Snowflake,
 }
 
 impl Dialect {
@@ -56,7 +58,9 @@ impl Dialect {
     pub fn quote_identifier(self, name: &str) -> String {
         match self {
             Self::TSql => quote_identifier(name),
-            Self::Postgres | Self::Sqlite => format!("\"{}\"", name.replace('"', "\"\"")),
+            Self::Postgres | Self::Sqlite | Self::Snowflake => {
+                format!("\"{}\"", name.replace('"', "\"\""))
+            }
         }
     }
 }
@@ -282,10 +286,10 @@ pub fn select_script(
     let name = object.qualified_name(dialect);
     match (dialect, top) {
         (Dialect::TSql, Some(rows)) => format!("select top {rows}\n{column_list}\nfrom {name};\n"),
-        (Dialect::Postgres | Dialect::Sqlite, Some(rows)) => {
+        (Dialect::Postgres | Dialect::Sqlite | Dialect::Snowflake, Some(rows)) => {
             format!("select\n{column_list}\nfrom {name}\nlimit {rows};\n")
         }
-        (Dialect::TSql | Dialect::Postgres | Dialect::Sqlite, None) => {
+        (Dialect::TSql | Dialect::Postgres | Dialect::Sqlite | Dialect::Snowflake, None) => {
             format!("select\n{column_list}\nfrom {name};\n")
         }
     }

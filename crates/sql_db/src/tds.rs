@@ -41,6 +41,13 @@ pub enum Authentication {
     Password { user: String, password: String },
     /// No sign-in, for a SQLite file.
     None,
+    /// Snowflake key-pair sign-in: the private key file stays where it is.
+    KeyPair {
+        user: String,
+        private_key_path: String,
+        /// Empty for an unencrypted key.
+        passphrase: String,
+    },
 }
 
 impl std::fmt::Debug for Authentication {
@@ -61,6 +68,15 @@ impl std::fmt::Debug for Authentication {
                 .field("user", user)
                 .finish_non_exhaustive(),
             Self::None => formatter.write_str("None"),
+            Self::KeyPair {
+                user,
+                private_key_path,
+                ..
+            } => formatter
+                .debug_struct("KeyPair")
+                .field("user", user)
+                .field("private_key_path", private_key_path)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -263,7 +279,7 @@ async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
                 password: password.clone(),
             });
         }
-        Authentication::None => {
+        Authentication::None | Authentication::KeyPair { .. } => {
             return Err(QueryError::Auth(
                 "SQL Server and Fabric need a sign-in method".to_owned(),
             ));

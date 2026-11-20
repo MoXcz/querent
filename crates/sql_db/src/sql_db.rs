@@ -6,6 +6,7 @@ mod connection_settings;
 mod connection_string;
 mod csv_export;
 mod postgres;
+mod snowflake;
 mod sqlite;
 mod tds;
 
@@ -21,6 +22,7 @@ pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
 pub use connection_string::{ConnectionStringError, parse_connection_string};
 pub use csv_export::write_csv;
 pub use postgres::{PgConfig, PgConnection};
+pub use snowflake::{SnowflakeConfig, SnowflakeConnection};
 pub use sqlite::{SqliteConfig, SqliteConnection};
 pub use tds::{Authentication, Encryption, TdsConfig, TdsConnection};
 

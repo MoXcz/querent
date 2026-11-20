@@ -7,7 +7,9 @@ use std::ops::Range;
 /// Byte ranges of the statements in `text`, trimmed of surrounding whitespace.
 ///
 /// A statement ends at `;`, at a line holding only `GO`, or at a blank line,
-/// unless that delimiter is inside a string, quoted identifier or comment.
+/// unless that delimiter is inside a string, quoted identifier, comment, or a
+/// dollar-quoted body (`$$ ... $$`, `$tag$ ... $tag$`) as PostgreSQL and
+/// Snowflake write function bodies.
 /// Comment-only segments are skipped.
 #[must_use]
 pub fn statements(text: &str) -> Vec<Range<usize>> {
@@ -28,6 +30,18 @@ pub fn statements(text: &str) -> Vec<Range<usize>> {
                 index = skip_quoted(bytes, index, b']');
                 segment.has_code = true;
                 continue;
+            }
+            b'$' => {
+                if let Some(end) = skip_dollar_quoted(bytes, index) {
+                    // A blank line or `GO` right after the body still ends the statement.
+                    if let Some(newline) = text.get(index..end).and_then(|body| body.rfind('\n')) {
+                        line_start = index + newline + 1;
+                    }
+                    index = end;
+                    segment.has_code = true;
+                    continue;
+                }
+                segment.has_code = true;
             }
             b'-' if bytes.get(index + 1) == Some(&b'-') => {
                 index = skip_line_comment(bytes, index);
@@ -124,6 +138,37 @@ fn is_delimiter_line(line: &str) -> bool {
     line.is_empty() || line.eq_ignore_ascii_case("go")
 }
 
+/// For `$tag$` at `open_index`, the index after the matching closing `$tag$`
+/// (or the end of the text); `None` when the `$` does not open a dollar quote,
+/// as in `$1`, `$action` or an identifier such as `a$b`.
+fn skip_dollar_quoted(bytes: &[u8], open_index: usize) -> Option<usize> {
+    let is_word = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$';
+    if open_index > 0 && bytes.get(open_index - 1).copied().is_some_and(is_word) {
+        return None;
+    }
+    let mut tag_end = open_index + 1;
+    while let Some(&byte) = bytes.get(tag_end) {
+        if byte == b'$' {
+            break;
+        }
+        let starts_with_digit = tag_end == open_index + 1 && byte.is_ascii_digit();
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') || starts_with_digit {
+            return None;
+        }
+        tag_end += 1;
+    }
+    let delimiter = bytes.get(open_index..=tag_end)?;
+    if delimiter.last() != Some(&b'$') {
+        return None;
+    }
+    let body_start = tag_end + 1;
+    let close = bytes
+        .get(body_start..)?
+        .windows(delimiter.len())
+        .position(|window| window == delimiter);
+    Some(close.map_or(bytes.len(), |offset| body_start + offset + delimiter.len()))
+}
+
 /// Returns the index after the closing quote; a doubled closing quote is an escape.
 fn skip_quoted(bytes: &[u8], open_index: usize, close: u8) -> usize {
     let mut index = open_index + 1;
@@ -174,6 +219,40 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_dollar_quoted_bodies_whole() {
+        let text = "create function f() returns int as $$\nselect 1;\n\nselect 2;\n$$ language sql;\nselect 3;";
+        let found: Vec<&str> = statements(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                "create function f() returns int as $$\nselect 1;\n\nselect 2;\n$$ language sql",
+                "select 3",
+            ]
+        );
+        let tagged = "do $body$ begin perform 1; end $body$; select $1, a$b from t";
+        assert_eq!(statements(tagged).len(), 2);
+        let after = "create function f() as $$\nselect 1;\n$$\n\nselect 2";
+        assert_eq!(statements(after).len(), 2);
+    }
+
+    #[test]
+    fn dollar_signs_that_do_not_open_a_quote() {
+        for text in [
+            "merge t using s on 1 = 1 when matched then delete output $action; select 2",
+            "select $partition.pf(x); select 2",
+            "select $IDENTITY from t; select 2",
+            "select $5; select 2",
+            "select a$$b; select 2",
+            "select $1,$2; select 2",
+        ] {
+            assert_eq!(statements(text).len(), 2, "{text}");
+        }
+    }
 
     fn texts(text: &str) -> Vec<&str> {
         statements(text)

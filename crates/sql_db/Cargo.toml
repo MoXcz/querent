@@ -24,6 +24,7 @@ postgres-native-tls.workspace = true
 futures-util.workspace = true
 sql_text.workspace = true
 rusqlite.workspace = true
+snowflake-connector-rs.workspace = true
 native-tls.workspace = true
 
 [lints]

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::catalog::Dialect;
 use crate::connection_string::parse_server;
 use crate::postgres::PgConfig;
+use crate::snowflake::SnowflakeConfig;
 use crate::sqlite::SqliteConfig;
 use crate::{Authentication, ConnectionConfig, ConnectionStringError, Encryption, TdsConfig};
 
@@ -19,10 +20,17 @@ pub enum DriverKind {
     Fabric,
     Postgres,
     Sqlite,
+    Snowflake,
 }
 
 impl DriverKind {
-    pub const ALL: [Self; 4] = [Self::SqlServer, Self::Fabric, Self::Postgres, Self::Sqlite];
+    pub const ALL: [Self; 5] = [
+        Self::SqlServer,
+        Self::Fabric,
+        Self::Postgres,
+        Self::Sqlite,
+        Self::Snowflake,
+    ];
 
     #[must_use]
     pub fn label(self) -> &'static str {
@@ -31,6 +39,7 @@ impl DriverKind {
             Self::Fabric => "Microsoft Fabric",
             Self::Postgres => "PostgreSQL",
             Self::Sqlite => "SQLite",
+            Self::Snowflake => "Snowflake",
         }
     }
 
@@ -40,6 +49,7 @@ impl DriverKind {
             Self::SqlServer | Self::Fabric => Dialect::TSql,
             Self::Postgres => Dialect::Postgres,
             Self::Sqlite => Dialect::Sqlite,
+            Self::Snowflake => Dialect::Snowflake,
         }
     }
 
@@ -47,8 +57,17 @@ impl DriverKind {
     #[must_use]
     pub fn is_file(self) -> bool {
         match self {
-            Self::SqlServer | Self::Fabric | Self::Postgres => false,
+            Self::SqlServer | Self::Fabric | Self::Postgres | Self::Snowflake => false,
             Self::Sqlite => true,
+        }
+    }
+
+    /// Snowflake's session context: warehouse, role and schema.
+    #[must_use]
+    pub fn has_session_context(self) -> bool {
+        match self {
+            Self::SqlServer | Self::Fabric | Self::Postgres | Self::Sqlite => false,
+            Self::Snowflake => true,
         }
     }
 
@@ -65,7 +84,8 @@ impl DriverKind {
                 (Encryption::Optional, "Prefer"),
                 (Encryption::Mandatory, "Require"),
             ],
-            Self::Sqlite => &[],
+            // Snowflake is always HTTPS.
+            Self::Sqlite | Self::Snowflake => &[],
         }
     }
 
@@ -81,6 +101,7 @@ impl DriverKind {
             Self::Fabric => &[AuthMethod::AzureCli, AuthMethod::ServicePrincipal],
             Self::Postgres => &[AuthMethod::Password],
             Self::Sqlite => &[AuthMethod::None],
+            Self::Snowflake => &[AuthMethod::Password, AuthMethod::KeyPair],
         }
     }
 
@@ -90,7 +111,7 @@ impl DriverKind {
         match self {
             Self::SqlServer | Self::Postgres => true,
             // Fabric endpoints are always port 1433 with strict encryption.
-            Self::Fabric | Self::Sqlite => false,
+            Self::Fabric | Self::Sqlite | Self::Snowflake => false,
         }
     }
 }
@@ -102,6 +123,7 @@ pub enum AuthMethod {
     AzureCli,
     ServicePrincipal,
     None,
+    KeyPair,
 }
 
 impl AuthMethod {
@@ -109,9 +131,14 @@ impl AuthMethod {
     pub fn label(self, driver: DriverKind) -> &'static str {
         match (self, driver) {
             (Self::Password, DriverKind::SqlServer) => "SQL Server login",
-            (Self::Password, DriverKind::Fabric | DriverKind::Postgres | DriverKind::Sqlite) => {
-                "User name and password"
-            }
+            (
+                Self::Password,
+                DriverKind::Fabric
+                | DriverKind::Postgres
+                | DriverKind::Sqlite
+                | DriverKind::Snowflake,
+            ) => "User name and password",
+            (Self::KeyPair, _) => "Key pair (private key file)",
             (Self::AzureCli, _) => "Entra ID (az login session)",
             (Self::ServicePrincipal, _) => "Entra ID service principal",
             (Self::None, _) => "None",
@@ -133,6 +160,11 @@ impl AuthMethod {
                 client_secret: String::new(),
             },
             Self::None => Authentication::None,
+            Self::KeyPair => Authentication::KeyPair {
+                user: String::new(),
+                private_key_path: String::new(),
+                passphrase: String::new(),
+            },
         }
     }
 }
@@ -144,6 +176,7 @@ impl From<&Authentication> for AuthMethod {
             Authentication::AzureCli => Self::AzureCli,
             Authentication::ServicePrincipal { .. } => Self::ServicePrincipal,
             Authentication::None => Self::None,
+            Authentication::KeyPair { .. } => Self::KeyPair,
         }
     }
 }
@@ -165,6 +198,13 @@ pub struct ConnectionSettings {
     pub trust_server_certificate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_name_in_certificate: Option<String>,
+    /// Snowflake session context; empty uses the user's defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
 }
 
 impl ConnectionSettings {
@@ -185,12 +225,18 @@ impl ConnectionSettings {
                 .map_or_else(Encryption::default, |(encryption, _)| *encryption),
             trust_server_certificate: false,
             host_name_in_certificate: None,
+            warehouse: None,
+            role: None,
+            schema: None,
         }
     }
 
     /// SQL Server and Fabric strings (ADO.NET or `sqlserver://`), or PostgreSQL
     /// strings (`postgres://` URL or libpq `host=... dbname=...`).
     pub fn from_connection_string(text: &str) -> Result<Self, ConnectionStringError> {
+        if crate::connection_string::is_snowflake_string(text) {
+            return crate::connection_string::parse_snowflake_string(text);
+        }
         if let Some(path) = crate::connection_string::sqlite_path(text) {
             return Ok(Self {
                 server: path,
@@ -215,6 +261,19 @@ impl ConnectionSettings {
                     return Err(ConnectionStringError::MissingServer);
                 }
                 Ok(ConnectionConfig::Sqlite(SqliteConfig::new(path)))
+            }
+            DriverKind::Snowflake => {
+                let account = snowflake_account(&self.server);
+                if account.is_empty() {
+                    return Err(ConnectionStringError::MissingServer);
+                }
+                Ok(ConnectionConfig::Snowflake(SnowflakeConfig {
+                    warehouse: self.warehouse.clone(),
+                    role: self.role.clone(),
+                    database: self.database.clone(),
+                    schema: self.schema.clone(),
+                    ..SnowflakeConfig::new(account, self.authentication.clone())
+                }))
             }
         }
     }
@@ -247,7 +306,10 @@ impl ConnectionSettings {
             (field, in_server) => field.or(in_server),
         };
         let encryption = match self.driver {
-            DriverKind::SqlServer | DriverKind::Postgres | DriverKind::Sqlite => self.encryption,
+            DriverKind::SqlServer
+            | DriverKind::Postgres
+            | DriverKind::Sqlite
+            | DriverKind::Snowflake => self.encryption,
             // Fabric only speaks TDS 8.0, whatever host name the endpoint uses.
             DriverKind::Fabric => Encryption::Strict,
         };
@@ -262,6 +324,20 @@ impl ConnectionSettings {
             ..config
         })
     }
+}
+
+/// The account identifier from a typed value that may be the full host name
+/// (`xy12345.snowflakecomputing.com`) or a URL.
+fn snowflake_account(server: &str) -> String {
+    let server = server.trim();
+    let server = server
+        .strip_prefix("https://")
+        .or_else(|| server.strip_prefix("http://"))
+        .unwrap_or(server);
+    let host = server.split('/').next().unwrap_or_default();
+    host.strip_suffix(".snowflakecomputing.com")
+        .unwrap_or(host)
+        .to_owned()
 }
 
 impl From<TdsConfig> for ConnectionSettings {
@@ -284,6 +360,9 @@ impl From<TdsConfig> for ConnectionSettings {
             encryption: config.encryption,
             trust_server_certificate: config.trust_server_certificate,
             host_name_in_certificate: config.host_name_in_certificate,
+            warehouse: None,
+            role: None,
+            schema: None,
         }
     }
 }
@@ -398,6 +477,40 @@ mod tests {
             assert_eq!(settings.server, "/tmp/shop.db", "{text}");
             assert_eq!(settings.authentication, Authentication::None);
         }
+    }
+
+    #[test]
+    fn reads_snowflake_strings() {
+        let settings = ConnectionSettings::from_connection_string(
+            "snowflake://me:p%40ss@myorg-acct/SALES/PUBLIC?warehouse=WH&role=ANALYST",
+        )
+        .unwrap();
+        assert_eq!(settings.driver, DriverKind::Snowflake);
+        assert_eq!(settings.server, "myorg-acct");
+        assert_eq!(settings.database, "SALES");
+        assert_eq!(settings.schema.as_deref(), Some("PUBLIC"));
+        assert_eq!(settings.warehouse.as_deref(), Some("WH"));
+        assert_eq!(settings.role.as_deref(), Some("ANALYST"));
+        assert_eq!(
+            settings.authentication,
+            Authentication::Password {
+                user: "me".to_owned(),
+                password: "p@ss".to_owned(),
+            }
+        );
+        let settings = ConnectionSettings::from_connection_string(
+            "account=xy12345.us-east-1;user=svc;private_key_file=/keys/rsa.p8;db=RAW",
+        )
+        .unwrap();
+        assert_eq!(settings.server, "xy12345.us-east-1");
+        assert!(matches!(
+            settings.authentication,
+            Authentication::KeyPair { ref private_key_path, .. } if private_key_path == "/keys/rsa.p8"
+        ));
+        assert_eq!(
+            snowflake_account("https://xy12345.snowflakecomputing.com/"),
+            "xy12345"
+        );
     }
 
     #[test]

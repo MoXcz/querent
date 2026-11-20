@@ -22,6 +22,7 @@ Each file adapted from another project names the source and is listed here with 
 | tokio-postgres, postgres-native-tls | MIT OR Apache-2.0 |
 | native-tls | MIT OR Apache-2.0 |
 | rusqlite, libsqlite3-sys | MIT |
+| snowflake-connector-rs | MIT |
 | SQLite (bundled by libsqlite3-sys) | Public domain |
 
 Run `cargo tree --format "{p} {l}"` for the full list.

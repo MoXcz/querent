@@ -379,6 +379,98 @@ fn read_quoted(text: &str, close: char) -> Option<(String, &str)> {
     None
 }
 
+/// `snowflake://` URLs, or .NET-connector strings with an `account=` key.
+pub(crate) fn is_snowflake_string(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    lower.starts_with("snowflake://")
+        || lower.split(';').any(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(key, _)| normalize_key(key) == "account")
+        })
+}
+
+/// `snowflake://user:password@account/database/schema?warehouse=..&role=..`
+/// (the Go driver's form), or `account=..;user=..;password=..;db=..;schema=..;
+/// warehouse=..;role=..;private_key_file=..;private_key_pwd=..` (the .NET form).
+pub(crate) fn parse_snowflake_string(
+    text: &str,
+) -> Result<crate::ConnectionSettings, ConnectionStringError> {
+    let text = text.trim();
+    let mut values: Vec<(String, String)> = Vec::new();
+    if let Some(rest) = text
+        .get(12..)
+        .filter(|_| text.to_ascii_lowercase().starts_with("snowflake://"))
+    {
+        let (before_query, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let (user_info, location) = match before_query.rsplit_once('@') {
+            Some((user_info, location)) => (Some(user_info), location),
+            None => (None, before_query),
+        };
+        if let Some(user_info) = user_info {
+            let (user, password) = user_info.split_once(':').unwrap_or((user_info, ""));
+            values.push(("user".to_owned(), percent_decode(user)));
+            values.push(("password".to_owned(), percent_decode(password)));
+        }
+        let mut parts = location.split('/');
+        values.push((
+            "account".to_owned(),
+            parts.next().unwrap_or_default().to_owned(),
+        ));
+        if let Some(database) = parts.next().filter(|part| !part.is_empty()) {
+            values.push(("db".to_owned(), percent_decode(database)));
+        }
+        if let Some(schema) = parts.next().filter(|part| !part.is_empty()) {
+            values.push(("schema".to_owned(), percent_decode(schema)));
+        }
+        for parameter in query.split('&').filter(|parameter| !parameter.is_empty()) {
+            let (key, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            values.push((percent_decode(key), percent_decode(value)));
+        }
+    } else {
+        values = pairs(text)?;
+    }
+    let mut settings = crate::ConnectionSettings::new(crate::DriverKind::Snowflake);
+    let (mut user, mut password, mut key_file, mut key_password) =
+        (String::new(), String::new(), String::new(), String::new());
+    for (key, value) in values {
+        let value = value.trim().to_owned();
+        let optional = (!value.is_empty()).then(|| value.clone());
+        match normalize_key(&key).as_str() {
+            "account" => settings.server = value,
+            "user" | "username" => user = value,
+            "password" => password = value,
+            "db" | "database" => settings.database = value,
+            "schema" => settings.schema = optional,
+            "warehouse" => settings.warehouse = optional,
+            "role" => settings.role = optional,
+            "private_key_file" | "privatekeyfile" | "private_key_path" => key_file = value,
+            "private_key_pwd" | "privatekeypwd" | "private_key_file_pwd" => key_password = value,
+            "authenticator"
+                if !matches!(
+                    normalize_key(&value).as_str(),
+                    "snowflake" | "snowflake_jwt"
+                ) =>
+            {
+                return Err(ConnectionStringError::UnsupportedAuthentication(value));
+            }
+            _ => {}
+        }
+    }
+    if settings.server.is_empty() {
+        return Err(ConnectionStringError::MissingServer);
+    }
+    settings.authentication = if key_file.is_empty() {
+        Authentication::Password { user, password }
+    } else {
+        Authentication::KeyPair {
+            user,
+            private_key_path: key_file,
+            passphrase: key_password,
+        }
+    };
+    Ok(settings)
+}
+
 /// The file path from `sqlite://path`, `sqlite:path` or `file:path`.
 pub(crate) fn sqlite_path(text: &str) -> Option<String> {
     let text = text.trim();

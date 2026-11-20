@@ -407,9 +407,11 @@ impl ObjectExplorer {
             cx,
             move |connection| {
                 Box::pin(async move {
-                    // Only SQLite stores a table's `create` statement; for the
-                    // others it is built from the columns.
-                    if object.kind == ObjectKind::Table && dialect != Dialect::Sqlite {
+                    // SQLite and Snowflake give a table's own DDL; for the others
+                    // it is built from the columns.
+                    if object.kind == ObjectKind::Table
+                        && !matches!(dialect, Dialect::Sqlite | Dialect::Snowflake)
+                    {
                         let columns = connection.list_columns(&database, &object).await?;
                         return Ok(Some(sql_db::create_table_script(
                             dialect, &object, &columns,

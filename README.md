@@ -1,6 +1,6 @@
 # sql-editor
 
-A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, PostgreSQL and SQLite. `ROADMAP.md` lists what comes next.
+A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, PostgreSQL, SQLite and Snowflake. `ROADMAP.md` lists what comes next.
 
 ## Run
 
@@ -8,7 +8,7 @@ A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs que
 cargo run --release
 ```
 
-Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server, Microsoft Fabric, PostgreSQL or SQLite), fill in the server, database and sign-in method, and the form asks only for that method's values:
+Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server, Microsoft Fabric, PostgreSQL, SQLite or Snowflake), fill in the server, database and sign-in method, and the form asks only for that method's values:
 
 | Sign-in | Fields |
 | --- | --- |
@@ -16,6 +16,9 @@ Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Serve
 | Entra ID (az login session) | none; run `az login` first |
 | Entra ID service principal | tenant ID, client ID, client secret |
 | None (SQLite) | the database file, typed or chosen with Browse… |
+| Key pair (Snowflake) | user, private key file (`.p8`), passphrase if the key is encrypted |
+
+Snowflake also takes an account identifier (`orgname-accountname` or `xy12345.us-east-1`) and an optional warehouse, role and schema.
 
 SQL Server also has encryption (Mandatory, Optional, Strict) and PostgreSQL has Prefer or Require; both have "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption. PostgreSQL may leave the database empty to use the user's default database.
 
@@ -27,6 +30,7 @@ Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Au
 postgres://report:<password>@db1:5432/sales?sslmode=require
 host=db1 port=5432 user=report dbname=sales
 sqlite:///home/me/data/shop.db
+snowflake://report:<password>@myorg-myaccount/SALES/PUBLIC?warehouse=REPORTING&role=ANALYST
 ```
 
 The URL form works too:

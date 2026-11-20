@@ -38,6 +38,11 @@ pub struct ConnectionForm {
     tenant_id: Entity<InputState>,
     client_id: Entity<InputState>,
     client_secret: Entity<InputState>,
+    private_key_path: Entity<InputState>,
+    passphrase: Entity<InputState>,
+    warehouse: Entity<InputState>,
+    role: Entity<InputState>,
+    schema: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -96,6 +101,11 @@ impl ConnectionForm {
             tenant_id: text("directory (tenant) ID", window, cx),
             client_id: text("application (client) ID", window, cx),
             client_secret: secret("client secret value", window, cx),
+            private_key_path: text("path to the .p8 private key", window, cx),
+            passphrase: secret("empty for an unencrypted key", window, cx),
+            warehouse: text("user's default", window, cx),
+            role: text("user's default", window, cx),
+            schema: text("PUBLIC", window, cx),
             _subscriptions: subscriptions,
         };
         if let Some(saved) = editing {
@@ -116,13 +126,16 @@ impl ConnectionForm {
                 Ok(text)
             }
         };
+        let optional =
+            |input: &Entity<InputState>| Some(value(input)).filter(|text| !text.is_empty());
+        let session_context = self.driver.has_session_context();
         let name = required(&self.name, "connection name")?;
         let server = required(
             &self.server,
-            if self.driver.is_file() {
-                "file path"
-            } else {
-                "server"
+            match (self.driver.is_file(), self.driver.has_session_context()) {
+                (true, _) => "file path",
+                (false, true) => "account",
+                (false, false) => "server",
             },
         )?;
         if !value(&self.connection_string).is_empty() {
@@ -150,6 +163,11 @@ impl ConnectionForm {
                 client_secret: self.client_secret.read(cx).value().to_string(),
             },
             AuthMethod::None => Authentication::None,
+            AuthMethod::KeyPair => Authentication::KeyPair {
+                user: required(&self.user, "user name")?,
+                private_key_path: required(&self.private_key_path, "private key file")?,
+                passphrase: self.passphrase.read(cx).value().to_string(),
+            },
         };
         if let Authentication::ServicePrincipal { client_secret, .. } = &authentication
             && client_secret.is_empty()
@@ -165,6 +183,9 @@ impl ConnectionForm {
             encryption: self.encryption,
             trust_server_certificate: self.trust_server_certificate,
             host_name_in_certificate: self.host_name_in_certificate.clone(),
+            warehouse: optional(&self.warehouse).filter(|_| session_context),
+            role: optional(&self.role).filter(|_| session_context),
+            schema: optional(&self.schema).filter(|_| session_context),
         };
         settings
             .config()
@@ -186,12 +207,25 @@ impl ConnectionForm {
             .unwrap_or_default();
         set_text(&self.port, &port, window, cx);
         set_text(&self.database, &settings.database, window, cx);
+        let text_of = |value: &Option<String>| value.clone().unwrap_or_default();
+        set_text(&self.warehouse, &text_of(&settings.warehouse), window, cx);
+        set_text(&self.role, &text_of(&settings.role), window, cx);
+        set_text(&self.schema, &text_of(&settings.schema), window, cx);
         match &settings.authentication {
             Authentication::Password { user, password } => {
                 set_text(&self.user, user, window, cx);
                 set_text(&self.password, password, window, cx);
             }
             Authentication::AzureCli | Authentication::None => {}
+            Authentication::KeyPair {
+                user,
+                private_key_path,
+                passphrase,
+            } => {
+                set_text(&self.user, user, window, cx);
+                set_text(&self.private_key_path, private_key_path, window, cx);
+                set_text(&self.passphrase, passphrase, window, cx);
+            }
             Authentication::ServicePrincipal {
                 tenant_id,
                 client_id,
@@ -330,8 +364,13 @@ impl ConnectionForm {
         if driver != self.driver {
             // A port, encryption level or certificate choice made for another
             // driver means something else here, or is hidden.
-            if driver.is_file() != self.driver.is_file() {
-                // A host is not a file path, and a file has no database name.
+            if driver.is_file() != self.driver.is_file()
+                || driver.has_session_context() != self.driver.has_session_context()
+            {
+                // A host is not a file path or a Snowflake account.
+                set_text(&self.warehouse, "", window, cx);
+                set_text(&self.role, "", window, cx);
+                set_text(&self.schema, "", window, cx);
                 set_text(&self.server, "", window, cx);
                 set_text(&self.database, "", window, cx);
             }
@@ -375,7 +414,7 @@ impl ConnectionForm {
         }
     }
 
-    fn sign_in_rows(&self) -> Vec<AnyElement> {
+    fn sign_in_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
         match self.auth_method {
             AuthMethod::Password => vec![
                 row("User", Input::new(&self.user)),
@@ -396,17 +435,47 @@ impl ConnectionForm {
                 ),
             ],
             AuthMethod::None => Vec::new(),
+            AuthMethod::KeyPair => vec![
+                row("User", Input::new(&self.user)),
+                row(
+                    "Private key",
+                    h_flex()
+                        .gap_2()
+                        .child(div().flex_1().child(Input::new(&self.private_key_path)))
+                        .child(
+                            Button::new("browse-key")
+                                .label("Browse…")
+                                .outline()
+                                .on_click(cx.listener(|form, _, window, cx| {
+                                    let target = form.private_key_path.clone();
+                                    Self::browse_for_file(target, window, cx);
+                                })),
+                        ),
+                ),
+                row("Passphrase", Input::new(&self.passphrase).mask_toggle()),
+            ],
         }
     }
 
-    fn browse_for_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn session_context_rows(&self) -> Vec<AnyElement> {
+        if !self.driver.has_session_context() {
+            return Vec::new();
+        }
+        vec![
+            row("Warehouse", Input::new(&self.warehouse)),
+            row("Role", Input::new(&self.role)),
+            row("Schema", Input::new(&self.schema)),
+        ]
+    }
+
+    /// Puts the chosen file's path in `target`.
+    fn browse_for_file(target: Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,
             prompt: Some("Open".into()),
         });
-        let server = self.server.clone();
         cx.spawn_in(window, async move |_, cx| {
             let path = match chosen.await {
                 Ok(Ok(Some(paths))) => paths.into_iter().next(),
@@ -421,7 +490,7 @@ impl ConnectionForm {
             };
             let text = path.display().to_string();
             if let Err(error) = cx.update(|window, cx| {
-                server.update(cx, |input, cx| input.set_value(text, window, cx));
+                target.update(cx, |input, cx| input.set_value(text, window, cx));
             }) {
                 tracing::debug!(%error, "connection form closed before the file was chosen");
             }
@@ -475,7 +544,8 @@ impl Render for ConnectionForm {
                             .label("Browse…")
                             .outline()
                             .on_click(cx.listener(|form, _, window, cx| {
-                                form.browse_for_file(window, cx);
+                                let target = form.server.clone();
+                                Self::browse_for_file(target, window, cx);
                             })),
                     ),
             )
@@ -487,6 +557,8 @@ impl Render for ConnectionForm {
                     .child(div().flex_1().child(Input::new(&self.server)))
                     .child(div().w(px(90.)).child(Input::new(&self.port))),
             )
+        } else if self.driver.has_session_context() {
+            row("Account", Input::new(&self.server))
         } else {
             row("Server", Input::new(&self.server))
         };
@@ -516,7 +588,8 @@ impl Render for ConnectionForm {
                 form.child(row("Database", Input::new(&self.database)))
                     .child(row("Sign-in", Select::new(&self.auth_select)))
             })
-            .children(self.sign_in_rows())
+            .children(self.sign_in_rows(cx))
+            .children(self.session_context_rows())
             .children(self.network_rows(cx))
     }
 }

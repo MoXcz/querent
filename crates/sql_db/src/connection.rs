@@ -2,6 +2,7 @@
 
 use crate::catalog::Dialect;
 use crate::postgres::{PgConfig, PgConnection};
+use crate::snowflake::{SnowflakeConfig, SnowflakeConnection};
 use crate::sqlite::{SqliteConfig, SqliteConnection};
 use crate::{
     CancelHandle, CatalogObject, ColumnInfo, QueryError, QueryOutput, TdsConfig, TdsConnection,
@@ -13,6 +14,7 @@ pub enum ConnectionConfig {
     Tds(TdsConfig),
     Postgres(PgConfig),
     Sqlite(SqliteConfig),
+    Snowflake(SnowflakeConfig),
 }
 
 impl ConnectionConfig {
@@ -23,6 +25,7 @@ impl ConnectionConfig {
             Self::Postgres(config) => &config.database,
             // One file; attached databases are named in the SQL itself.
             Self::Sqlite(_) => "",
+            Self::Snowflake(config) => &config.database,
         }
     }
 
@@ -31,6 +34,7 @@ impl ConnectionConfig {
             Self::Tds(config) => config.database = database,
             Self::Postgres(config) => config.database = database,
             Self::Sqlite(_) => {}
+            Self::Snowflake(config) => config.database = database,
         }
     }
 
@@ -39,7 +43,7 @@ impl ConnectionConfig {
     pub fn requires_database(&self) -> bool {
         match self {
             Self::Tds(_) => true,
-            Self::Postgres(_) | Self::Sqlite(_) => false,
+            Self::Postgres(_) | Self::Sqlite(_) | Self::Snowflake(_) => false,
         }
     }
 
@@ -49,6 +53,7 @@ impl ConnectionConfig {
             Self::Tds(_) => Dialect::TSql,
             Self::Postgres(_) => Dialect::Postgres,
             Self::Sqlite(_) => Dialect::Sqlite,
+            Self::Snowflake(_) => Dialect::Snowflake,
         }
     }
 }
@@ -59,6 +64,7 @@ pub enum Connection {
     Tds(Box<TdsConnection>),
     Postgres(Box<PgConnection>),
     Sqlite(SqliteConnection),
+    Snowflake(Box<SnowflakeConnection>),
 }
 
 impl Connection {
@@ -73,6 +79,9 @@ impl Connection {
             ConnectionConfig::Sqlite(config) => {
                 SqliteConnection::connect(config).await.map(Self::Sqlite)
             }
+            ConnectionConfig::Snowflake(config) => SnowflakeConnection::connect(config)
+                .await
+                .map(|connection| Self::Snowflake(Box::new(connection))),
         }
     }
 
@@ -87,9 +96,16 @@ impl Connection {
             (Self::Sqlite(connection), ConnectionConfig::Sqlite(config)) => {
                 connection.config() == config
             }
-            (Self::Tds(_), ConnectionConfig::Postgres(_) | ConnectionConfig::Sqlite(_))
-            | (Self::Postgres(_), ConnectionConfig::Tds(_) | ConnectionConfig::Sqlite(_))
-            | (Self::Sqlite(_), ConnectionConfig::Tds(_) | ConnectionConfig::Postgres(_)) => false,
+            (Self::Snowflake(connection), ConnectionConfig::Snowflake(config)) => {
+                connection.config() == config
+            }
+            (
+                Self::Tds(_) | Self::Postgres(_) | Self::Sqlite(_) | Self::Snowflake(_),
+                ConnectionConfig::Tds(_)
+                | ConnectionConfig::Postgres(_)
+                | ConnectionConfig::Sqlite(_)
+                | ConnectionConfig::Snowflake(_),
+            ) => false,
         }
     }
 
@@ -102,6 +118,7 @@ impl Connection {
             Self::Tds(connection) => connection.execute(sql, cancel).await,
             Self::Postgres(connection) => connection.execute(sql, cancel).await,
             Self::Sqlite(connection) => connection.execute(sql, cancel).await,
+            Self::Snowflake(connection) => connection.execute(sql, cancel).await,
         }
     }
 
@@ -116,6 +133,10 @@ impl Connection {
                 connection.close();
                 Ok(())
             }
+            Self::Snowflake(connection) => {
+                connection.close();
+                Ok(())
+            }
         }
     }
 
@@ -124,6 +145,7 @@ impl Connection {
             Self::Tds(connection) => connection.list_databases().await,
             Self::Postgres(connection) => connection.list_databases().await,
             Self::Sqlite(connection) => connection.list_databases().await,
+            Self::Snowflake(connection) => connection.list_databases().await,
         }
     }
 
@@ -132,6 +154,7 @@ impl Connection {
             Self::Tds(connection) => connection.list_objects(database).await,
             Self::Postgres(connection) => connection.list_objects(database).await,
             Self::Sqlite(connection) => connection.list_objects(database).await,
+            Self::Snowflake(connection) => connection.list_objects(database).await,
         }
     }
 
@@ -144,6 +167,7 @@ impl Connection {
             Self::Tds(connection) => connection.list_columns(database, object).await,
             Self::Postgres(connection) => connection.list_columns(database, object).await,
             Self::Sqlite(connection) => connection.list_columns(database, object).await,
+            Self::Snowflake(connection) => connection.list_columns(database, object).await,
         }
     }
 
@@ -156,6 +180,7 @@ impl Connection {
             Self::Tds(connection) => connection.object_definition(database, object).await,
             Self::Postgres(connection) => connection.object_definition(database, object).await,
             Self::Sqlite(connection) => connection.object_definition(database, object).await,
+            Self::Snowflake(connection) => connection.object_definition(database, object).await,
         }
     }
 }
