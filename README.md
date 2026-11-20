@@ -65,7 +65,7 @@ While typing, a menu offers tables after `from` and `join`, the columns of `alia
 
 ### Language servers
 
-A language server adds its completions, hover, diagnostics and formatting (`Ctrl+Shift+F`) to the built-in ones. Choose one per database kind (`sql_server`, `fabric`, `postgres`, `sqlite`, `snowflake`) in `~/.config/sql-editor/settings.toml`:
+A language server adds its completions, hover and diagnostics to the built-in ones, and can format SQL instead of the built-in formatter ("Use the language server" in Settings). Choose one per database kind (`sql_server`, `fabric`, `postgres`, `sqlite`, `snowflake`) in `~/.config/sql-editor/settings.toml`:
 
 ```toml
 [language_servers.postgres]
@@ -89,7 +89,7 @@ Keys:
 | `Ctrl+Shift+Enter` | Run everything in the tab |
 | `Ctrl+Shift+C` | Cancel the running query |
 | `Ctrl+Shift+E` | Export the result as CSV |
-| `Ctrl+Shift+F` | Format SQL with the connection's language server |
+| `Ctrl+Shift+F` | Format the selection, or the whole tab (style in Settings) |
 | `Ctrl+Shift+P` | Command palette: every command, theme and setting by name |
 | `Ctrl+,` | Settings (theme, vim mode, explorer grouping); also the gear in the status bar |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |

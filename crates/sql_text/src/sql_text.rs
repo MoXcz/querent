@@ -1,6 +1,7 @@
 //! Text logic with no UI or database dependency.
 
 pub mod completion;
+pub mod format;
 pub mod syntax;
 pub mod vim;
 
@@ -138,6 +139,29 @@ impl Segment {
 fn is_delimiter_line(line: &str) -> bool {
     let line = line.trim();
     line.is_empty() || line.eq_ignore_ascii_case("go")
+}
+
+/// Byte ranges of the `$tag$ ... $tag$` bodies in `text`, skipping strings and comments.
+pub(crate) fn dollar_quoted_ranges(text: &str) -> Vec<Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        index = match byte {
+            b'\'' | b'"' => skip_quoted(bytes, index, byte),
+            b'-' if bytes.get(index + 1) == Some(&b'-') => skip_line_comment(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'*') => skip_block_comment(bytes, index),
+            b'$' => match skip_dollar_quoted(bytes, index) {
+                Some(end) => {
+                    ranges.push(index..end);
+                    end
+                }
+                None => index + 1,
+            },
+            _ => index + 1,
+        };
+    }
+    ranges
 }
 
 /// For `$tag$` at `open_index`, the index after the matching closing `$tag$`

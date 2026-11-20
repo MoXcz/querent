@@ -8,6 +8,7 @@ use anyhow::Context as _;
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
 use sql_db::DriverKind;
+use sql_text::format::FormatStyle;
 
 use crate::lsp_servers::LanguageServerSetting;
 
@@ -24,6 +25,10 @@ pub struct Settings {
     /// Optional language server per database kind, e.g.
     /// `[language_servers.postgres]` with `command = "sqls"`.
     pub language_servers: BTreeMap<DriverKind, LanguageServerSetting>,
+    /// Built-in formatter style (`[formatter]`).
+    pub formatter: FormatStyle,
+    /// Format with the connection's language server instead of the built-in formatter.
+    pub format_with_language_server: bool,
 }
 
 impl Default for Settings {
@@ -33,6 +38,8 @@ impl Default for Settings {
             vim_mode: true,
             explorer_group_by_schema: true,
             language_servers: BTreeMap::new(),
+            formatter: FormatStyle::default(),
+            format_with_language_server: false,
         }
     }
 }
@@ -111,6 +118,8 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 
 #[cfg(test)]
 mod tests {
+    use sql_text::format::KeywordCase;
+
     use super::*;
 
     #[test]
@@ -127,6 +136,12 @@ mod tests {
                     pass_connection: true,
                 },
             )]),
+            formatter: FormatStyle {
+                indent: 2,
+                keyword_case: KeywordCase::Lower,
+                lines_between_statements: 2,
+            },
+            format_with_language_server: true,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);

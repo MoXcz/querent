@@ -15,6 +15,7 @@ use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, Togg
 use crate::settings;
 use crate::themes::{self, SelectTheme};
 use crate::workspace::{AddConnection, CloseTab, NewTab, NextTab, PreviousTab};
+use sql_text::format::KeywordCase;
 
 actions!(
     sql_editor,
@@ -267,6 +268,7 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                         .description("Normal, insert and visual modes in the SQL editor."),
                     ),
                 )
+                .group(formatter_group())
                 .group(
                     SettingGroup::new().title("Object explorer").item(
                         SettingItem::new(
@@ -291,4 +293,86 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
             .h(px(480.))
             .child(settings_view)
     });
+}
+
+fn formatter_group() -> SettingGroup {
+    let choices = |values: &[&str]| -> Vec<(SharedString, SharedString)> {
+        values
+            .iter()
+            .map(|value| (SharedString::from(*value), SharedString::from(*value)))
+            .collect()
+    };
+    SettingGroup::new()
+        .title("Formatter")
+        .description("Format SQL (ctrl-shift-f) formats the selection, or the whole tab.")
+        .item(SettingItem::new(
+            "Keywords",
+            SettingField::dropdown(
+                choices(&["upper", "lower", "preserve"]),
+                |cx| {
+                    SharedString::from(match settings::get(cx).formatter.keyword_case {
+                        KeywordCase::Upper => "upper",
+                        KeywordCase::Lower => "lower",
+                        KeywordCase::Preserve => "preserve",
+                    })
+                },
+                |value, cx| {
+                    let case = match value.as_ref() {
+                        "lower" => KeywordCase::Lower,
+                        "preserve" => KeywordCase::Preserve,
+                        _ => KeywordCase::Upper,
+                    };
+                    settings::update(cx, |settings| settings.formatter.keyword_case = case);
+                },
+            ),
+        ))
+        .item(SettingItem::new(
+            "Indent",
+            SettingField::dropdown(
+                choices(&["2", "4", "8"]),
+                |cx| SharedString::from(settings::get(cx).formatter.indent.to_string()),
+                |value, cx| {
+                    if let Ok(indent) = value.parse() {
+                        settings::update(cx, |settings| settings.formatter.indent = indent);
+                    }
+                },
+            ),
+        ))
+        .item(SettingItem::new(
+            "Blank lines between statements",
+            SettingField::dropdown(
+                choices(&["1", "2", "3"]),
+                |cx| {
+                    SharedString::from(
+                        settings::get(cx)
+                            .formatter
+                            .lines_between_statements
+                            .to_string(),
+                    )
+                },
+                |value, cx| {
+                    if let Ok(lines) = value.parse() {
+                        settings::update(cx, |settings| {
+                            settings.formatter.lines_between_statements = lines;
+                        });
+                    }
+                },
+            ),
+        ))
+        .item(
+            SettingItem::new(
+                "Use the language server",
+                SettingField::switch(
+                    |cx| settings::get(cx).format_with_language_server,
+                    |enabled, cx| {
+                        settings::update(cx, |settings| {
+                            settings.format_with_language_server = enabled;
+                        });
+                    },
+                ),
+            )
+            .description(
+                "When the connection has one that formats; see language_servers in settings.toml.",
+            ),
+        )
 }

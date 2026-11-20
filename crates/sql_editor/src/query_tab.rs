@@ -25,6 +25,7 @@ use gpui_kit::{
 use sql_db::{
     CancelHandle, Connection, ConnectionConfig, Dialect, QueryError, QueryOutput, ResultSet,
 };
+use sql_text::format::FormatDialect;
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
@@ -454,8 +455,64 @@ impl QueryTab {
         }
     }
 
-    /// Replaces the editor's text with the server's formatting, as one undoable edit.
+    /// The built-in formatter, or the language server when settings ask for it.
     fn format_sql(&mut self, _: &FormatSql, window: &mut Window, cx: &mut Context<Self>) {
+        if settings::get(cx).format_with_language_server {
+            self.format_with_server(window, cx);
+        } else {
+            self.format_built_in(window, cx);
+        }
+    }
+
+    /// Formats the selection, or the whole buffer, as one undoable edit.
+    fn format_built_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dialect = match self.dialect(cx) {
+            Some(Dialect::TSql) => FormatDialect::SqlServer,
+            Some(Dialect::Postgres) => FormatDialect::Postgres,
+            Some(Dialect::Sqlite | Dialect::Snowflake) | None => FormatDialect::Generic,
+        };
+        let style = settings::get(cx).formatter.clone();
+        let (text, selection, cursor) = {
+            let editor = self.editor.read(cx);
+            (
+                editor.value().to_string(),
+                editor.selected_range(),
+                editor.cursor(),
+            )
+        };
+        let whole = selection.is_empty();
+        let range = if whole { 0..text.len() } else { selection };
+        let Some(source) = text.get(range.clone()) else {
+            return;
+        };
+        let Some(formatted) = sql_text::format::format_sql(source, dialect, &style) else {
+            window.push_notification(
+                "Left unchanged: the formatter could not read this SQL without changing it.",
+                cx,
+            );
+            return;
+        };
+        if formatted == source {
+            return;
+        }
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(range, cx);
+            editor.replace(formatted, window, cx);
+            // A whole-tab format should not throw the cursor to the end.
+            if whole {
+                let length = editor.value().len();
+                let mut offset = cursor.min(length);
+                let value = editor.value();
+                while offset > 0 && !value.is_char_boundary(offset) {
+                    offset -= 1;
+                }
+                editor.set_selected_range(offset..offset, cx);
+            }
+        });
+    }
+
+    /// Replaces the editor's text with the server's formatting, as one undoable edit.
+    fn format_with_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection_fields(cx).connection else {
             window.push_notification("Pick a connection first.", cx);
             return;
