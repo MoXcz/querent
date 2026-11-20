@@ -8,8 +8,8 @@ use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
+    Editor, EditorState, Input, InputEvent, InputState, MoveDown, MoveUp, RangeDecoration,
+    RangeDecorationCollection, RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
@@ -166,7 +166,8 @@ impl QueryTab {
                     return;
                 };
                 let handled = tab.update(cx, |tab, cx| {
-                    tab.handle_vim_keystroke(&event.keystroke, window, cx)
+                    tab.handle_menu_keystroke(&event.keystroke, window, cx)
+                        || tab.handle_vim_keystroke(&event.keystroke, window, cx)
                 });
                 if handled {
                     cx.stop_propagation();
@@ -306,6 +307,30 @@ impl QueryTab {
         } else {
             format!("{} {pending}", self.vim.mode_label())
         })
+    }
+
+    /// `ctrl-n` and `ctrl-p` move through an open completion menu, as in vim;
+    /// with the menu closed they keep their usual bindings (`ctrl-n` opens a tab).
+    fn handle_menu_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let modifiers = &keystroke.modifiers;
+        let only_control =
+            modifiers.control && !modifiers.shift && !modifiers.alt && !modifiers.platform;
+        let action: Box<dyn gpui_kit::Action> = match keystroke.key.as_str() {
+            "n" if only_control => Box::new(MoveDown),
+            "p" if only_control => Box::new(MoveUp),
+            _ => return false,
+        };
+        let editor = self.editor.read(cx);
+        if !editor.completion_menu_state().open || !editor.focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        window.dispatch_action(action, cx);
+        true
     }
 
     fn handle_vim_keystroke(
