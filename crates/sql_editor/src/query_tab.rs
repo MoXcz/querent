@@ -81,6 +81,12 @@ enum QueryState {
         cancel: CancelHandle,
         /// What ran, for the history entry when it finishes.
         run: RunRecord,
+        /// Cancel was pressed; the server has not confirmed the stop yet.
+        cancelling: bool,
+    },
+    /// Stopped on request.
+    Cancelled {
+        elapsed: Duration,
     },
     Done {
         output: QueryOutput,
@@ -930,6 +936,7 @@ impl QueryTab {
             started: Instant::now(),
             cancel,
             run,
+            cancelling: false,
         };
         self.query_generation += 1;
         let generation = self.query_generation;
@@ -960,21 +967,41 @@ impl QueryTab {
     }
 
     fn finish_query(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
-        let (elapsed, run) = match &self.state {
-            QueryState::Running { started, run, .. } => (started.elapsed(), Some(run.clone())),
-            QueryState::Idle | QueryState::Done { .. } | QueryState::Failed { .. } => {
-                (Duration::ZERO, None)
-            }
+        let (elapsed, run, cancelling) = match &self.state {
+            QueryState::Running {
+                started,
+                run,
+                cancelling,
+                ..
+            } => (started.elapsed(), Some(run.clone()), *cancelling),
+            QueryState::Idle
+            | QueryState::Done { .. }
+            | QueryState::Failed { .. }
+            | QueryState::Cancelled { .. } => (Duration::ZERO, None, false),
         };
         self.running_query = None;
         self.state = match outcome {
-            Ok(Ok((connection, Ok(output)))) => {
+            Ok(Ok((connection, Ok(mut output)))) => {
                 self.connection = Some(connection);
+                if cancelling {
+                    output
+                        .messages
+                        .push("Finished before the cancel reached the server.".to_owned());
+                }
                 // The last result set is usually the one the batch was written for.
                 let last = output.result_sets.len().saturating_sub(1);
                 self.show_messages = false;
                 self.show_result_set(&output, last, cx);
                 QueryState::Done { output, elapsed }
+            }
+            Ok(Ok((connection, Err(QueryError::Cancelled)))) => {
+                self.connection = Some(connection);
+                QueryState::Cancelled { elapsed }
+            }
+            // Cancelled while connecting: nothing reusable was opened.
+            Ok(Err(QueryError::Cancelled)) => {
+                self.connection = None;
+                QueryState::Cancelled { elapsed }
             }
             Ok(Ok((connection, Err(error)))) => {
                 // A lost connection is not reused; any other error leaves it usable.
@@ -1003,9 +1030,10 @@ impl QueryTab {
                     true,
                     output.result_sets.last().map(|result| result.rows.len()),
                 ),
-                QueryState::Idle | QueryState::Running { .. } | QueryState::Failed { .. } => {
-                    (false, None)
-                }
+                QueryState::Idle
+                | QueryState::Running { .. }
+                | QueryState::Failed { .. }
+                | QueryState::Cancelled { .. } => (false, None),
             };
             history::record(
                 cx,
@@ -1020,7 +1048,11 @@ impl QueryTab {
                 },
             );
         }
-        if matches!(self.state, QueryState::Failed { .. }) {
+        // The rows on screen are the previous run's, not this one's.
+        if matches!(
+            self.state,
+            QueryState::Failed { .. } | QueryState::Cancelled { .. }
+        ) {
             self.shown_result = None;
             self.results.update(cx, |table, cx| {
                 table.delegate_mut().clear();
@@ -1087,8 +1119,13 @@ impl QueryTab {
     }
 
     fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, cx: &mut Context<Self>) {
-        if let QueryState::Running { cancel, .. } = &self.state {
+        if let QueryState::Running {
+            cancel, cancelling, ..
+        } = &mut self.state
+            && !*cancelling
+        {
             cancel.cancel();
+            *cancelling = true;
             cx.notify();
         }
     }
@@ -1199,7 +1236,9 @@ impl QueryTab {
                     .small()
                     .icon(LucideIcon::CircleStop)
                     .label("Cancel")
-                    .disabled(!running)
+                    .disabled(
+                        !matches!(self.state, QueryState::Running { cancelling: false, .. }),
+                    )
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.cancel_query(&CancelQuery, window, cx);
                     })),
@@ -1208,9 +1247,15 @@ impl QueryTab {
 
     /// A spinner, the elapsed time and Cancel above the grid while a query runs.
     fn render_running_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let QueryState::Running { started, .. } = &self.state else {
+        let QueryState::Running {
+            started,
+            cancelling,
+            ..
+        } = &self.state
+        else {
             return None;
         };
+        let cancelling = *cancelling;
         Some(
             h_flex()
                 .gap_2()
@@ -1221,13 +1266,22 @@ impl QueryTab {
                 .bg(cx.theme().accent)
                 .text_sm()
                 .child(Spinner::new().small())
-                .child(format!("Running… {:.1}s", started.elapsed().as_secs_f64()))
+                .child(format!(
+                    "{} {:.1}s",
+                    if cancelling {
+                        "Cancelling…"
+                    } else {
+                        "Running…"
+                    },
+                    started.elapsed().as_secs_f64()
+                ))
                 .child(div().flex_1())
                 .child(
                     Button::new("cancel-running")
                         .xsmall()
                         .icon(LucideIcon::CircleStop)
                         .label("Cancel")
+                        .disabled(cancelling)
                         .tooltip("Stop the query on the server (Ctrl+Shift+C)")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.cancel_query(&CancelQuery, window, cx);
@@ -1272,6 +1326,15 @@ impl QueryTab {
 
     fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match &self.state {
+            QueryState::Cancelled { elapsed } => div()
+                .size_full()
+                .p_3()
+                .text_color(cx.theme().muted_foreground)
+                .child(format!(
+                    "Query cancelled after {:.1}s.",
+                    elapsed.as_secs_f64()
+                ))
+                .into_any_element(),
             QueryState::Failed { message } => div()
                 .size_full()
                 .p_3()
@@ -1312,9 +1375,10 @@ impl QueryTab {
                     QueryState::Done { output, .. } => {
                         Some(self.render_result_switcher(output, cx))
                     }
-                    QueryState::Idle | QueryState::Running { .. } | QueryState::Failed { .. } => {
-                        None
-                    }
+                    QueryState::Idle
+                    | QueryState::Running { .. }
+                    | QueryState::Failed { .. }
+                    | QueryState::Cancelled { .. } => None,
                 })
                 .child(
                     div()
@@ -1406,8 +1470,21 @@ impl QueryTab {
     fn query_status_text(&self) -> String {
         match &self.state {
             QueryState::Idle => "Ready".to_owned(),
-            QueryState::Running { started, .. } => {
-                format!("Running… {:.1}s", started.elapsed().as_secs_f64())
+            QueryState::Running {
+                started,
+                cancelling,
+                ..
+            } => format!(
+                "{} {:.1}s",
+                if *cancelling {
+                    "Cancelling…"
+                } else {
+                    "Running…"
+                },
+                started.elapsed().as_secs_f64()
+            ),
+            QueryState::Cancelled { elapsed } => {
+                format!("Cancelled · {:.2}s", elapsed.as_secs_f64())
             }
             QueryState::Failed { .. } => "Failed".to_owned(),
             QueryState::Done { output, elapsed } => {
