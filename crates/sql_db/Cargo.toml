@@ -19,6 +19,11 @@ mssql-tds.workspace = true
 azure_identity.workspace = true
 azure_core.workspace = true
 serde.workspace = true
+tokio-postgres.workspace = true
+postgres-native-tls.workspace = true
+futures-util.workspace = true
+sql_text.workspace = true
+native-tls.workspace = true
 
 [lints]
 workspace = true

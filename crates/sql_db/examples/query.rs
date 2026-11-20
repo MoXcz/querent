@@ -1,10 +1,10 @@
-//! Runs one batch against SQL Server or a Fabric SQL endpoint.
+//! Runs one batch against SQL Server, a Fabric SQL endpoint or PostgreSQL.
 //!
 //! `cargo run -p sql_db --example query -- "<connection string>" "<sql>"`
 
 use std::io::Write as _;
 
-use sql_db::{CancelHandle, TdsConnection};
+use sql_db::{CancelHandle, Connection, ConnectionSettings};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,9 +15,9 @@ async fn main() -> anyhow::Result<()> {
     let (Some(connection_string), Some(sql)) = (arguments.next(), arguments.next()) else {
         anyhow::bail!("usage: query <connection string> <sql>");
     };
-    let config = sql_db::parse_connection_string_with_database(&connection_string)?;
+    let config = ConnectionSettings::from_connection_string(&connection_string)?.config()?;
     let started = std::time::Instant::now();
-    let mut connection = TdsConnection::connect(config).await?;
+    let mut connection = Connection::connect(config).await?;
     let connected = started.elapsed();
     let output = connection.execute(&sql, &CancelHandle::new()).await?;
     let mut stdout = std::io::stdout().lock();

@@ -15,12 +15,6 @@ use sql_db::{AuthMethod, Authentication, ConnectionSettings, DriverKind, Encrypt
 
 use crate::connections::SavedConnection;
 
-const ENCRYPTIONS: [(Encryption, &str); 3] = [
-    (Encryption::Mandatory, "Mandatory"),
-    (Encryption::Optional, "Optional"),
-    (Encryption::Strict, "Strict (TDS 8.0)"),
-];
-
 type LabelSelect = SelectState<Vec<SharedString>>;
 
 pub struct ConnectionForm {
@@ -62,11 +56,7 @@ impl ConnectionForm {
             .collect();
         let driver_select = cx.new(|cx| SelectState::new(driver_labels, None, window, cx));
         let auth_select = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
-        let encryption_labels: Vec<SharedString> = ENCRYPTIONS
-            .iter()
-            .map(|(_, label)| SharedString::from(*label))
-            .collect();
-        let encryption_select = cx.new(|cx| SelectState::new(encryption_labels, None, window, cx));
+        let encryption_select = cx.new(|cx| SelectState::new(Vec::new(), None, window, cx));
         let text = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
@@ -98,7 +88,7 @@ impl ConnectionForm {
             ),
             name: text("BI warehouse", window, cx),
             server: text(r"host, or host\instance", window, cx),
-            port: text("1433", window, cx),
+            port: text("default", window, cx),
             database: text("database", window, cx),
             user: text("user name", window, cx),
             password: secret("password", window, cx),
@@ -168,7 +158,7 @@ impl ConnectionForm {
             host_name_in_certificate: self.host_name_in_certificate.clone(),
         };
         settings
-            .tds_config()
+            .config()
             .map_err(|error| format!("Server: {error}"))?;
         Ok(SavedConnection { name, settings })
     }
@@ -176,13 +166,7 @@ impl ConnectionForm {
     fn fill(&mut self, settings: &ConnectionSettings, window: &mut Window, cx: &mut Context<Self>) {
         self.set_driver(settings.driver, window, cx);
         self.set_auth_method(AuthMethod::from(&settings.authentication), window, cx);
-        self.encryption = settings.encryption;
-        let encryption_index = ENCRYPTIONS
-            .iter()
-            .position(|(encryption, _)| *encryption == settings.encryption);
-        self.encryption_select.update(cx, |select, cx| {
-            select.set_selected_index(encryption_index.map(IndexPath::new), window, cx);
-        });
+        self.set_encryption(settings.encryption, window, cx);
         self.trust_server_certificate = settings.trust_server_certificate;
         self.host_name_in_certificate
             .clone_from(&settings.host_name_in_certificate);
@@ -258,6 +242,27 @@ impl ConnectionForm {
             .collect();
         self.auth_select
             .update(cx, |select, cx| select.set_items(labels, window, cx));
+        let encryption_labels: Vec<SharedString> = driver
+            .encryption_choices()
+            .iter()
+            .map(|(_, label)| SharedString::from(*label))
+            .collect();
+        self.encryption_select.update(cx, |select, cx| {
+            select.set_items(encryption_labels, window, cx);
+        });
+        let encryption = if driver
+            .encryption_choices()
+            .iter()
+            .any(|(choice, _)| *choice == self.encryption)
+        {
+            self.encryption
+        } else {
+            driver
+                .encryption_choices()
+                .first()
+                .map_or(self.encryption, |(choice, _)| *choice)
+        };
+        self.set_encryption(encryption, window, cx);
         let method = if driver.auth_methods().contains(&self.auth_method) {
             self.auth_method
         } else {
@@ -268,6 +273,23 @@ impl ConnectionForm {
                 .unwrap_or(AuthMethod::AzureCli)
         };
         self.set_auth_method(method, window, cx);
+    }
+
+    fn set_encryption(
+        &mut self,
+        encryption: Encryption,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.encryption = encryption;
+        let index = self
+            .driver
+            .encryption_choices()
+            .iter()
+            .position(|(choice, _)| *choice == encryption);
+        self.encryption_select.update(cx, |select, cx| {
+            select.set_selected_index(index.map(IndexPath::new), window, cx);
+        });
     }
 
     fn set_auth_method(&mut self, method: AuthMethod, window: &mut Window, cx: &mut Context<Self>) {
@@ -296,11 +318,13 @@ impl ConnectionForm {
         let Some(driver) = DriverKind::ALL.get(index.row).copied() else {
             return;
         };
-        if driver != self.driver && !driver.has_network_options() {
-            // Hidden options must not carry over from another driver unseen.
+        if driver != self.driver {
+            // A port, encryption level or certificate choice made for another
+            // driver means something else here, or is hidden.
             set_text(&self.port, "", window, cx);
             self.trust_server_certificate = false;
             self.host_name_in_certificate = None;
+            self.encryption = ConnectionSettings::new(driver).encryption;
         }
         self.set_driver(driver, window, cx);
     }
@@ -331,7 +355,7 @@ impl ConnectionForm {
         let Some(index) = select.read(cx).selected_index(cx) else {
             return;
         };
-        if let Some((encryption, _)) = ENCRYPTIONS.get(index.row) {
+        if let Some((encryption, _)) = self.driver.encryption_choices().get(index.row) {
             self.encryption = *encryption;
             cx.notify();
         }

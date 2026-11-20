@@ -5,8 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::catalog::Dialect;
 use crate::connection_string::parse_server;
-use crate::{Authentication, ConnectionStringError, Encryption, TdsConfig};
+use crate::postgres::PgConfig;
+use crate::{Authentication, ConnectionConfig, ConnectionStringError, Encryption, TdsConfig};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,16 +16,50 @@ pub enum DriverKind {
     #[default]
     SqlServer,
     Fabric,
+    Postgres,
 }
 
 impl DriverKind {
-    pub const ALL: [Self; 2] = [Self::SqlServer, Self::Fabric];
+    pub const ALL: [Self; 3] = [Self::SqlServer, Self::Fabric, Self::Postgres];
 
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::SqlServer => "SQL Server",
             Self::Fabric => "Microsoft Fabric",
+            Self::Postgres => "PostgreSQL",
+        }
+    }
+
+    #[must_use]
+    pub fn dialect(self) -> Dialect {
+        match self {
+            Self::SqlServer | Self::Fabric => Dialect::TSql,
+            Self::Postgres => Dialect::Postgres,
+        }
+    }
+
+    #[must_use]
+    pub fn default_port(self) -> u16 {
+        match self {
+            Self::SqlServer | Self::Fabric => crate::tds::DEFAULT_PORT,
+            Self::Postgres => crate::postgres::DEFAULT_PORT,
+        }
+    }
+
+    /// Encryption choices with this driver's names for them; the first is the default.
+    #[must_use]
+    pub fn encryption_choices(self) -> &'static [(Encryption, &'static str)] {
+        match self {
+            Self::SqlServer | Self::Fabric => &[
+                (Encryption::Mandatory, "Mandatory"),
+                (Encryption::Optional, "Optional"),
+                (Encryption::Strict, "Strict (TDS 8.0)"),
+            ],
+            Self::Postgres => &[
+                (Encryption::Optional, "Prefer"),
+                (Encryption::Mandatory, "Require"),
+            ],
         }
     }
 
@@ -37,6 +73,7 @@ impl DriverKind {
                 AuthMethod::ServicePrincipal,
             ],
             Self::Fabric => &[AuthMethod::AzureCli, AuthMethod::ServicePrincipal],
+            Self::Postgres => &[AuthMethod::Password],
         }
     }
 
@@ -44,7 +81,7 @@ impl DriverKind {
     #[must_use]
     pub fn has_network_options(self) -> bool {
         match self {
-            Self::SqlServer => true,
+            Self::SqlServer | Self::Postgres => true,
             // Fabric endpoints are always port 1433 with strict encryption.
             Self::Fabric => false,
         }
@@ -64,14 +101,14 @@ impl AuthMethod {
     pub fn label(self, driver: DriverKind) -> &'static str {
         match (self, driver) {
             (Self::Password, DriverKind::SqlServer) => "SQL Server login",
-            // Not offered for Fabric; named only for a connection string that asks for it.
-            (Self::Password, DriverKind::Fabric) => "User name and password",
-            (Self::AzureCli, DriverKind::SqlServer | DriverKind::Fabric) => {
+            (Self::Password, DriverKind::Fabric | DriverKind::Postgres) => "User name and password",
+            (Self::AzureCli, DriverKind::SqlServer | DriverKind::Fabric | DriverKind::Postgres) => {
                 "Entra ID (az login session)"
             }
-            (Self::ServicePrincipal, DriverKind::SqlServer | DriverKind::Fabric) => {
-                "Entra ID service principal"
-            }
+            (
+                Self::ServicePrincipal,
+                DriverKind::SqlServer | DriverKind::Fabric | DriverKind::Postgres,
+            ) => "Entra ID service principal",
         }
     }
 }
@@ -114,17 +151,53 @@ impl ConnectionSettings {
             port: None,
             database: String::new(),
             authentication: Authentication::default(),
-            encryption: Encryption::default(),
+            encryption: driver
+                .encryption_choices()
+                .first()
+                .map_or_else(Encryption::default, |(encryption, _)| *encryption),
             trust_server_certificate: false,
             host_name_in_certificate: None,
         }
     }
 
+    /// SQL Server and Fabric strings (ADO.NET or `sqlserver://`), or PostgreSQL
+    /// strings (`postgres://` URL or libpq `host=... dbname=...`).
     pub fn from_connection_string(text: &str) -> Result<Self, ConnectionStringError> {
+        if crate::connection_string::is_postgres_string(text) {
+            return crate::connection_string::parse_postgres_string(text);
+        }
         crate::parse_connection_string(text).map(Self::from)
     }
 
-    pub fn tds_config(&self) -> Result<TdsConfig, ConnectionStringError> {
+    pub fn config(&self) -> Result<ConnectionConfig, ConnectionStringError> {
+        match self.driver {
+            DriverKind::SqlServer | DriverKind::Fabric => {
+                self.tds_config().map(ConnectionConfig::Tds)
+            }
+            DriverKind::Postgres => self.postgres_config().map(ConnectionConfig::Postgres),
+        }
+    }
+
+    fn postgres_config(&self) -> Result<PgConfig, ConnectionStringError> {
+        let host = self.server.trim();
+        if host.is_empty() {
+            return Err(ConnectionStringError::MissingServer);
+        }
+        if !matches!(self.authentication, Authentication::Password { .. }) {
+            return Err(ConnectionStringError::UnsupportedAuthentication(
+                "Entra ID for PostgreSQL".to_owned(),
+            ));
+        }
+        Ok(PgConfig {
+            port: self.port,
+            authentication: self.authentication.clone(),
+            encryption: self.encryption,
+            trust_server_certificate: self.trust_server_certificate,
+            ..PgConfig::new(host, self.database.clone())
+        })
+    }
+
+    fn tds_config(&self) -> Result<TdsConfig, ConnectionStringError> {
         let server = parse_server(&self.server)?;
         let port = match (self.port, server.port) {
             (Some(field), Some(in_server)) if field != in_server => {
@@ -133,7 +206,7 @@ impl ConnectionSettings {
             (field, in_server) => field.or(in_server),
         };
         let encryption = match self.driver {
-            DriverKind::SqlServer => self.encryption,
+            DriverKind::SqlServer | DriverKind::Postgres => self.encryption,
             // Fabric only speaks TDS 8.0, whatever host name the endpoint uses.
             DriverKind::Fabric => Encryption::Strict,
         };
@@ -235,6 +308,41 @@ mod tests {
             conflicting.tds_config(),
             Err(ConnectionStringError::ConflictingPorts(1444, 1433))
         );
+    }
+
+    #[test]
+    fn parses_postgres_strings() {
+        let settings = ConnectionSettings::from_connection_string(
+            "postgresql://app:s%40cret@db.example:6543/shop?sslmode=require",
+        )
+        .unwrap();
+        assert_eq!(settings.driver, DriverKind::Postgres);
+        assert_eq!(settings.server, "db.example");
+        assert_eq!(settings.port, Some(6543));
+        assert_eq!(settings.database, "shop");
+        assert_eq!(settings.encryption, Encryption::Mandatory);
+        assert_eq!(
+            settings.authentication,
+            Authentication::Password {
+                user: "app".to_owned(),
+                password: "s@cret".to_owned(),
+            }
+        );
+        let settings =
+            ConnectionSettings::from_connection_string("host=localhost user=postgres dbname=x")
+                .unwrap();
+        assert_eq!(settings.driver, DriverKind::Postgres);
+        assert_eq!(settings.encryption, Encryption::Optional);
+        assert!(crate::connection_string::is_postgres_string(
+            "host=h password=a;b dbname=x"
+        ));
+        assert!(!crate::connection_string::is_postgres_string(
+            "Server=h;Database=d;Host=ignored"
+        ));
+        assert!(matches!(
+            settings.config().unwrap(),
+            ConnectionConfig::Postgres(_)
+        ));
     }
 
     #[test]

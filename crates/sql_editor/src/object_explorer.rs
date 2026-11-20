@@ -17,7 +17,9 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use sql_db::{CatalogObject, ColumnInfo, ObjectKind, QueryError, TdsConfig, TdsConnection};
+use sql_db::{
+    CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind, QueryError,
+};
 use tokio::sync::Mutex;
 
 use crate::connections::{self, ConnectionStore, SavedConnection};
@@ -81,7 +83,8 @@ enum Load<T> {
 
 enum RowContent {
     Node(NodeId),
-    Column(ColumnInfo),
+    /// The connection name picks how a double-click quotes the column.
+    Column(SharedString, ColumnInfo),
     Loading,
     Error,
     Empty,
@@ -100,7 +103,7 @@ type CatalogFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, QueryError>> +
 
 /// One catalog connection per saved connection, connected on first use and
 /// separate from the tabs' connections so browsing never waits on a query.
-type CatalogConnection = Arc<Mutex<Option<TdsConnection>>>;
+type CatalogConnection = Arc<Mutex<Option<Connection>>>;
 
 pub struct ObjectExplorer {
     filter_input: Entity<InputState>,
@@ -157,12 +160,17 @@ impl ObjectExplorer {
             .clone()
     }
 
-    fn config_for(name: &str, cx: &Context<Self>) -> Result<TdsConfig, SharedString> {
+    fn config_for(name: &str, cx: &Context<Self>) -> Result<ConnectionConfig, SharedString> {
         let saved = connections::find(cx, name)
             .ok_or_else(|| SharedString::from(format!("Connection {name} no longer exists.")))?;
         saved
             .config()
             .map_err(|error| SharedString::from(error.to_string()))
+    }
+
+    /// T-SQL when the connection is gone, so a stale menu still produces something.
+    fn dialect(connection: &str, cx: &App) -> Dialect {
+        connections::find(cx, connection).map_or(Dialect::TSql, SavedConnection::dialect)
     }
 
     fn toggle(&mut self, id: &NodeId, cx: &mut Context<Self>) {
@@ -209,7 +217,7 @@ impl ObjectExplorer {
         done: impl FnOnce(&mut Self, Result<T, SharedString>, &mut Context<Self>) + 'static,
     ) where
         T: Send + 'static,
-        F: for<'a> FnOnce(&'a mut TdsConnection) -> CatalogFuture<'a, T> + Send + 'static,
+        F: for<'a> FnOnce(&'a mut Connection) -> CatalogFuture<'a, T> + Send + 'static,
     {
         let config = match Self::config_for(connection, cx) {
             Ok(config) => config,
@@ -226,7 +234,7 @@ impl ObjectExplorer {
             let mut guard = catalog.lock().await;
             tracing::debug!(connection = %connection_name, waited_ms = started.elapsed().as_millis(), "catalog lock acquired");
             if guard.is_none() {
-                *guard = Some(TdsConnection::connect(config).await?);
+                *guard = Some(Connection::connect(config).await?);
                 tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), "catalog connected");
             }
             let Some(tds) = guard.as_mut() else {
@@ -342,6 +350,7 @@ impl ObjectExplorer {
     fn select_top(&mut self, key: &ObjectKey, cx: &mut Context<Self>) {
         let columns = self.loaded_columns(key);
         let sql = sql_db::select_script(
+            Self::dialect(&key.connection, cx),
             &key.catalog_object(),
             columns.as_deref().map(Vec::as_slice),
             Some(SELECT_TOP_ROWS),
@@ -362,6 +371,7 @@ impl ObjectExplorer {
     }
 
     fn script_select(&mut self, key: &ObjectKey, cx: &mut Context<Self>) {
+        let dialect = Self::dialect(&key.connection, cx);
         let database = key.database.to_string();
         let object = key.catalog_object();
         let event_key = key.clone();
@@ -371,8 +381,12 @@ impl ObjectExplorer {
             move |tds| Box::pin(async move { tds.list_columns(&database, &object).await }),
             move |_, result, cx| {
                 let columns = result.ok();
-                let sql =
-                    sql_db::select_script(&event_key.catalog_object(), columns.as_deref(), None);
+                let sql = sql_db::select_script(
+                    dialect,
+                    &event_key.catalog_object(),
+                    columns.as_deref(),
+                    None,
+                );
                 cx.emit(ExplorerEvent::OpenQuery {
                     connection: event_key.connection.clone(),
                     database: event_key.database,
@@ -384,6 +398,7 @@ impl ObjectExplorer {
     }
 
     fn script_create(&mut self, key: &ObjectKey, cx: &mut Context<Self>) {
+        let dialect = Self::dialect(&key.connection, cx);
         let database = key.database.to_string();
         let object = key.catalog_object();
         let event_key = key.clone();
@@ -394,7 +409,9 @@ impl ObjectExplorer {
                 Box::pin(async move {
                     if object.kind == ObjectKind::Table {
                         let columns = tds.list_columns(&database, &object).await?;
-                        return Ok(Some(sql_db::create_table_script(&object, &columns)));
+                        return Ok(Some(sql_db::create_table_script(
+                            dialect, &object, &columns,
+                        )));
                     }
                     tds.object_definition(&database, &object).await
                 })
@@ -404,7 +421,7 @@ impl ObjectExplorer {
                     Ok(Some(script)) => script,
                     Ok(None) => format!(
                         "-- No definition available for {} (encrypted or not a module).\n",
-                        event_key.catalog_object().qualified_name()
+                        event_key.catalog_object().qualified_name(dialect)
                     ),
                     Err(message) => format!("-- Could not script {}: {message}\n", event_key.name),
                 };
@@ -422,12 +439,13 @@ impl ObjectExplorer {
         let Some(row) = self.rows.get(index) else {
             return;
         };
-        if let RowContent::Column(column) = &row.content
+        if let RowContent::Column(connection, column) = &row.content
             && event.click_count() == 2
         {
-            cx.emit(ExplorerEvent::InsertText(sql_db::quote_identifier(
-                &column.name,
-            )));
+            let dialect = Self::dialect(connection, cx);
+            cx.emit(ExplorerEvent::InsertText(
+                dialect.quote_identifier(&column.name),
+            ));
             return;
         }
         let RowContent::Node(id) = &row.content else {
@@ -438,8 +456,9 @@ impl ObjectExplorer {
         if event.click_count() == 2
             && let NodeId::Object(key) = &id
         {
+            let dialect = Self::dialect(&key.connection, cx);
             cx.emit(ExplorerEvent::InsertText(
-                key.catalog_object().qualified_name(),
+                key.catalog_object().qualified_name(dialect),
             ));
             return;
         }
@@ -596,7 +615,7 @@ impl ObjectExplorer {
             let null = if column.nullable { "null" } else { "not null" };
             rows.push(Row {
                 label: format!("{} ({}, {null})", column.name, column.type_name).into(),
-                content: RowContent::Column(column.clone()),
+                content: RowContent::Column(key.connection.clone(), column.clone()),
                 depth: depth + 1,
                 expanded: None,
             });
@@ -697,7 +716,9 @@ impl ObjectExplorer {
                 ))
             }
             NodeId::Object(key) => {
-                let name = key.catalog_object().qualified_name();
+                let name = key
+                    .catalog_object()
+                    .qualified_name(Self::dialect(&key.connection, cx));
                 let mut menu = menu;
                 if matches!(key.kind, ObjectKind::Table | ObjectKind::View) {
                     let top_key = key.clone();
@@ -747,7 +768,7 @@ impl ObjectExplorer {
                 let is_selected = matches!(&row.content, RowContent::Node(id) if self.selected.as_ref() == Some(id));
                 let text_color = match &row.content {
                     RowContent::Error => cx.theme().danger,
-                    RowContent::Loading | RowContent::Empty | RowContent::Column(_) => {
+                    RowContent::Loading | RowContent::Empty | RowContent::Column(..) => {
                         cx.theme().muted_foreground
                     }
                     RowContent::Node(_) => cx.theme().foreground,
@@ -777,7 +798,7 @@ impl ObjectExplorer {
                         })
                         .into_any_element()
                     }
-                    RowContent::Column(_) | RowContent::Loading | RowContent::Error | RowContent::Empty => {
+                    RowContent::Column(..) | RowContent::Loading | RowContent::Error | RowContent::Empty => {
                         base.into_any_element()
                     }
                 };

@@ -4,7 +4,7 @@
 
 use std::io::Write as _;
 
-use sql_db::{ObjectKind, TdsConnection};
+use sql_db::{Connection, ConnectionSettings, ObjectKind};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,8 +12,9 @@ async fn main() -> anyhow::Result<()> {
     let (Some(connection_string), Some(database)) = (arguments.next(), arguments.next()) else {
         anyhow::bail!("usage: catalog <connection string> <database>");
     };
-    let config = sql_db::parse_connection_string(&connection_string)?;
-    let mut connection = TdsConnection::connect(config).await?;
+    let config = ConnectionSettings::from_connection_string(&connection_string)?.config()?;
+    let dialect = config.dialect();
+    let mut connection = Connection::connect(config).await?;
     let mut stdout = std::io::stdout().lock();
     writeln!(
         stdout,
@@ -30,7 +31,11 @@ async fn main() -> anyhow::Result<()> {
         .find(|object| object.kind == ObjectKind::Table)
     {
         let columns = connection.list_columns(&database, table).await?;
-        write!(stdout, "{}", sql_db::create_table_script(table, &columns))?;
+        write!(
+            stdout,
+            "{}",
+            sql_db::create_table_script(dialect, table, &columns)
+        )?;
     }
     if let Some(view) = objects
         .iter()
@@ -38,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let definition = connection.object_definition(&database, view).await?;
         let preview: String = definition.unwrap_or_default().chars().take(120).collect();
-        writeln!(stdout, "{}: {preview}", view.qualified_name())?;
+        writeln!(stdout, "{}: {preview}", view.qualified_name(dialect))?;
     }
     connection.close().await?;
     Ok(())

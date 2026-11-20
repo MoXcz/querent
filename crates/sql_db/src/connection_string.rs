@@ -7,8 +7,6 @@ use crate::{Authentication, Encryption, TdsConfig};
 pub enum ConnectionStringError {
     #[error("the connection string has no Server")]
     MissingServer,
-    #[error("the connection string has no Database or Initial Catalog")]
-    MissingDatabase,
     #[error("invalid port in Server: {0}")]
     InvalidPort(String),
     #[error("the port field says {0} but the server name says {1}")]
@@ -282,17 +280,6 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-/// Requires a database, for callers with no other place to get one.
-pub fn parse_connection_string_with_database(
-    text: &str,
-) -> Result<TdsConfig, ConnectionStringError> {
-    let config = parse_connection_string(text)?;
-    if config.database.is_empty() {
-        return Err(ConnectionStringError::MissingDatabase);
-    }
-    Ok(config)
-}
-
 /// Keys ignore case and spaces: `Initial Catalog` and `initialcatalog` are the same.
 fn normalize_key(key: &str) -> String {
     key.chars()
@@ -392,6 +379,71 @@ fn read_quoted(text: &str, close: char) -> Option<(String, &str)> {
     None
 }
 
+/// `postgres://` and `postgresql://` URLs, or libpq `key=value` strings separated by spaces.
+pub(crate) fn is_postgres_string(text: &str) -> bool {
+    let text = text.trim();
+    let lower = text.to_ascii_lowercase();
+    // ADO.NET strings name the server `Server`/`Data Source`; libpq uses `host`.
+    let libpq_key = |pair: &str| pair.starts_with("dbname=") || pair.starts_with("host=");
+    let ado_key = |pair: &str| {
+        let key = pair.split('=').next().unwrap_or_default();
+        matches!(
+            key.trim(),
+            "server" | "data source" | "initial catalog" | "database"
+        )
+    };
+    lower.starts_with("postgres://")
+        || lower.starts_with("postgresql://")
+        || (lower.split_whitespace().any(libpq_key) && !lower.split(';').any(ado_key))
+}
+
+pub(crate) fn parse_postgres_string(
+    text: &str,
+) -> Result<crate::ConnectionSettings, ConnectionStringError> {
+    use tokio_postgres::config::{Host, SslMode};
+
+    let config: tokio_postgres::Config =
+        text.trim()
+            .parse()
+            .map_err(
+                |error: tokio_postgres::Error| ConnectionStringError::InvalidValue {
+                    key: "PostgreSQL connection string",
+                    value: error.to_string(),
+                },
+            )?;
+    let host = match config.get_hosts().first() {
+        Some(Host::Tcp(host)) => host.clone(),
+        #[cfg(unix)]
+        Some(Host::Unix(_)) => {
+            return Err(ConnectionStringError::InvalidValue {
+                key: "host",
+                value: "Unix socket paths are not supported; use a host name".to_owned(),
+            });
+        }
+        None => return Err(ConnectionStringError::MissingServer),
+    };
+    // `disable` has no equivalent here; `prefer` still connects without TLS.
+    let encryption = if config.get_ssl_mode() == SslMode::Require {
+        Encryption::Mandatory
+    } else {
+        Encryption::Optional
+    };
+    Ok(crate::ConnectionSettings {
+        server: host,
+        port: config.get_ports().first().copied(),
+        database: config.get_dbname().unwrap_or_default().to_owned(),
+        authentication: Authentication::Password {
+            user: config.get_user().unwrap_or_default().to_owned(),
+            password: config
+                .get_password()
+                .map(|password| String::from_utf8_lossy(password).into_owned())
+                .unwrap_or_default(),
+        },
+        encryption,
+        ..crate::ConnectionSettings::new(crate::DriverKind::Postgres)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,10 +480,6 @@ mod tests {
         assert_eq!(config.host, "abc.datawarehouse.fabric.microsoft.com");
         assert_eq!(config.port, None);
         assert_eq!(config.database, "");
-        assert_eq!(
-            parse_connection_string_with_database("abc.datawarehouse.fabric.microsoft.com"),
-            Err(ConnectionStringError::MissingDatabase)
-        );
     }
 
     #[test]

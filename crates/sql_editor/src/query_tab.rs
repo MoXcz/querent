@@ -20,7 +20,7 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
-use sql_db::{CancelHandle, QueryError, QueryOutput, ResultSet, TdsConfig, TdsConnection};
+use sql_db::{CancelHandle, Connection, ConnectionConfig, QueryError, QueryOutput, ResultSet};
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
@@ -46,7 +46,7 @@ actions!(
     ]
 );
 
-type SharedConnection = Arc<Mutex<TdsConnection>>;
+type SharedConnection = Arc<Mutex<Connection>>;
 
 const BLOCK_CURSOR_OPACITY: f32 = 0.45;
 const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
@@ -248,7 +248,7 @@ impl QueryTab {
     fn fill_default_database(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         let database = connections::find(cx, name)
             .and_then(|connection| connection.config().ok())
-            .map(|config| config.database)
+            .map(|config| config.database().to_owned())
             .filter(|database| !database.is_empty());
         if let Some(database) = database {
             self.database_input.update(cx, |input, cx| {
@@ -411,7 +411,7 @@ impl QueryTab {
         }
     }
 
-    fn connection_config(&self, cx: &Context<Self>) -> Result<TdsConfig, SharedString> {
+    fn connection_config(&self, cx: &Context<Self>) -> Result<ConnectionConfig, SharedString> {
         let ConnectionFields {
             connection,
             database,
@@ -425,9 +425,9 @@ impl QueryTab {
             .config()
             .map_err(|error| SharedString::from(format!("Connection {name}: {error}")))?;
         if !database.is_empty() {
-            config.database = database;
+            config.set_database(database);
         }
-        if config.database.is_empty() {
+        if config.requires_database() && config.database().is_empty() {
             return Err("Enter the database name.".into());
         }
         Ok(config)
@@ -491,7 +491,7 @@ impl QueryTab {
         let reusable = self.connection.clone().filter(|connection| {
             connection
                 .try_lock()
-                .is_ok_and(|connection| *connection.config() == config)
+                .is_ok_and(|connection| connection.matches(&config))
         });
         let cancel = CancelHandle::new();
         let query = tokio_bridge::spawn(cx, {
@@ -499,7 +499,7 @@ impl QueryTab {
             async move {
                 let connection = match reusable {
                     Some(connection) => connection,
-                    None => Arc::new(Mutex::new(TdsConnection::connect(config).await?)),
+                    None => Arc::new(Mutex::new(Connection::connect(config).await?)),
                 };
                 let output = connection.lock().await.execute(&sql, &cancel).await;
                 Ok::<_, QueryError>((connection, output))

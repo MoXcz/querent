@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use gpui_kit::{App, BorrowAppContext as _, Global, SharedString};
 use serde::{Deserialize, Serialize};
-use sql_db::{ConnectionSettings, ConnectionStringError, TdsConfig};
+use sql_db::{ConnectionConfig, ConnectionSettings, ConnectionStringError, Dialect};
 
 use crate::settings;
 
@@ -21,8 +21,12 @@ pub struct SavedConnection {
 }
 
 impl SavedConnection {
-    pub fn config(&self) -> Result<TdsConfig, ConnectionStringError> {
-        self.settings.tds_config()
+    pub fn config(&self) -> Result<ConnectionConfig, ConnectionStringError> {
+        self.settings.config()
+    }
+
+    pub fn dialect(&self) -> Dialect {
+        self.settings.driver.dialect()
     }
 }
 

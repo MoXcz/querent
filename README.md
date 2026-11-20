@@ -1,6 +1,6 @@
 # sql-editor
 
-A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server and Microsoft Fabric Warehouse and Lakehouse SQL endpoints. `ROADMAP.md` lists what comes next.
+A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, and PostgreSQL. `ROADMAP.md` lists what comes next.
 
 ## Run
 
@@ -8,21 +8,23 @@ A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs que
 cargo run --release
 ```
 
-Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server or Microsoft Fabric), fill in the server, database and sign-in method, and the form asks only for that method's values:
+Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server, Microsoft Fabric or PostgreSQL), fill in the server, database and sign-in method, and the form asks only for that method's values:
 
 | Sign-in | Fields |
 | --- | --- |
-| SQL Server login | user, password |
+| SQL Server login, or user name and password (PostgreSQL) | user, password |
 | Entra ID (az login session) | none; run `az login` first |
 | Entra ID service principal | tenant ID, client ID, client secret |
 
-SQL Server also has encryption (Mandatory, Optional, Strict) and "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption.
+SQL Server also has encryption (Mandatory, Optional, Strict) and PostgreSQL has Prefer or Require; both have "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption. PostgreSQL may leave the database empty to use the user's default database.
 
 To start from a connection string, paste it in the box at the top of the form and press Fill from string. For example:
 
 ```text
 Server=db1,1433;Database=sales;User ID=report;Password=...;TrustServerCertificate=True
 Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Authentication=ActiveDirectoryInteractive
+postgres://report:<password>@db1:5432/sales?sslmode=require
+host=db1 port=5432 user=report dbname=sales
 ```
 
 The URL form works too:

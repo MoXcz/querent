@@ -19,5 +19,7 @@ Each file adapted from another project names the source and is listed here with 
 | mssql-tds | MIT |
 | azure_identity, azure_core | MIT |
 | tokio | MIT |
+| tokio-postgres, postgres-native-tls | MIT OR Apache-2.0 |
+| native-tls | MIT OR Apache-2.0 |
 
 Run `cargo tree --format "{p} {l}"` for the full list.

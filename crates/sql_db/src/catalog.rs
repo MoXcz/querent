@@ -1,7 +1,7 @@
-//! Database objects for the object explorer, read from SQL Server catalog views.
+//! Database objects for the object explorer, and scripts generated from them.
 //!
-//! Queries name the database explicitly (`[db].sys.objects`), so one connection
-//! can browse every database on the server or Fabric workspace.
+//! SQL Server queries name the database explicitly (`[db].sys.objects`), so one
+//! connection can browse every database on the server or Fabric workspace.
 
 use crate::{CancelHandle, QueryError, ResultSet, TdsConnection, Value};
 
@@ -39,6 +39,26 @@ impl ObjectKind {
     }
 }
 
+/// How generated SQL quotes names and limits rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// SQL Server and Fabric: `[name]`, `select top N`.
+    TSql,
+    /// PostgreSQL: `"name"`, `limit N`.
+    Postgres,
+}
+
+impl Dialect {
+    /// `[name]` with `]` doubled, or `"name"` with `"` doubled.
+    #[must_use]
+    pub fn quote_identifier(self, name: &str) -> String {
+        match self {
+            Self::TSql => quote_identifier(name),
+            Self::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogObject {
     pub schema: String,
@@ -47,13 +67,13 @@ pub struct CatalogObject {
 }
 
 impl CatalogObject {
-    /// `[schema].[name]`.
+    /// `[schema].[name]` or `"schema"."name"`.
     #[must_use]
-    pub fn qualified_name(&self) -> String {
+    pub fn qualified_name(&self, dialect: Dialect) -> String {
         format!(
             "{}.{}",
-            quote_identifier(&self.schema),
-            quote_identifier(&self.name)
+            dialect.quote_identifier(&self.schema),
+            dialect.quote_identifier(&self.name)
         )
     }
 }
@@ -131,7 +151,7 @@ impl TdsConnection {
         object: &CatalogObject,
     ) -> Result<Vec<ColumnInfo>, QueryError> {
         let quoted_database = quote_identifier(database);
-        let full_name = format!("{quoted_database}.{}", object.qualified_name());
+        let full_name = format!("{quoted_database}.{}", object.qualified_name(Dialect::TSql));
         let sql = format!(
             "select c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable \
              from {quoted_database}.sys.columns c \
@@ -154,7 +174,7 @@ impl TdsConnection {
         object: &CatalogObject,
     ) -> Result<Option<String>, QueryError> {
         let quoted_database = quote_identifier(database);
-        let full_name = format!("{quoted_database}.{}", object.qualified_name());
+        let full_name = format!("{quoted_database}.{}", object.qualified_name(Dialect::TSql));
         let sql = format!(
             "select definition from {quoted_database}.sys.sql_modules \
              where object_id = object_id({})",
@@ -240,44 +260,55 @@ fn declared_type(type_name: &str, max_length: i64, precision: i64, scale: i64) -
     }
 }
 
-/// `select top N [a], [b] from [schema].[name];`, or `*` when columns are unknown.
+/// `select top N [a], [b] from [schema].[name];` (or `limit N` on PostgreSQL),
+/// with `*` when columns are unknown.
 #[must_use]
 pub fn select_script(
+    dialect: Dialect,
     object: &CatalogObject,
     columns: Option<&[ColumnInfo]>,
     top: Option<usize>,
 ) -> String {
-    let top = top.map(|rows| format!(" top {rows}")).unwrap_or_default();
     let column_list = match columns {
         Some(columns) if !columns.is_empty() => columns
             .iter()
-            .map(|column| format!("    {}", quote_identifier(&column.name)))
+            .map(|column| format!("    {}", dialect.quote_identifier(&column.name)))
             .collect::<Vec<_>>()
             .join(",\n"),
         _ => "    *".to_owned(),
     };
-    format!(
-        "select{top}\n{column_list}\nfrom {};\n",
-        object.qualified_name()
-    )
+    let name = object.qualified_name(dialect);
+    match (dialect, top) {
+        (Dialect::TSql, Some(rows)) => format!("select top {rows}\n{column_list}\nfrom {name};\n"),
+        (Dialect::Postgres, Some(rows)) => {
+            format!("select\n{column_list}\nfrom {name}\nlimit {rows};\n")
+        }
+        (Dialect::TSql | Dialect::Postgres, None) => {
+            format!("select\n{column_list}\nfrom {name};\n")
+        }
+    }
 }
 
 #[must_use]
-pub fn create_table_script(object: &CatalogObject, columns: &[ColumnInfo]) -> String {
+pub fn create_table_script(
+    dialect: Dialect,
+    object: &CatalogObject,
+    columns: &[ColumnInfo],
+) -> String {
     let lines: Vec<String> = columns
         .iter()
         .map(|column| {
             let null = if column.nullable { "null" } else { "not null" };
             format!(
                 "    {} {} {null}",
-                quote_identifier(&column.name),
+                dialect.quote_identifier(&column.name),
                 column.type_name
             )
         })
         .collect();
     format!(
         "create table {} (\n{}\n);\n",
-        object.qualified_name(),
+        object.qualified_name(dialect),
         lines.join(",\n")
     )
 }
@@ -313,7 +344,8 @@ mod tests {
     fn quotes_identifiers_and_literals() {
         assert_eq!(quote_identifier("a]b"), "[a]]b]");
         assert_eq!(quote_literal("it's"), "N'it''s'");
-        assert_eq!(table().qualified_name(), "[dbo].[odd]]name]");
+        assert_eq!(table().qualified_name(Dialect::TSql), "[dbo].[odd]]name]");
+        assert_eq!(Dialect::Postgres.quote_identifier(r#"a"b"#), r#""a""b""#);
     }
 
     #[test]
@@ -341,16 +373,20 @@ mod tests {
     #[test]
     fn scripts_select_and_create() {
         assert_eq!(
-            select_script(&table(), Some(&columns()), Some(1000)),
+            select_script(Dialect::TSql, &table(), Some(&columns()), Some(1000)),
             "select top 1000\n    [id],\n    [label]\nfrom [dbo].[odd]]name];\n"
         );
         assert_eq!(
-            select_script(&table(), None, None),
+            select_script(Dialect::TSql, &table(), None, None),
             "select\n    *\nfrom [dbo].[odd]]name];\n"
         );
         assert_eq!(
-            create_table_script(&table(), &columns()),
+            create_table_script(Dialect::TSql, &table(), &columns()),
             "create table [dbo].[odd]]name] (\n    [id] int not null,\n    [label] nvarchar(100) null\n);\n"
+        );
+        assert_eq!(
+            select_script(Dialect::Postgres, &table(), Some(&columns()), Some(10)),
+            "select\n    \"id\",\n    \"label\"\nfrom \"dbo\".\"odd]name\"\nlimit 10;\n"
         );
     }
 }

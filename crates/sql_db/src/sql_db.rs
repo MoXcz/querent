@@ -1,22 +1,25 @@
 //! Database drivers behind one result shape, so the UI never sees driver types.
 
 mod catalog;
+mod connection;
 mod connection_settings;
 mod connection_string;
 mod csv_export;
+mod postgres;
 mod tds;
 
 use std::fmt;
 use std::sync::Arc;
 
 pub use catalog::{
-    CatalogObject, ColumnInfo, ObjectKind, create_table_script, quote_identifier, select_script,
+    CatalogObject, ColumnInfo, Dialect, ObjectKind, create_table_script, quote_identifier,
+    select_script,
 };
+pub use connection::{Connection, ConnectionConfig};
 pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
-pub use connection_string::{
-    ConnectionStringError, parse_connection_string, parse_connection_string_with_database,
-};
+pub use connection_string::{ConnectionStringError, parse_connection_string};
 pub use csv_export::write_csv;
+pub use postgres::{PgConfig, PgConnection};
 pub use tds::{Authentication, Encryption, TdsConfig, TdsConnection};
 
 #[derive(Debug, thiserror::Error)]
@@ -104,6 +107,8 @@ pub struct QueryOutput {
 #[derive(Debug, Clone, Default)]
 pub struct CancelHandle {
     inner: Arc<mssql_tds::core::CancelHandle>,
+    /// Drivers without a cancel hook of their own wait on this and send the cancel request.
+    token: tokio_util::sync::CancellationToken,
 }
 
 impl CancelHandle {
@@ -114,5 +119,6 @@ impl CancelHandle {
 
     pub fn cancel(&self) {
         self.inner.cancel();
+        self.token.cancel();
     }
 }
