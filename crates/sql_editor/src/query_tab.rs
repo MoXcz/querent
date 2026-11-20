@@ -14,6 +14,7 @@ use gpui_kit::component::input::{
     RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, resizable_panel,
@@ -22,7 +23,8 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
+    Styled as _, Subscription, Task, WeakEntity, Window, actions, div, prelude::FluentBuilder as _,
+    px,
 };
 use sql_db::{
     CancelHandle, Connection, ConnectionConfig, Dialect, QueryError, QueryOutput, ResultSet,
@@ -64,6 +66,7 @@ type SharedConnection = Arc<Mutex<Connection>>;
 
 const BLOCK_CURSOR_OPACITY: f32 = 0.45;
 const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
+const RUNNING_TICK: Duration = Duration::from_millis(100);
 /// Pause after typing before the syntax is checked again.
 const SYNTAX_CHECK_DELAY: Duration = Duration::from_millis(400);
 const SYNTAX_CHECK_MAX_BYTES: usize = 256 * 1024;
@@ -117,6 +120,8 @@ pub struct QueryTab {
     connection: Option<SharedConnection>,
     state: QueryState,
     running_query: Option<Task<()>>,
+    /// Redraws the elapsed time while a query runs; ends by itself when it stops.
+    running_ticker: Option<Task<()>>,
     /// Bumped per run so a replaced query's late result is ignored.
     query_generation: u64,
     /// Which lines the last run sent, shown in the status line.
@@ -239,6 +244,7 @@ impl QueryTab {
             connection: None,
             state: QueryState::Idle,
             running_query: None,
+            running_ticker: None,
             query_generation: 0,
             ran_lines: None,
             shown_result: None,
@@ -927,6 +933,18 @@ impl QueryTab {
         };
         self.query_generation += 1;
         let generation = self.query_generation;
+        self.running_ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(RUNNING_TICK).await;
+                let running = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.is_running()
+                });
+                if !matches!(running, Ok(true)) {
+                    break;
+                }
+            }
+        }));
         self.running_query = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = query.await;
             let updated = this.update(cx, |this, cx| {
@@ -1168,7 +1186,8 @@ impl QueryTab {
                     .primary()
                     .small()
                     .icon(LucideIcon::Play)
-                    .label("Run")
+                    .loading(running)
+                    .label(if running { "Running" } else { "Run" })
                     .tooltip("Run statement under cursor or selection (Ctrl+Enter). Run all: Ctrl+Shift+Enter")
                     .disabled(running)
                     .on_click(
@@ -1185,6 +1204,36 @@ impl QueryTab {
                         this.cancel_query(&CancelQuery, window, cx);
                     })),
             )
+    }
+
+    /// A spinner, the elapsed time and Cancel above the grid while a query runs.
+    fn render_running_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let QueryState::Running { started, .. } = &self.state else {
+            return None;
+        };
+        Some(
+            h_flex()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .bg(cx.theme().accent)
+                .text_sm()
+                .child(Spinner::new().small())
+                .child(format!("Running… {:.1}s", started.elapsed().as_secs_f64()))
+                .child(div().flex_1())
+                .child(
+                    Button::new("cancel-running")
+                        .xsmall()
+                        .icon(LucideIcon::CircleStop)
+                        .label("Cancel")
+                        .tooltip("Stop the query on the server (Ctrl+Shift+C)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.cancel_query(&CancelQuery, window, cx);
+                        })),
+                ),
+        )
     }
 
     /// Row count and the no-limit rerun under the grid, shown while it holds a result.
@@ -1258,6 +1307,7 @@ impl QueryTab {
                 .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
                 .size_full()
+                .children(self.render_running_banner(cx))
                 .children(match &self.state {
                     QueryState::Done { output, .. } => {
                         Some(self.render_result_switcher(output, cx))
@@ -1270,6 +1320,8 @@ impl QueryTab {
                     div()
                         .flex_1()
                         .min_h_0()
+                        // The rows on screen are the previous run's until this one ends.
+                        .when(self.is_running(), |grid| grid.opacity(0.35))
                         .child(DataTable::new(&self.results).stripe(true).bordered(false)),
                 )
                 .children(self.render_results_footer(cx))
@@ -1354,7 +1406,9 @@ impl QueryTab {
     fn query_status_text(&self) -> String {
         match &self.state {
             QueryState::Idle => "Ready".to_owned(),
-            QueryState::Running { .. } => "Running…".to_owned(),
+            QueryState::Running { started, .. } => {
+                format!("Running… {:.1}s", started.elapsed().as_secs_f64())
+            }
             QueryState::Failed { .. } => "Failed".to_owned(),
             QueryState::Done { output, elapsed } => {
                 let mut parts = Vec::new();
