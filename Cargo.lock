@@ -6857,6 +6857,7 @@ dependencies = [
  "anyhow",
  "directories",
  "gpui-kit",
+ "lsp-types",
  "notify",
  "serde",
  "serde_json",
@@ -6871,6 +6872,10 @@ dependencies = [
 [[package]]
 name = "sql_text"
 version = "0.0.1"
+dependencies = [
+ "tree-sitter",
+ "tree-sitter-sequel",
+]
 
 [[package]]
 name = "sqlite-wasm-rs"

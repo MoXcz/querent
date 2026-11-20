@@ -215,8 +215,19 @@ impl TdsConnection {
         sql: &str,
         cancel: &CancelHandle,
     ) -> Result<QueryOutput, QueryError> {
+        let max_rows = self.config.max_rows;
+        self.execute_with_limit(sql, cancel, max_rows).await
+    }
+
+    /// `execute` with its own row cap; catalog reads pass `usize::MAX`.
+    pub(crate) async fn execute_with_limit(
+        &mut self,
+        sql: &str,
+        cancel: &CancelHandle,
+        max_rows: usize,
+    ) -> Result<QueryOutput, QueryError> {
         let options = ExecuteOptions::new().cancel(&cancel.inner);
-        let result = collect_batch(&mut self.client, sql, options, self.config.max_rows).await;
+        let result = collect_batch(&mut self.client, sql, options, max_rows).await;
         let messages = self
             .client
             .take_info_messages()

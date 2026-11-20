@@ -1,5 +1,7 @@
 //! Text logic with no UI or database dependency.
 
+pub mod completion;
+pub mod syntax;
 pub mod vim;
 
 use std::ops::Range;

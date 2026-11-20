@@ -23,6 +23,7 @@ use sql_db::{
 use tokio::sync::Mutex;
 
 use crate::connections::{self, ConnectionStore, SavedConnection};
+use crate::schema_cache;
 use crate::settings;
 use crate::tokio_bridge;
 
@@ -325,11 +326,13 @@ impl ObjectExplorer {
     fn refresh(&mut self, id: &NodeId, cx: &mut Context<Self>) {
         match id {
             NodeId::Connection(connection) => {
+                schema_cache::invalidate(cx, connection, None);
                 self.databases.remove(connection);
                 self.objects.retain(|(owner, _), _| owner != connection);
                 self.columns.retain(|key, _| &key.connection != connection);
             }
             NodeId::Database(connection, database) => {
+                schema_cache::invalidate(cx, connection, Some(database));
                 self.objects.remove(&(connection.clone(), database.clone()));
                 self.columns
                     .retain(|key, _| !(&key.connection == connection && &key.database == database));

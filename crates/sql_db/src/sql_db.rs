@@ -14,8 +14,8 @@ use std::fmt;
 use std::sync::Arc;
 
 pub use catalog::{
-    CatalogObject, ColumnInfo, Dialect, ObjectKind, create_table_script, quote_identifier,
-    select_script,
+    CatalogObject, ColumnInfo, Dialect, ObjectKind, SchemaColumn, create_table_script,
+    quote_identifier, select_script,
 };
 pub use connection::{Connection, ConnectionConfig};
 pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};

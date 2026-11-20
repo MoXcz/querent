@@ -8,5 +8,9 @@ publish.workspace = true
 [lib]
 path = "src/sql_text.rs"
 
+[dependencies]
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+
 [lints]
 workspace = true

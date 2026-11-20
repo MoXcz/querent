@@ -65,6 +65,48 @@ impl Dialect {
     }
 }
 
+/// Common reserved words; a table named `order` must be quoted.
+const RESERVED_WORDS: [&str; 24] = [
+    "select", "from", "where", "order", "group", "by", "user", "table", "join", "on", "and", "or",
+    "not", "null", "key", "index", "check", "default", "values", "insert", "update", "delete",
+    "to", "end",
+];
+
+impl Dialect {
+    /// The name as typed in SQL: bare when the database reads it back unchanged,
+    /// quoted otherwise (spaces, symbols, or a case the database would fold).
+    #[must_use]
+    pub fn name_in_sql(self, name: &str) -> String {
+        let mut characters = name.chars();
+        let first_ok = characters
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_');
+        let rest_ok =
+            characters.all(|character| character.is_ascii_alphanumeric() || character == '_');
+        let case_ok = match self {
+            Self::TSql | Self::Sqlite => true,
+            Self::Postgres => !name.chars().any(|character| character.is_ascii_uppercase()),
+            Self::Snowflake => !name.chars().any(|character| character.is_ascii_lowercase()),
+        };
+        let reserved = RESERVED_WORDS
+            .iter()
+            .any(|word| word.eq_ignore_ascii_case(name));
+        if first_ok && rest_ok && case_ok && !reserved {
+            name.to_owned()
+        } else {
+            self.quote_identifier(name)
+        }
+    }
+}
+
+/// One column of a table or view, for the schema cache behind completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaColumn {
+    pub schema: String,
+    pub table: String,
+    pub column: ColumnInfo,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogObject {
     pub schema: String,
@@ -195,8 +237,44 @@ impl TdsConnection {
             .map(text))
     }
 
+    /// Every column of every table and view in `database`, in one query.
+    pub async fn list_all_columns(
+        &mut self,
+        database: &str,
+    ) -> Result<Vec<SchemaColumn>, QueryError> {
+        let database = quote_identifier(database);
+        let sql = format!(
+            "select s.name, o.name, c.name, t.name, c.max_length, c.precision, c.scale, c.is_nullable \
+             from {database}.sys.columns c \
+             join {database}.sys.objects o on o.object_id = c.object_id \
+             join {database}.sys.schemas s on s.schema_id = o.schema_id \
+             join {database}.sys.types t on t.user_type_id = c.user_type_id \
+             where o.is_ms_shipped = 0 and o.type_desc in ('USER_TABLE', 'VIEW') \
+             order by s.name, o.name, c.column_id"
+        );
+        let result = self.query_one(&sql).await?;
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let (owner, rest) = row.split_at_checked(2)?;
+                let [schema, table] = owner else {
+                    return None;
+                };
+                Some(SchemaColumn {
+                    schema: text(schema),
+                    table: text(table),
+                    column: column_info(rest)?,
+                })
+            })
+            .collect())
+    }
+
     async fn query_one(&mut self, sql: &str) -> Result<ResultSet, QueryError> {
-        let output = self.execute(sql, &CancelHandle::new()).await?;
+        // Catalog reads feed completion, which must see every column.
+        let output = self
+            .execute_with_limit(sql, &CancelHandle::new(), usize::MAX)
+            .await?;
         Ok(output.result_sets.into_iter().next().unwrap_or_default())
     }
 }
@@ -351,6 +429,13 @@ mod tests {
         assert_eq!(quote_identifier("a]b"), "[a]]b]");
         assert_eq!(quote_literal("it's"), "N'it''s'");
         assert_eq!(table().qualified_name(Dialect::TSql), "[dbo].[odd]]name]");
+        assert_eq!(Dialect::TSql.name_in_sql("Orders"), "Orders");
+        assert_eq!(Dialect::TSql.name_in_sql("order lines"), "[order lines]");
+        assert_eq!(Dialect::TSql.name_in_sql("Order"), "[Order]");
+        assert_eq!(Dialect::Postgres.name_in_sql("orders"), "orders");
+        assert_eq!(Dialect::Postgres.name_in_sql("Orders"), r#""Orders""#);
+        assert_eq!(Dialect::Snowflake.name_in_sql("ORDERS"), "ORDERS");
+        assert_eq!(Dialect::Snowflake.name_in_sql("orders"), r#""orders""#);
         assert_eq!(Dialect::Postgres.quote_identifier(r#"a"b"#), r#""a""b""#);
     }
 

@@ -168,6 +168,48 @@ impl SqliteConnection {
         .await
     }
 
+    pub async fn list_all_columns(
+        &mut self,
+        database: &str,
+    ) -> Result<Vec<crate::SchemaColumn>, QueryError> {
+        let schema = Dialect::Sqlite.quote_identifier(database);
+        let database = database.to_owned();
+        self.with_connection(move |connection| {
+            let mut tables = connection.prepare(&format!(
+                "select name from {schema}.sqlite_schema \
+                 where type in ('table', 'view') and name not like 'sqlite\\_%' escape '\\' \
+                 order by name"
+            ))?;
+            let names = tables
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut info = connection.prepare(
+                "select name, type, \"notnull\" from pragma_table_info(?1, ?2) order by cid",
+            )?;
+            let mut columns = Vec::new();
+            for table in names {
+                // A view over a dropped table fails here; skip it, keep the rest.
+                let rows = info.query_map([&table, &database], |row| {
+                    Ok(ColumnInfo {
+                        name: row.get(0)?,
+                        type_name: row.get(1)?,
+                        nullable: row.get::<_, i64>(2)? == 0,
+                    })
+                });
+                let Ok(rows) = rows.and_then(Iterator::collect::<Result<Vec<_>, _>>) else {
+                    continue;
+                };
+                columns.extend(rows.into_iter().map(|column| crate::SchemaColumn {
+                    schema: database.clone(),
+                    table: table.clone(),
+                    column,
+                }));
+            }
+            Ok(columns)
+        })
+        .await
+    }
+
     /// The `create` statement SQLite stored for the table or view.
     pub async fn object_definition(
         &mut self,
@@ -334,6 +376,45 @@ mod tests {
         .unwrap();
         assert_eq!(output.result_sets[0].rows.len(), 10);
         assert!(output.result_sets[0].truncated);
+    }
+
+    #[test]
+    fn lists_every_column_in_one_call() {
+        let path = std::env::temp_dir().join(format!("sql-editor-test-{}.db", std::process::id()));
+        {
+            let connection = rusqlite::Connection::open(&path).unwrap();
+            connection
+                .execute_batch(
+                    "create table a (id integer not null, name text);
+                     create view v as select name from a;
+                     create table gone (x int);
+                     create view broken as select x from gone;
+                     drop table gone;",
+                )
+                .unwrap();
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let columns = runtime.block_on(async {
+            let mut connection = SqliteConnection::connect(SqliteConfig::new(&path))
+                .await
+                .unwrap();
+            connection.list_all_columns("main").await.unwrap()
+        });
+        std::fs::remove_file(&path).unwrap();
+        let names: Vec<(String, String, bool)> = columns
+            .into_iter()
+            .map(|entry| (entry.table, entry.column.name, entry.column.nullable))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("a".to_owned(), "id".to_owned(), false),
+                ("a".to_owned(), "name".to_owned(), true),
+                ("v".to_owned(), "name".to_owned(), true),
+            ]
+        );
     }
 
     #[test]

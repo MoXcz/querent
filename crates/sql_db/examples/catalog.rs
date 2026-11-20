@@ -21,6 +21,12 @@ async fn main() -> anyhow::Result<()> {
         "databases: {:?}",
         connection.list_databases().await?
     )?;
+    let all_columns = connection.list_all_columns(&database).await?;
+    writeln!(
+        stdout,
+        "columns in all tables and views: {}",
+        all_columns.len()
+    )?;
     let objects = connection.list_objects(&database).await?;
     for kind in ObjectKind::ALL {
         let count = objects.iter().filter(|object| object.kind == kind).count();

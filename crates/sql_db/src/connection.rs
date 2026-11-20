@@ -171,6 +171,18 @@ impl Connection {
         }
     }
 
+    pub async fn list_all_columns(
+        &mut self,
+        database: &str,
+    ) -> Result<Vec<crate::SchemaColumn>, QueryError> {
+        match self {
+            Self::Tds(connection) => connection.list_all_columns(database).await,
+            Self::Postgres(connection) => connection.list_all_columns(database).await,
+            Self::Sqlite(connection) => connection.list_all_columns(database).await,
+            Self::Snowflake(connection) => connection.list_all_columns(database).await,
+        }
+    }
+
     pub async fn object_definition(
         &mut self,
         database: &str,

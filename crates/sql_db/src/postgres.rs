@@ -255,6 +255,40 @@ impl PgConnection {
             .collect())
     }
 
+    pub async fn list_all_columns(
+        &mut self,
+        database: &str,
+    ) -> Result<Vec<crate::SchemaColumn>, QueryError> {
+        let client = &self.catalog_session(database).await?.client;
+        let rows = client
+            .query(
+                "select n.nspname::text, c.relname::text, a.attname::text, \
+                     format_type(a.atttypid, a.atttypmod), not a.attnotnull \
+                 from pg_attribute a \
+                 join pg_class c on c.oid = a.attrelid \
+                 join pg_namespace n on n.oid = c.relnamespace \
+                 where c.relkind in ('r', 'p', 'f', 'v', 'm') and a.attnum > 0 \
+                   and not a.attisdropped and n.nspname <> 'information_schema' \
+                   and n.nspname not like 'pg\\_%' \
+                 order by 1, 2, a.attnum",
+                &[],
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        Ok(rows
+            .iter()
+            .map(|row| crate::SchemaColumn {
+                schema: row.get(0),
+                table: row.get(1),
+                column: ColumnInfo {
+                    name: row.get(2),
+                    type_name: row.get(3),
+                    nullable: row.get(4),
+                },
+            })
+            .collect())
+    }
+
     /// `create or replace` source of a view, function or procedure; `None` for tables.
     pub async fn object_definition(
         &mut self,

@@ -32,6 +32,9 @@ postgres-native-tls = "0.5.3"
 native-tls = "0.2"
 futures-util = "0.3"
 snowflake-connector-rs = { version = "1.1.1", default-features = false, features = ["key-pair-auth"] }
+tree-sitter = "0.26.13"
+tree-sitter-sequel = "0.3.13"
+lsp-types = "=0.97.0"
 rusqlite = { version = "0.43.0", features = ["bundled", "column_decltype"] }
 
 [workspace.lints.rust]

@@ -4,11 +4,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputState, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Redo, Undo,
+    Editor, EditorState, Input, InputEvent, InputState, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
@@ -20,7 +21,9 @@ use gpui_kit::{
     InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
-use sql_db::{CancelHandle, Connection, ConnectionConfig, QueryError, QueryOutput, ResultSet};
+use sql_db::{
+    CancelHandle, Connection, ConnectionConfig, Dialect, QueryError, QueryOutput, ResultSet,
+};
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
@@ -28,6 +31,7 @@ use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
 use crate::results_table::ResultsTable;
 use crate::settings::{self, SettingsStore};
+use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
 
 actions!(
@@ -50,6 +54,9 @@ type SharedConnection = Arc<Mutex<Connection>>;
 
 const BLOCK_CURSOR_OPACITY: f32 = 0.45;
 const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
+/// Pause after typing before the syntax is checked again.
+const SYNTAX_CHECK_DELAY: Duration = Duration::from_millis(400);
+const SYNTAX_CHECK_MAX_BYTES: usize = 256 * 1024;
 /// Outer error: the task died. Middle: connecting failed. Inner: the query failed.
 type QueryOutcome =
     anyhow::Result<Result<(SharedConnection, Result<QueryOutput, QueryError>), QueryError>>;
@@ -104,6 +111,8 @@ pub struct QueryTab {
     block_cursor_range: Option<Range<usize>>,
     /// Brief fill over the SQL that was sent to the server.
     run_highlight: Option<RangeDecorationCollection>,
+    /// Pending syntax check; replacing it restarts the delay.
+    syntax_check: Option<Task<()>>,
     run_highlight_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -136,6 +145,17 @@ impl QueryTab {
                 .soft_wrap(false)
                 .placeholder("select top 100 * from ...")
         });
+        let target = TabTarget {
+            connection: connection_select.downgrade(),
+            database: database_input.downgrade(),
+        };
+        editor.update(cx, |editor, _| {
+            let lsp = editor.lsp_mut();
+            lsp.completion_provider = Some(std::rc::Rc::new(SqlCompletions {
+                target: target.clone(),
+            }));
+            lsp.hover_provider = Some(std::rc::Rc::new(SqlHover { target }));
+        });
         let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
         // Interceptors run before key bindings and text input, so normal mode
         // can claim keys the editor would otherwise insert or bind.
@@ -161,6 +181,11 @@ impl QueryTab {
             // The editor notifies on every cursor move and caret blink.
             cx.observe(&editor, |this, _, cx| this.update_block_cursor(cx)),
             cx.observe_global::<SettingsStore>(Self::update_block_cursor),
+            cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_syntax_check(cx);
+                }
+            }),
         ];
 
         Self {
@@ -183,6 +208,7 @@ impl QueryTab {
             block_cursor_range: None,
             run_highlight: None,
             run_highlight_task: None,
+            syntax_check: None,
             _subscriptions: subscriptions,
         }
     }
@@ -218,6 +244,7 @@ impl QueryTab {
         self.editor.update(cx, |editor, cx| {
             editor.set_value(sql.to_owned(), window, cx);
         });
+        self.schedule_syntax_check(cx);
     }
 
     /// Inserts at the editor's cursor, replacing any selection.
@@ -243,6 +270,8 @@ impl QueryTab {
             return;
         };
         self.fill_default_database(name, window, cx);
+        // The new connection may be a dialect that is checked, or one that is not.
+        self.schedule_syntax_check(cx);
     }
 
     fn fill_default_database(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -312,6 +341,53 @@ impl QueryTab {
             cx.notify();
         }
         outcome.handled
+    }
+
+    /// The SQL dialect of the tab's connection, if it has one.
+    fn dialect(&self, cx: &App) -> Option<Dialect> {
+        let connection = self.connection_fields(cx).connection?;
+        connections::find(cx, &connection).map(connections::SavedConnection::dialect)
+    }
+
+    fn schedule_syntax_check(&mut self, cx: &mut Context<Self>) {
+        self.syntax_check = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SYNTAX_CHECK_DELAY).await;
+            if let Err(error) = this.update(cx, Self::check_syntax) {
+                tracing::debug!(%error, "tab closed before the syntax check");
+            }
+        }));
+    }
+
+    /// Marks syntax errors in the editor. T-SQL is skipped: the grammar does
+    /// not know `TOP`, `[names]`, `GO` or `DECLARE` and would flag valid code.
+    fn check_syntax(&mut self, cx: &mut Context<Self>) {
+        let text = self.editor.read(cx).value().to_string();
+        // Parsing runs on this thread, fast for an editor-sized buffer; a
+        // huge pasted script is not checked rather than stalling typing.
+        let checked = !matches!(self.dialect(cx), None | Some(Dialect::TSql))
+            && text.len() <= SYNTAX_CHECK_MAX_BYTES;
+        let errors = if checked {
+            sql_text::syntax::syntax_errors(&text)
+        } else {
+            Vec::new()
+        };
+        let rope = Rope::from(text.as_str());
+        self.editor.update(cx, |editor, cx| {
+            let Some(diagnostics) = editor.diagnostics_mut() else {
+                return;
+            };
+            diagnostics.reset(&rope);
+            for error in errors {
+                let range = rope.offset_to_position(error.range.start)
+                    ..rope.offset_to_position(error.range.end);
+                diagnostics.push(
+                    Diagnostic::new(range, error.message)
+                        .with_severity(DiagnosticSeverity::Error)
+                        .with_source("sql"),
+                );
+            }
+            cx.notify();
+        });
     }
 
     fn update_block_cursor(&mut self, cx: &mut Context<Self>) {

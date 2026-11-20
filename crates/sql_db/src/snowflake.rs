@@ -111,7 +111,9 @@ impl SnowflakeConnection {
             if cancel.token.is_cancelled() {
                 return Err(QueryError::Cancelled);
             }
-            let result_set = self.run_statement(statement, cancel).await?;
+            let result_set = self
+                .run_statement(statement, cancel, self.config.max_rows)
+                .await?;
             output.result_sets.push(result_set);
         }
         Ok(output)
@@ -216,6 +218,39 @@ impl SnowflakeConnection {
             .collect())
     }
 
+    pub async fn list_all_columns(
+        &mut self,
+        database: &str,
+    ) -> Result<Vec<crate::SchemaColumn>, QueryError> {
+        let catalog = Dialect::Snowflake.quote_identifier(database);
+        let result = self
+            .query(&format!(
+                "select table_schema, table_name, column_name, data_type, is_nullable \
+                 from {catalog}.information_schema.columns \
+                 where table_schema <> 'INFORMATION_SCHEMA' \
+                 order by table_schema, table_name, ordinal_position"
+            ))
+            .await?;
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let [schema, table, name, type_name, nullable] = row.as_slice() else {
+                    return None;
+                };
+                Some(crate::SchemaColumn {
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    column: ColumnInfo {
+                        name: name.to_string(),
+                        type_name: type_name.to_string().to_lowercase(),
+                        nullable: nullable.to_string() == "YES",
+                    },
+                })
+            })
+            .collect())
+    }
+
     /// `GET_DDL` for tables and views; the stored body for procedures and functions.
     pub async fn object_definition(
         &mut self,
@@ -256,20 +291,22 @@ impl SnowflakeConnection {
     /// Catalog queries are short metadata reads, so like the other drivers'
     /// catalog calls they have no cancel; the explorer drops a stale answer.
     async fn query(&self, sql: &str) -> Result<ResultSet, QueryError> {
-        self.run_statement(sql, &CancelHandle::new()).await
+        // Catalog reads feed completion, which must see every column.
+        self.run_statement(sql, &CancelHandle::new(), usize::MAX)
+            .await
     }
 
     async fn run_statement(
         &self,
         sql: &str,
         cancel: &CancelHandle,
+        max_rows: usize,
     ) -> Result<ResultSet, QueryError> {
         let handle = self
             .session
             .query_handle(Statement::new(sql.to_owned()))
             .map_err(|error| map_error(&error))?;
         let canceller = handle.canceller();
-        let max_rows = self.config.max_rows;
         let work = async move {
             let mut cursor = handle.execute().await?;
             let columns: Vec<Column> = cursor
