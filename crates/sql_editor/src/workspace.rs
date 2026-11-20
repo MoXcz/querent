@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
@@ -6,16 +9,19 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div, px,
+    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, actions,
+    div, px,
 };
 
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
 use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
+use crate::history::{self, HistoryEntry};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab};
+use crate::session::{self, Session};
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 
@@ -31,7 +37,9 @@ actions!(
         /// Switch to the previous tab.
         PreviousTab,
         /// Open the dialog to add a connection.
-        AddConnection
+        AddConnection,
+        /// Show earlier runs on the current tab's connection.
+        ShowHistory
     ]
 );
 
@@ -47,6 +55,10 @@ pub struct Workspace {
     explorer: Entity<ObjectExplorer>,
     _explorer_subscription: Subscription,
     _servers_observation: Subscription,
+    _quit_subscription: Subscription,
+    /// Pending session write; tabs notify often, so writes are batched.
+    session_save: Option<Task<()>>,
+    last_saved: Option<Session>,
 }
 
 impl Workspace {
@@ -61,7 +73,25 @@ impl Workspace {
             _explorer_subscription: explorer_subscription,
             // The status line shows the active tab's language server.
             _servers_observation: cx.observe_global::<LspServers>(|_, cx| cx.notify()),
+            _quit_subscription: cx.on_app_quit(|workspace, cx| {
+                session::save_now(&workspace.session(cx), cx);
+                async {}
+            }),
+            session_save: None,
+            last_saved: None,
         };
+        // Closing the last window may drop the workspace before quit hooks run.
+        let closing = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            if let Some(workspace) = closing.upgrade() {
+                session::save_now(&workspace.read(cx).session(cx), cx);
+            }
+            true
+        });
+        if let Some(saved) = session::load(cx) {
+            workspace.restore(saved, window, cx);
+            return workspace;
+        }
         let first_connection = connections::names(cx).into_iter().next();
         let fields = ConnectionFields {
             connection: first_connection.clone(),
@@ -72,6 +102,118 @@ impl Workspace {
             tab.update(cx, |tab, cx| tab.use_connection(&name, window, cx));
         }
         workspace
+    }
+
+    /// Reopens the saved tabs; a connection deleted since is left unset.
+    fn restore(&mut self, saved: Session, window: &mut Window, cx: &mut Context<Self>) {
+        let active = saved.active;
+        for tab in saved.tabs {
+            let connection = tab
+                .connection
+                .filter(|name| connections::find(cx, name).is_some())
+                .map(SharedString::from);
+            self.open_tab(
+                ConnectionFields {
+                    connection,
+                    database: tab.database,
+                },
+                window,
+                cx,
+            );
+            if let Some(view) = self.active_tab().cloned() {
+                view.update(cx, |view, cx| view.set_sql(&tab.sql, window, cx));
+            }
+        }
+        self.activate(active.min(self.tabs.len().saturating_sub(1)), window, cx);
+        self.last_saved = Some(self.session(cx));
+    }
+
+    fn session(&self, cx: &App) -> Session {
+        Session {
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| tab.view.read(cx).saved_tab(cx))
+                .collect(),
+            active: self.active_index,
+        }
+    }
+
+    /// Saves the session a moment after the last change, skipping unchanged ones.
+    fn schedule_session_save(&mut self, cx: &mut Context<Self>) {
+        if self.session_save.is_some() {
+            return;
+        }
+        self.session_save = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SESSION_SAVE_DELAY).await;
+            let saved = this.update(cx, |this, cx| {
+                this.session_save = None;
+                let current = this.session(cx);
+                if this.last_saved.as_ref() != Some(&current) {
+                    session::save(&current, cx);
+                    this.last_saved = Some(current);
+                }
+            });
+            if let Err(error) = saved {
+                tracing::debug!(%error, "workspace closed before saving the session");
+            }
+        }));
+    }
+
+    fn show_history(&mut self, _: &ShowHistory, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self
+            .active_tab()
+            .and_then(|tab| tab.read(cx).connection_fields(cx).connection)
+        else {
+            window.push_notification("Pick a connection to see its history.", cx);
+            return;
+        };
+        let entries = history::for_connection(cx, &connection);
+        if entries.is_empty() {
+            window.push_notification(format!("No queries run on {connection} yet."), cx);
+            return;
+        }
+        let now = history::now();
+        let items: Vec<CommandItem> = entries
+            .iter()
+            .map(|entry| history_item(entry, now))
+            .collect();
+        let entries: std::rc::Rc<[HistoryEntry]> = entries.into();
+        let state = cx.new(|cx| CommandState::new(window, cx));
+        let focus_state = state.clone();
+        let workspace = cx.weak_entity();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let entries = entries.clone();
+            let workspace = workspace.clone();
+            let connection = connection.clone();
+            let list = Command::new(&state)
+                .placeholder("Search earlier queries")
+                .max_h(px(460.))
+                .items(items.iter().cloned())
+                .on_confirm(move |index, window, cx| {
+                    let Some(entry) = entries.get(index.row).cloned() else {
+                        return;
+                    };
+                    window.close_dialog(cx);
+                    let fields = ConnectionFields {
+                        connection: Some(connection.clone()),
+                        database: entry.database,
+                    };
+                    let opened = workspace.update(cx, |workspace, cx| {
+                        workspace.open_tab(fields, window, cx);
+                        if let Some(tab) = workspace.active_tab().cloned() {
+                            tab.update(cx, |tab, cx| tab.set_sql(&entry.sql, window, cx));
+                        }
+                    });
+                    if let Err(error) = opened {
+                        tracing::debug!(%error, "workspace closed while history was open");
+                    }
+                });
+            dialog.title("Query history").w(px(720.)).p_0().child(list)
+        });
+        window.defer(cx, move |window, cx| {
+            focus_state.update(cx, |state, cx| state.focus(window, cx));
+        });
     }
 
     fn on_explorer_event(
@@ -211,8 +353,11 @@ impl Workspace {
         let number = self.next_tab_number;
         self.next_tab_number += 1;
         let view = cx.new(|cx| QueryTab::new(number, fields, window, cx));
-        // Tab titles and the status line come from the tab's state.
-        let observation = cx.observe(&view, |_, _, cx| cx.notify());
+        // Tab titles, the status line and the saved session come from the tab's state.
+        let observation = cx.observe(&view, |this, _, cx| {
+            cx.notify();
+            this.schedule_session_save(cx);
+        });
         self.tabs.push(OpenTab {
             view,
             _observation: observation,
@@ -224,8 +369,10 @@ impl Workspace {
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
-        self.active_index = index;
         let editor_focus = tab.view.read(cx).editor_focus_handle(cx);
+        self.active_index = index;
+        // Opening, closing and switching tabs all pass through here.
+        self.schedule_session_save(cx);
         // Focus after this update so the new tab's editor exists in the element tree.
         window.defer(cx, move |window, cx| editor_focus.focus(window, cx));
         cx.notify();
@@ -384,6 +531,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(|_, _: &AddConnection, window, cx| {
                 Self::open_connection_dialog(None, window, cx);
             }))
@@ -428,4 +576,48 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
     }
+}
+
+/// Wait after a change before the session is written.
+const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);
+
+/// The statement's first line, with its database, age and outcome under it.
+fn history_item(entry: &HistoryEntry, now: u64) -> CommandItem {
+    let first_line = entry
+        .sql
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let title: String = first_line.chars().take(120).collect();
+    let outcome = match (entry.succeeded, entry.rows) {
+        (false, _) => "failed".to_owned(),
+        (true, Some(rows)) => format!("{rows} rows"),
+        (true, None) => "done".to_owned(),
+    };
+    let detail = format!(
+        "{} · {} · {outcome} · {:.1}s",
+        if entry.database.is_empty() {
+            "default database"
+        } else {
+            &entry.database
+        },
+        history::age(entry.at, now),
+        Duration::from_millis(entry.elapsed_ms).as_secs_f64(),
+    );
+    let label = SharedString::from(title);
+    CommandItem::new()
+        .label(label.clone())
+        .keywords([SharedString::from(entry.sql.clone())])
+        .child(move |_, cx| {
+            v_flex()
+                .gap_0p5()
+                .child(div().text_sm().child(label.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(detail.clone()),
+                )
+        })
 }

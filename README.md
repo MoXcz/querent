@@ -75,6 +75,8 @@ pass_connection = true   # send the connection, including its password, to the s
 
 The status line shows the server's state; a server that stops restarts on next use.
 
+Tabs and their text come back after a restart (`~/.config/sql-editor/session.json`), and every run is kept in `history.jsonl` next to it. Both files are readable only by you, since queries can hold sensitive values.
+
 Without the UI:
 
 ```sh
@@ -92,6 +94,7 @@ Keys:
 | `Ctrl+Shift+F` | Format the selection, or the whole tab (style in Settings) |
 | `Ctrl+Shift+P` | Command palette: every command, theme and setting by name |
 | `Ctrl+,` | Settings (theme, vim mode, explorer grouping); also the gear in the status bar |
+| `Ctrl+Shift+H` | Query history for the current connection |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
 | `Ctrl+N` / `Ctrl+P` with the completion menu open | Next / previous suggestion (`Ctrl+N` opens a tab only when no menu is open) |
 | `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |

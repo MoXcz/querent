@@ -212,11 +212,27 @@ fn write(path: &Path, file: &ConnectionsFile) -> anyhow::Result<()> {
             .with_context(|| format!("creating {}", directory.display()))?;
     }
     let text = toml::to_string_pretty(file)?;
-    write_owner_only(path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+    replace_owner_only(path, text.as_bytes()).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Serializes this app's writes to its own files, so concurrent saves cannot interleave.
+pub(crate) static FILE_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Writes owner-only to a temporary file, then renames it over `path`, so a
+/// crash mid-write leaves the old file whole.
+pub(crate) fn replace_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let _guard = FILE_WRITES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    write_owner_only(&temporary, bytes)?;
+    std::fs::rename(&temporary, path)
 }
 
 #[cfg(unix)]
-fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
@@ -232,7 +248,7 @@ fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 

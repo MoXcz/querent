@@ -120,6 +120,11 @@ impl PgConnection {
         &self.config
     }
 
+    /// Changes the row limit for later runs on this open connection.
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        self.config.max_rows = max_rows;
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn execute(
         &mut self,

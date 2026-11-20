@@ -29,6 +29,8 @@ pub struct Settings {
     pub formatter: FormatStyle,
     /// Format with the connection's language server instead of the built-in formatter.
     pub format_with_language_server: bool,
+    /// Rows kept per result set; 0 keeps every row.
+    pub row_limit: usize,
 }
 
 impl Default for Settings {
@@ -40,6 +42,7 @@ impl Default for Settings {
             language_servers: BTreeMap::new(),
             formatter: FormatStyle::default(),
             format_with_language_server: false,
+            row_limit: 50_000,
         }
     }
 }
@@ -142,6 +145,7 @@ mod tests {
                 lines_between_statements: 2,
             },
             format_with_language_server: true,
+            row_limit: 1_000,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);

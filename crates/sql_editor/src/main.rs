@@ -1,11 +1,13 @@
 mod command_palette;
 mod connection_form;
 mod connections;
+mod history;
 mod lsp_servers;
 mod object_explorer;
 mod query_tab;
 mod results_table;
 mod schema_cache;
+mod session;
 mod settings;
 mod sql_language;
 mod themes;
@@ -18,7 +20,9 @@ use tracing_subscriber::EnvFilter;
 
 use crate::command_palette::{OpenCommandPalette, OpenSettings};
 use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
-use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
+use crate::workspace::{
+    CloseTab, NewTab, NextTab, PreviousTab, ShowHistory, WORKSPACE_CONTEXT, Workspace,
+};
 
 const KEY_CONTEXT: &str = "SqlEditor";
 
@@ -40,6 +44,7 @@ fn main() -> anyhow::Result<()> {
             settings::init(cx);
             connections::init(cx);
             schema_cache::init(cx);
+            history::init(cx);
             lsp_servers::init(cx);
             themes::init(cx);
             command_palette::init(cx);
@@ -56,10 +61,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn bind_keys(cx: &mut App) {
-    let (palette, open_settings) = if cfg!(target_os = "macos") {
-        ("cmd-shift-p", "cmd-,")
+    let (palette, open_settings, history) = if cfg!(target_os = "macos") {
+        ("cmd-shift-p", "cmd-,", "cmd-shift-h")
     } else {
-        ("ctrl-shift-p", "ctrl-,")
+        ("ctrl-shift-p", "ctrl-,", "ctrl-shift-h")
     };
     let (run, run_all, new_tab, close_tab, format) = if cfg!(target_os = "macos") {
         (
@@ -90,6 +95,7 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(palette, OpenCommandPalette, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(open_settings, OpenSettings, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(history, ShowHistory, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.
         KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),

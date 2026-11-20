@@ -208,6 +208,11 @@ impl TdsConnection {
         &self.config
     }
 
+    /// Changes the row limit for later runs on this open connection.
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        self.config.max_rows = max_rows;
+    }
+
     /// Runs a batch and collects every result set in it.
     #[tracing::instrument(skip_all)]
     pub async fn execute(

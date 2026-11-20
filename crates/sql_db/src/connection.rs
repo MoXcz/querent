@@ -38,6 +38,16 @@ impl ConnectionConfig {
         }
     }
 
+    /// Rows kept per result set; the rest are skipped and the set is marked truncated.
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        match self {
+            Self::Tds(config) => config.max_rows = max_rows,
+            Self::Postgres(config) => config.max_rows = max_rows,
+            Self::Sqlite(config) => config.max_rows = max_rows,
+            Self::Snowflake(config) => config.max_rows = max_rows,
+        }
+    }
+
     /// PostgreSQL falls back to a database named like the user; TDS needs one.
     #[must_use]
     pub fn requires_database(&self) -> bool {
@@ -86,17 +96,25 @@ impl Connection {
     }
 
     /// Whether this connection was opened with `config`, so a tab can reuse it.
+    /// The row limit does not count: it changes per run with `set_max_rows`.
     #[must_use]
     pub fn matches(&self, config: &ConnectionConfig) -> bool {
-        match (self, config) {
-            (Self::Tds(connection), ConnectionConfig::Tds(config)) => connection.config() == config,
+        let mut config = config.clone();
+        match (self, &mut config) {
+            (Self::Tds(connection), ConnectionConfig::Tds(config)) => {
+                config.max_rows = connection.config().max_rows;
+                connection.config() == config
+            }
             (Self::Postgres(connection), ConnectionConfig::Postgres(config)) => {
+                config.max_rows = connection.config().max_rows;
                 connection.config() == config
             }
             (Self::Sqlite(connection), ConnectionConfig::Sqlite(config)) => {
+                config.max_rows = connection.config().max_rows;
                 connection.config() == config
             }
             (Self::Snowflake(connection), ConnectionConfig::Snowflake(config)) => {
+                config.max_rows = connection.config().max_rows;
                 connection.config() == config
             }
             (
@@ -106,6 +124,15 @@ impl Connection {
                 | ConnectionConfig::Sqlite(_)
                 | ConnectionConfig::Snowflake(_),
             ) => false,
+        }
+    }
+
+    pub fn set_max_rows(&mut self, max_rows: usize) {
+        match self {
+            Self::Tds(connection) => connection.set_max_rows(max_rows),
+            Self::Postgres(connection) => connection.set_max_rows(max_rows),
+            Self::Sqlite(connection) => connection.set_max_rows(max_rows),
+            Self::Snowflake(connection) => connection.set_max_rows(max_rows),
         }
     }
 

@@ -14,7 +14,7 @@ use gpui_kit::{
 use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
 use crate::settings;
 use crate::themes::{self, SelectTheme};
-use crate::workspace::{AddConnection, CloseTab, NewTab, NextTab, PreviousTab};
+use crate::workspace::{AddConnection, CloseTab, NewTab, NextTab, PreviousTab, ShowHistory};
 use sql_text::format::KeywordCase;
 
 actions!(
@@ -75,6 +75,12 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
             "Add connection",
             &["new", "database"],
             AddConnection,
+        ),
+        command(
+            "Query",
+            "Query history",
+            &["recent", "previous", "earlier"],
+            ShowHistory,
         ),
         command(
             "Settings",
@@ -268,6 +274,7 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                         .description("Normal, insert and visual modes in the SQL editor."),
                     ),
                 )
+                .group(results_group())
                 .group(formatter_group())
                 .group(
                     SettingGroup::new().title("Object explorer").item(
@@ -375,4 +382,35 @@ fn formatter_group() -> SettingGroup {
                 "When the connection has one that formats; see language_servers in settings.toml.",
             ),
         )
+}
+
+fn results_group() -> SettingGroup {
+    let choices: Vec<(SharedString, SharedString)> =
+        ["1000", "10000", "50000", "200000", "1000000", "unlimited"]
+            .iter()
+            .map(|value| (SharedString::from(*value), SharedString::from(*value)))
+            .collect();
+    SettingGroup::new().title("Results").item(
+        SettingItem::new(
+            "Row limit",
+            SettingField::dropdown(
+                choices,
+                |cx| match settings::get(cx).row_limit {
+                    0 => SharedString::from("unlimited"),
+                    limit => SharedString::from(limit.to_string()),
+                },
+                |value, cx| {
+                    let limit = if value.as_ref() == "unlimited" {
+                        Some(0)
+                    } else {
+                        value.parse().ok()
+                    };
+                    if let Some(limit) = limit {
+                        settings::update(cx, |settings| settings.row_limit = limit);
+                    }
+                },
+            ),
+        )
+        .description("Rows kept per result; a cut result offers to run again without the limit."),
+    )
 }

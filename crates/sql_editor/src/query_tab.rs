@@ -18,7 +18,7 @@ use gpui_kit::component::{
     v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
     Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
@@ -31,6 +31,7 @@ use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
+use crate::history;
 use crate::lsp_servers::{self, LspServers};
 use crate::results_table::ResultsTable;
 use crate::settings::{self, SettingsStore};
@@ -71,6 +72,8 @@ enum QueryState {
     Running {
         started: Instant,
         cancel: CancelHandle,
+        /// What ran, for the history entry when it finishes.
+        run: RunRecord,
     },
     Done {
         output: QueryOutput,
@@ -79,6 +82,13 @@ enum QueryState {
     Failed {
         message: SharedString,
     },
+}
+
+#[derive(Clone)]
+struct RunRecord {
+    sql: String,
+    connection: SharedString,
+    database: String,
 }
 
 /// Connection choice a new tab starts with.
@@ -107,6 +117,13 @@ pub struct QueryTab {
     ran_lines: Option<SharedString>,
     /// The result set in the grid; shared with the grid and CSV export.
     shown_result: Option<Arc<ResultSet>>,
+    /// Which result set of the last run the grid shows.
+    shown_index: usize,
+    /// The grid shows the run's messages instead of a result set.
+    show_messages: bool,
+    /// The next run ignores the row limit ("Run again without limit").
+    without_row_limit: bool,
+    last_run: Option<RunRecord>,
     /// Outcome of the last export, shown in the status line until the next run.
     export_notice: Option<SharedString>,
     export_task: Option<Task<()>>,
@@ -216,6 +233,10 @@ impl QueryTab {
             query_generation: 0,
             ran_lines: None,
             shown_result: None,
+            shown_index: 0,
+            show_messages: false,
+            without_row_limit: false,
+            last_run: None,
             export_notice: None,
             export_task: None,
             vim: Vim::default(),
@@ -698,6 +719,7 @@ impl QueryTab {
         if config.requires_database() && config.database().is_empty() {
             return Err("Enter the database name.".into());
         }
+        config.set_max_rows(self.row_limit(cx));
         Ok(config)
     }
 
@@ -745,16 +767,33 @@ impl QueryTab {
         cx.notify();
     }
 
+    fn row_limit(&self, cx: &App) -> usize {
+        match (self.without_row_limit, settings::get(cx).row_limit) {
+            (true, _) | (false, 0) => usize::MAX,
+            (false, limit) => limit,
+        }
+    }
+
     fn start_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
         self.stop_running_query(cx);
         self.export_notice = None;
-        let config = match self.connection_config(cx) {
+        let limit = self.row_limit(cx);
+        let config = self.connection_config(cx);
+        self.without_row_limit = false;
+        let config = match config {
             Ok(config) => config,
             Err(message) => {
                 self.show_error(message, cx);
                 return;
             }
         };
+        let fields = self.connection_fields(cx);
+        let run = RunRecord {
+            sql: sql.clone(),
+            connection: fields.connection.unwrap_or_default(),
+            database: fields.database,
+        };
+        self.last_run = Some(run.clone());
 
         let reusable = self.connection.clone().filter(|connection| {
             connection
@@ -769,7 +808,11 @@ impl QueryTab {
                     Some(connection) => connection,
                     None => Arc::new(Mutex::new(Connection::connect(config).await?)),
                 };
-                let output = connection.lock().await.execute(&sql, &cancel).await;
+                let output = {
+                    let mut connection = connection.lock().await;
+                    connection.set_max_rows(limit);
+                    connection.execute(&sql, &cancel).await
+                };
                 Ok::<_, QueryError>((connection, output))
             }
         });
@@ -777,6 +820,7 @@ impl QueryTab {
         self.state = QueryState::Running {
             started: Instant::now(),
             cancel,
+            run,
         };
         self.query_generation += 1;
         let generation = self.query_generation;
@@ -795,23 +839,20 @@ impl QueryTab {
     }
 
     fn finish_query(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
-        let elapsed = match &self.state {
-            QueryState::Running { started, .. } => started.elapsed(),
+        let (elapsed, run) = match &self.state {
+            QueryState::Running { started, run, .. } => (started.elapsed(), Some(run.clone())),
             QueryState::Idle | QueryState::Done { .. } | QueryState::Failed { .. } => {
-                Duration::ZERO
+                (Duration::ZERO, None)
             }
         };
         self.running_query = None;
         self.state = match outcome {
             Ok(Ok((connection, Ok(output)))) => {
                 self.connection = Some(connection);
-                let shown = Arc::new(output.result_sets.last().cloned().unwrap_or_default());
-                self.shown_result = Some(shown.clone());
-                self.results.update(cx, |table, cx| {
-                    table.delegate_mut().set_result(shown);
-                    table.refresh(cx);
-                    cx.notify();
-                });
+                // The last result set is usually the one the batch was written for.
+                let last = output.result_sets.len().saturating_sub(1);
+                self.show_messages = false;
+                self.show_result_set(&output, last, cx);
                 QueryState::Done { output, elapsed }
             }
             Ok(Ok((connection, Err(error)))) => {
@@ -835,6 +876,29 @@ impl QueryTab {
                 }
             }
         };
+        if let Some(run) = run {
+            let (succeeded, rows) = match &self.state {
+                QueryState::Done { output, .. } => (
+                    true,
+                    output.result_sets.last().map(|result| result.rows.len()),
+                ),
+                QueryState::Idle | QueryState::Running { .. } | QueryState::Failed { .. } => {
+                    (false, None)
+                }
+            };
+            history::record(
+                cx,
+                history::HistoryEntry {
+                    at: history::now(),
+                    connection: run.connection.to_string(),
+                    database: run.database,
+                    sql: run.sql,
+                    elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                    rows,
+                    succeeded,
+                },
+            );
+        }
         if matches!(self.state, QueryState::Failed { .. }) {
             self.shown_result = None;
             self.results.update(cx, |table, cx| {
@@ -844,6 +908,61 @@ impl QueryTab {
             });
         }
         cx.notify();
+    }
+
+    fn show_result_set(&mut self, output: &QueryOutput, index: usize, cx: &mut Context<Self>) {
+        let shown = output.result_sets.get(index).cloned().unwrap_or_default();
+        self.show_result(index, shown, cx);
+    }
+
+    fn show_result(&mut self, index: usize, shown: ResultSet, cx: &mut Context<Self>) {
+        self.shown_index = index;
+        let shown = Arc::new(shown);
+        self.shown_result = Some(shown.clone());
+        self.results.update(cx, |table, cx| {
+            table.delegate_mut().set_result(shown);
+            table.refresh(cx);
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    fn select_result_set(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.show_messages = false;
+        let QueryState::Done { output, .. } = &self.state else {
+            return;
+        };
+        let Some(shown) = output.result_sets.get(index).cloned() else {
+            return;
+        };
+        self.show_result(index, shown, cx);
+    }
+
+    /// Runs the last statement again without the row limit, after a truncated result.
+    fn rerun_without_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(run) = self.last_run.clone() else {
+            return;
+        };
+        let fields = self.connection_fields(cx);
+        if fields.connection.as_ref() != Some(&run.connection) || fields.database != run.database {
+            window.push_notification(
+                "The tab's connection or database changed since that run; run it again yourself.",
+                cx,
+            );
+            return;
+        }
+        self.without_row_limit = true;
+        self.start_query(run.sql, window, cx);
+    }
+
+    /// The tab as saved in the session file.
+    pub fn saved_tab(&self, cx: &App) -> crate::session::SavedTab {
+        let fields = self.connection_fields(cx);
+        crate::session::SavedTab {
+            connection: fields.connection.map(|name| name.to_string()),
+            database: fields.database,
+            sql: self.editor.read(cx).value().to_string(),
+        }
     }
 
     fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, cx: &mut Context<Self>) {
@@ -953,8 +1072,9 @@ impl QueryTab {
             .as_ref()
             .filter(|result| !result.columns.is_empty())?;
         let mut summary = format!("{} rows", result.rows.len());
-        if result.truncated {
-            summary.push_str(" (truncated)");
+        let truncated = result.truncated;
+        if truncated {
+            summary.push_str(" (first rows only: row limit reached)");
         }
         Some(
             h_flex()
@@ -966,6 +1086,16 @@ impl QueryTab {
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(summary)
+                .children(truncated.then(|| {
+                    Button::new("rerun-without-limit")
+                        .ghost()
+                        .xsmall()
+                        .label("Run again without limit")
+                        .tooltip("Runs the same SQL again and keeps every row")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.rerun_without_limit(window, cx);
+                        }))
+                }))
                 .child(
                     Button::new("export-csv")
                         .ghost()
@@ -996,8 +1126,34 @@ impl QueryTab {
                     None => "Statement completed.".to_owned(),
                 })
                 .into_any_element(),
+            QueryState::Done { output, .. } if self.show_messages => v_flex()
+                .size_full()
+                .child(self.render_result_switcher(output, cx))
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_h_0()
+                        .p_3()
+                        .gap_1()
+                        .text_sm()
+                        .children(
+                            output
+                                .messages
+                                .iter()
+                                .map(|message| div().child(message.clone())),
+                        ),
+                )
+                .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
                 .size_full()
+                .children(match &self.state {
+                    QueryState::Done { output, .. } => {
+                        Some(self.render_result_switcher(output, cx))
+                    }
+                    QueryState::Idle | QueryState::Running { .. } | QueryState::Failed { .. } => {
+                        None
+                    }
+                })
                 .child(
                     div()
                         .flex_1()
@@ -1007,6 +1163,51 @@ impl QueryTab {
                 .children(self.render_results_footer(cx))
                 .into_any_element(),
         }
+    }
+
+    /// One button per result set, and one for messages, when there is more than one view.
+    fn render_result_switcher(&self, output: &QueryOutput, cx: &mut Context<Self>) -> AnyElement {
+        let views = output.result_sets.len() + usize::from(!output.messages.is_empty());
+        if views < 2 {
+            return div().into_any_element();
+        }
+        let mut bar = h_flex()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border);
+        for (index, result) in output.result_sets.iter().enumerate() {
+            let selected = !self.show_messages && index == self.shown_index;
+            let label = format!("Result {} · {} rows", index + 1, result.rows.len());
+            let mut button = Button::new(("result-set", index))
+                .xsmall()
+                .label(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.select_result_set(index, cx)));
+            button = if selected {
+                button.primary()
+            } else {
+                button.ghost()
+            };
+            bar = bar.child(button);
+        }
+        if !output.messages.is_empty() {
+            let label = format!("Messages · {}", output.messages.len());
+            let mut button = Button::new("messages")
+                .xsmall()
+                .label(label)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_messages = true;
+                    cx.notify();
+                }));
+            button = if self.show_messages {
+                button.primary()
+            } else {
+                button.ghost()
+            };
+            bar = bar.child(button);
+        }
+        bar.into_any_element()
     }
 
     pub fn status_text(&self) -> String {
@@ -1027,17 +1228,14 @@ impl QueryTab {
                 if let Some(ran_lines) = &self.ran_lines {
                     parts.push(ran_lines.to_string());
                 }
-                if let Some(result_set) = output.result_sets.last() {
+                if let Some(result_set) = output.result_sets.get(self.shown_index) {
                     parts.push(format!("{} rows", result_set.rows.len()));
                     if result_set.truncated {
                         parts.push("truncated".to_owned());
                     }
                 }
                 if output.result_sets.len() > 1 {
-                    parts.push(format!(
-                        "showing last of {} result sets",
-                        output.result_sets.len()
-                    ));
+                    parts.push(format!("{} result sets", output.result_sets.len()));
                 }
                 if let Some(count) = output.rows_affected {
                     parts.push(format!("{count} rows affected"));
