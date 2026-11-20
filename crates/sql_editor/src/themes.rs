@@ -12,7 +12,7 @@ use gpui_kit::component::{Theme, ThemeConfig, ThemeSet};
 use gpui_kit::{Action, App, Global, SharedString};
 use notify::Watcher as _;
 
-use crate::settings::{self, Settings};
+use crate::settings;
 
 pub const DEFAULT_THEME: &str = "Solitude";
 const BUILT_IN_THEMES: [(&str, &str); 1] =
@@ -28,7 +28,6 @@ pub struct SelectTheme(pub SharedString);
 struct ThemeCatalog {
     configs: BTreeMap<SharedString, Rc<ThemeConfig>>,
     selected: SharedString,
-    config_dir: Option<PathBuf>,
     themes_dir: Option<PathBuf>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -36,17 +35,11 @@ struct ThemeCatalog {
 impl Global for ThemeCatalog {}
 
 pub fn init(cx: &mut App) {
-    let config_dir = settings::config_dir();
-    let themes_dir = config_dir
-        .as_ref()
-        .map(|directory| directory.join("themes"));
-    let settings = config_dir
-        .as_deref()
-        .map(Settings::load)
-        .unwrap_or_default();
+    let themes_dir = settings::config_dir(cx).map(|directory| directory.join("themes"));
     let configs = load_themes(themes_dir.as_deref());
-    let selected = settings
+    let selected = settings::get(cx)
         .theme
+        .clone()
         .map(SharedString::from)
         .filter(|name| configs.contains_key(name))
         .unwrap_or_else(|| DEFAULT_THEME.into());
@@ -59,12 +52,11 @@ pub fn init(cx: &mut App) {
     cx.set_global(ThemeCatalog {
         configs,
         selected: selected.clone(),
-        config_dir,
         themes_dir,
         _watcher: watcher,
     });
     apply(&selected, cx);
-    cx.on_action(|action: &SelectTheme, cx| select(action.0.clone(), cx));
+    cx.on_action(|action: &SelectTheme, cx| select(&action.0, cx));
 }
 
 pub fn names(cx: &App) -> Vec<SharedString> {
@@ -79,25 +71,13 @@ pub fn selected(cx: &App) -> SharedString {
     cx.global::<ThemeCatalog>().selected.clone()
 }
 
-fn select(name: SharedString, cx: &mut App) {
-    if !cx.global::<ThemeCatalog>().configs.contains_key(&name) {
+fn select(name: &SharedString, cx: &mut App) {
+    if !cx.global::<ThemeCatalog>().configs.contains_key(name) {
         return;
     }
     cx.global_mut::<ThemeCatalog>().selected = name.clone();
-    apply(&name, cx);
-
-    let Some(config_dir) = cx.global::<ThemeCatalog>().config_dir.clone() else {
-        return;
-    };
-    cx.background_executor()
-        .spawn(async move {
-            let mut settings = Settings::load(&config_dir);
-            settings.theme = Some(name.to_string());
-            if let Err(error) = settings.save(&config_dir) {
-                tracing::warn!(%error, "could not save the theme choice");
-            }
-        })
-        .detach();
+    apply(name, cx);
+    settings::update(cx, |settings| settings.theme = Some(name.to_string()));
 }
 
 fn apply(name: &SharedString, cx: &mut App) {

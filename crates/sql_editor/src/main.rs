@@ -8,7 +8,7 @@ mod workspace;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
-use crate::query_tab::{CancelQuery, ExportCsv, RunAll, RunQuery};
+use crate::query_tab::{CancelQuery, ExportCsv, RunAll, RunQuery, ToggleVimMode};
 use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
 
 const KEY_CONTEXT: &str = "SqlEditor";
@@ -28,7 +28,12 @@ fn main() -> anyhow::Result<()> {
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
+            settings::init(cx);
             themes::init(cx);
+            cx.on_action(|_: &ToggleVimMode, cx| {
+                settings::update(cx, |settings| settings.vim_mode = !settings.vim_mode);
+                cx.refresh_windows();
+            });
             cx.set_global(runtime);
             bind_keys(cx);
             open_main_window(cx);

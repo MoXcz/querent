@@ -1,5 +1,7 @@
 //! Text logic with no UI or database dependency.
 
+pub mod vim;
+
 use std::ops::Range;
 
 /// Byte ranges of the statements in `text`, trimmed of surrounding whitespace.

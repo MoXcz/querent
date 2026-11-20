@@ -7,7 +7,8 @@ use gpui_kit::{
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div,
 };
 
-use crate::query_tab::{ConnectionFields, QueryTab};
+use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
+use crate::settings;
 use crate::themes::{self, SelectTheme};
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
@@ -163,10 +164,14 @@ impl Workspace {
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self
+        let (status, vim_status) = self
             .active_tab()
-            .map(|tab| tab.read(cx).status_text())
+            .map(|tab| {
+                let tab = tab.read(cx);
+                (tab.status_text(), tab.vim_status(cx))
+            })
             .unwrap_or_default();
+        let vim_enabled = settings::get(cx).vim_mode;
         h_flex()
             .justify_between()
             .px_2()
@@ -176,8 +181,32 @@ impl Workspace {
             .bg(cx.theme().status_bar)
             .text_xs()
             .text_color(cx.theme().muted_foreground)
-            .child(status)
-            .child(render_theme_picker(cx))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .children(vim_status.map(|mode| {
+                        div()
+                            .min_w_16()
+                            .text_color(cx.theme().foreground)
+                            .child(mode)
+                    }))
+                    .child(status),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("vim-toggle")
+                            .ghost()
+                            .xsmall()
+                            .label(if vim_enabled { "Vim on" } else { "Vim off" })
+                            .tooltip("Toggle vim keys")
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(ToggleVimMode), cx);
+                            }),
+                    )
+                    .child(render_theme_picker(cx)),
+            )
     }
 }
 

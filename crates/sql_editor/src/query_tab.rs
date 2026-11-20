@@ -5,21 +5,23 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
+use gpui_kit::component::input::{Editor, EditorState, Input, InputState, Redo, Undo};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
     App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
-    Task, WeakEntity, Window, actions, div, px,
+    InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, WeakEntity, Window, actions, div, px,
 };
 use sql_db::{CancelHandle, FabricConfig, QueryError, QueryOutput, ResultSet, TdsConnection};
+use sql_text::vim::{Buffer, Edit, Key, Vim};
 use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::results_table::ResultsTable;
+use crate::settings;
 use crate::tokio_bridge;
 
 actions!(
@@ -32,7 +34,9 @@ actions!(
         /// Ask the server to stop the running query.
         CancelQuery,
         /// Save the shown result as a CSV file.
-        ExportCsv
+        ExportCsv,
+        /// Turn vim keys in the editor on or off.
+        ToggleVimMode
     ]
 );
 
@@ -94,6 +98,8 @@ pub struct QueryTab {
     /// Outcome of the last export, shown in the status line until the next run.
     export_notice: Option<SharedString>,
     export_task: Option<Task<()>>,
+    vim: Vim,
+    _vim_interceptor: Subscription,
 }
 
 impl QueryTab {
@@ -121,6 +127,22 @@ impl QueryTab {
                 .placeholder("select top 100 * from ...")
         });
         let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
+        // Interceptors run before key bindings and text input, so normal mode
+        // can claim keys the editor would otherwise insert or bind.
+        let tab = cx.weak_entity();
+        let vim_interceptor = cx.intercept_keystrokes({
+            move |event, window, cx| {
+                let Some(tab) = tab.upgrade() else {
+                    return;
+                };
+                let handled = tab.update(cx, |tab, cx| {
+                    tab.handle_vim_keystroke(&event.keystroke, window, cx)
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        });
 
         Self {
             number,
@@ -137,6 +159,8 @@ impl QueryTab {
             shown_result: None,
             export_notice: None,
             export_task: None,
+            vim: Vim::default(),
+            _vim_interceptor: vim_interceptor,
         }
     }
 
@@ -145,6 +169,53 @@ impl QueryTab {
             host: self.host_input.read(cx).value().trim().to_owned(),
             database: self.database_input.read(cx).value().trim().to_owned(),
         }
+    }
+
+    /// Mode and pending keys for the status bar; `None` when vim is off.
+    pub fn vim_status(&self, cx: &App) -> Option<String> {
+        if !settings::get(cx).vim_mode {
+            return None;
+        }
+        let pending = self.vim.pending_text();
+        Some(if pending.is_empty() {
+            self.vim.mode_label().to_owned()
+        } else {
+            format!("{} {pending}", self.vim.mode_label())
+        })
+    }
+
+    fn handle_vim_keystroke(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !settings::get(cx).vim_mode || !self.editor.focus_handle(cx).is_focused(window) {
+            return false;
+        }
+        let Some(key) = vim_key(keystroke) else {
+            return false;
+        };
+        let (text, cursor) = {
+            let editor = self.editor.read(cx);
+            (editor.value(), editor.cursor())
+        };
+        let outcome = self.vim.handle_key(
+            key,
+            Buffer {
+                text: &text,
+                cursor,
+            },
+        );
+        if outcome.handled {
+            self.editor.update(cx, |editor, cx| {
+                for edit in outcome.edits {
+                    apply_vim_edit(editor, edit, window, cx);
+                }
+            });
+            cx.notify();
+        }
+        outcome.handled
     }
 
     pub fn editor_focus_handle(&self, cx: &App) -> FocusHandle {
@@ -540,6 +611,61 @@ impl Render for QueryTab {
                         .child(resizable_panel().child(self.render_results(cx))),
                 ),
             )
+    }
+}
+
+fn apply_vim_edit(
+    editor: &mut EditorState,
+    edit: Edit,
+    window: &mut Window,
+    cx: &mut Context<EditorState>,
+) {
+    match edit {
+        Edit::Replace { range, text } => {
+            if range.is_empty() && text.is_empty() {
+                return;
+            }
+            editor.set_selected_range(range, cx);
+            editor.replace(text, window, cx);
+        }
+        Edit::Select { range, reversed } => {
+            editor.set_selected_range_with_direction(range, reversed, cx);
+        }
+        Edit::Undo => window.dispatch_action(Box::new(Undo), cx),
+        Edit::Redo => window.dispatch_action(Box::new(Redo), cx),
+    }
+}
+
+/// `None` leaves the key to the editor and the app: arrows, function keys and
+/// shortcuts with cmd, alt or ctrl-shift.
+fn vim_key(keystroke: &Keystroke) -> Option<Key> {
+    let modifiers = &keystroke.modifiers;
+    if modifiers.platform || modifiers.alt || modifiers.function {
+        return None;
+    }
+    let single_char = |text: &str| {
+        let mut characters = text.chars();
+        characters.next().filter(|_| characters.next().is_none())
+    };
+    if modifiers.control {
+        if modifiers.shift {
+            return None;
+        }
+        return match keystroke.key.as_str() {
+            "[" => Some(Key::Escape),
+            key => single_char(key).map(Key::Ctrl),
+        };
+    }
+    match keystroke.key.as_str() {
+        "escape" => Some(Key::Escape),
+        "enter" => Some(Key::Enter),
+        "backspace" => Some(Key::Backspace),
+        "space" => Some(Key::Char(' ')),
+        _ => keystroke
+            .key_char
+            .as_deref()
+            .and_then(single_char)
+            .map(Key::Char),
     }
 }
 
