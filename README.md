@@ -11,15 +11,15 @@ az login
 cargo run --release
 ```
 
-Fill in the SQL endpoint host (Fabric: workspace settings, or the item's "SQL connection string") and the warehouse or lakehouse name, write SQL, and press `Ctrl+Enter`.
+Add a connection with `+` in the Connections sidebar: give it a name and paste a SQL Server connection string with Entra ID authentication, for example:
 
-To prefill the connection fields:
-
-```sh
-SQL_EDITOR_FABRIC_HOST=xxxx.datawarehouse.fabric.microsoft.com \
-SQL_EDITOR_FABRIC_DATABASE=my_warehouse \
-cargo run --release
+```text
+Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=my_warehouse;Authentication=ActiveDirectoryInteractive
 ```
+
+A bare server name also works; then type the warehouse or lakehouse name in the tab's database field. Connections are saved in `~/.config/sql-editor/connections.toml`. Sign-in uses your `az login` session whatever Entra method the string names; SQL logins and other sign-in methods are not supported yet.
+
+Click a connection to use it in the current tab, write SQL, and press `Ctrl+Enter`.
 
 Without the UI:
 

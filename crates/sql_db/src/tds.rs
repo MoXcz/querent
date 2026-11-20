@@ -25,6 +25,7 @@ const CONNECT_ATTEMPTS: u32 = 2;
 pub struct FabricConfig {
     /// SQL endpoint host, e.g. `xxxx.datawarehouse.fabric.microsoft.com`.
     pub host: String,
+    pub port: u16,
     /// Warehouse or lakehouse name.
     pub database: String,
     /// Rows kept per result set; the rest are skipped and the set is marked truncated.
@@ -36,6 +37,7 @@ impl FabricConfig {
     pub fn new(host: impl Into<String>, database: impl Into<String>) -> Self {
         Self {
             host: host.into(),
+            port: 1433,
             database: database.into(),
             max_rows: 50_000,
         }
@@ -140,7 +142,7 @@ async fn open_client(config: &FabricConfig, token: &str) -> TdsResult<TdsClient>
     context.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
     context.access_token = Some(token.to_owned());
     context.encryption_options.mode = EncryptionSetting::Strict;
-    let datasource = format!("tcp:{},1433", config.host);
+    let datasource = format!("tcp:{},{}", config.host, config.port);
     TdsConnectionProvider {}
         .create_client(context, &datasource, None)
         .await

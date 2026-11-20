@@ -1,3 +1,4 @@
+mod connections;
 mod query_tab;
 mod results_table;
 mod settings;
@@ -29,6 +30,7 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             settings::init(cx);
+            connections::init(cx);
             themes::init(cx);
             cx.on_action(|_: &ToggleVimMode, cx| {
                 settings::update(cx, |settings| settings.vim_mode = !settings.vim_mode);

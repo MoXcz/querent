@@ -1,12 +1,19 @@
+use gpui_kit::assets::IconName as AssetIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div,
+    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, StyleRefinement,
+    Styled as _, Subscription, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 
+use crate::connections::{self, SavedConnection};
 use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
 use crate::settings;
 use crate::themes::{self, SelectTheme};
@@ -45,8 +52,226 @@ impl Workspace {
             active_index: 0,
             next_tab_number: 1,
         };
-        workspace.open_tab(ConnectionFields::from_env(), window, cx);
+        let first_connection = connections::names(cx).into_iter().next();
+        let fields = ConnectionFields {
+            connection: first_connection.clone(),
+            database: String::new(),
+        };
+        workspace.open_tab(fields, window, cx);
+        if let (Some(name), Some(tab)) = (first_connection, workspace.active_tab().cloned()) {
+            tab.update(cx, |tab, cx| tab.use_connection(&name, window, cx));
+        }
         workspace
+    }
+
+    fn use_connection_in_active_tab(
+        &mut self,
+        name: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.active_tab().cloned() {
+            tab.update(cx, |tab, cx| tab.use_connection(name, window, cx));
+            let editor_focus = tab.read(cx).editor_focus_handle(cx);
+            editor_focus.focus(window, cx);
+        }
+    }
+
+    /// Opens the add or edit dialog; `editing` names the connection being edited.
+    fn open_connection_dialog(
+        editing: Option<SavedConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("BI warehouse")
+                .default_value(
+                    editing
+                        .as_ref()
+                        .map(|saved| saved.name.clone())
+                        .unwrap_or_default(),
+                )
+        });
+        let string_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("Server=tcp:xxxx.datawarehouse.fabric.microsoft.com,1433;Database=...;Authentication=ActiveDirectoryInteractive")
+                .default_value(
+                    editing
+                        .as_ref()
+                        .map(|saved| saved.connection_string.clone())
+                        .unwrap_or_default(),
+                )
+        });
+        let original_name = editing.map(|saved| saved.name);
+        let title = if original_name.is_some() {
+            "Edit connection"
+        } else {
+            "New connection"
+        };
+        let workspace = cx.weak_entity();
+        let name_focus = name_input.focus_handle(cx);
+        window.open_dialog(cx, move |dialog, _, _| {
+            let name_input = name_input.clone();
+            let string_input = string_input.clone();
+            let original_name = original_name.clone();
+            let workspace = workspace.clone();
+            dialog
+                .title(title)
+                .w(px(640.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(field_label("Name"))
+                        .child(Input::new(&name_input))
+                        .child(field_label("Connection string"))
+                        .child(Input::new(&string_input))
+                        .child(div().text_xs().child(
+                            "Entra ID sign-in only for now. It uses your az login session.",
+                        )),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .child(
+                            DialogClose::new()
+                                .child(Button::new("cancel").label("Cancel").outline()),
+                        )
+                        .child(
+                            DialogAction::new().child(Button::new("save").label("Save").primary()),
+                        ),
+                )
+                .on_ok(move |_, window, cx| {
+                    let name = name_input.read(cx).value().trim().to_owned();
+                    let connection_string = string_input.read(cx).value().trim().to_owned();
+                    if name.is_empty() {
+                        window.push_notification("Give the connection a name.", cx);
+                        return false;
+                    }
+                    if let Err(error) = sql_db::parse_connection_string(&connection_string) {
+                        window.push_notification(format!("Connection string: {error}"), cx);
+                        return false;
+                    }
+                    connections::save(
+                        cx,
+                        SavedConnection {
+                            name: name.clone(),
+                            connection_string,
+                        },
+                        original_name.as_deref(),
+                    );
+                    let name = SharedString::from(name);
+                    let updated = workspace.update(cx, |workspace, cx| {
+                        workspace.use_connection_in_active_tab(&name, window, cx);
+                    });
+                    if let Err(error) = updated {
+                        tracing::debug!(%error, "workspace closed while the dialog was open");
+                    }
+                    true
+                })
+        });
+        window.defer(cx, move |window, cx| name_focus.focus(window, cx));
+    }
+
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_connection = self
+            .active_tab()
+            .and_then(|tab| tab.read(cx).connection_fields(cx).connection);
+        let rows = connections::all(cx)
+            .iter()
+            .enumerate()
+            .map(|(index, saved)| {
+                let name = SharedString::from(saved.name.clone());
+                let is_active = active_connection.as_ref() == Some(&name);
+                let editing = saved.clone();
+                let removing = saved.name.clone();
+                h_flex()
+                    .id(SharedString::from(format!("connection-{index}")))
+                    .group("connection-row")
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .rounded(cx.theme().radius)
+                    .cursor_pointer()
+                    .when(is_active, |row| row.bg(cx.theme().accent))
+                    .hover(|row| row.bg(cx.theme().list_hover))
+                    .child(div().truncate().child(name.clone()))
+                    .child(
+                        h_flex()
+                            .invisible()
+                            .group_hover("connection-row", StyleRefinement::visible)
+                            .child(
+                                Button::new(SharedString::from(format!("edit-connection-{index}")))
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(AssetIcon::SquarePen)
+                                    .tooltip("Edit")
+                                    .on_click(cx.listener(move |_, _, window, cx| {
+                                        cx.stop_propagation();
+                                        Self::open_connection_dialog(
+                                            Some(editing.clone()),
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "delete-connection-{index}"
+                                )))
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Delete)
+                                .tooltip("Delete")
+                                .on_click(cx.listener(
+                                    move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        connections::remove(cx, &removing);
+                                    },
+                                )),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.use_connection_in_active_tab(&name, window, cx);
+                    }))
+            });
+        v_flex()
+            .w(px(220.))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().sidebar)
+            .text_sm()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .px_2()
+                    .py_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("CONNECTIONS")
+                    .child(
+                        Button::new("add-connection")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip("Add a connection")
+                            .on_click(cx.listener(|_, _, window, cx| {
+                                Self::open_connection_dialog(None, window, cx);
+                            })),
+                    ),
+            )
+            .child(v_flex().px_1().gap_px().children(rows))
+            .when(connections::all(cx).is_empty(), |sidebar| {
+                sidebar.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Add a connection with +"),
+                )
+            })
     }
 
     fn active_tab(&self) -> Option<&Entity<QueryTab>> {
@@ -221,12 +446,24 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::previous_tab))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_tab_bar(cx))
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .children(self.active_tab().cloned()),
+                    .child(self.render_sidebar(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.render_tab_bar(cx))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .children(self.active_tab().cloned()),
+                            ),
+                    ),
             )
             .child(self.render_status_bar(cx))
     }
@@ -250,4 +487,8 @@ fn render_theme_picker(cx: &App) -> impl IntoElement {
             }
             menu
         })
+}
+
+fn field_label(text: &'static str) -> impl IntoElement {
+    div().text_sm().child(text)
 }

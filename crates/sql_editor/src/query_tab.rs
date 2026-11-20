@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState, Redo, Undo};
+use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
@@ -20,6 +22,7 @@ use sql_text::vim::{Buffer, Edit, Key, Vim};
 use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
+use crate::connections::{self, ConnectionStore};
 use crate::results_table::ResultsTable;
 use crate::settings;
 use crate::tokio_bridge;
@@ -39,9 +42,6 @@ actions!(
         ToggleVimMode
     ]
 );
-
-const HOST_ENV: &str = "SQL_EDITOR_FABRIC_HOST";
-const DATABASE_ENV: &str = "SQL_EDITOR_FABRIC_DATABASE";
 
 type SharedConnection = Arc<Mutex<TdsConnection>>;
 /// Outer error: the task died. Middle: connecting failed. Inner: the query failed.
@@ -63,26 +63,20 @@ enum QueryState {
     },
 }
 
-/// Connection fields a new tab starts with.
+/// Connection choice a new tab starts with.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectionFields {
-    pub host: String,
+    /// Name of a saved connection.
+    pub connection: Option<SharedString>,
     pub database: String,
 }
 
-impl ConnectionFields {
-    pub fn from_env() -> Self {
-        Self {
-            host: std::env::var(HOST_ENV).unwrap_or_default(),
-            database: std::env::var(DATABASE_ENV).unwrap_or_default(),
-        }
-    }
-}
+type ConnectionSelect = SelectState<Vec<SharedString>>;
 
 pub struct QueryTab {
     number: usize,
     focus_handle: FocusHandle,
-    host_input: Entity<InputState>,
+    connection_select: Entity<ConnectionSelect>,
     database_input: Entity<InputState>,
     editor: Entity<EditorState>,
     results: Entity<TableState<ResultsTable>>,
@@ -99,7 +93,7 @@ pub struct QueryTab {
     export_notice: Option<SharedString>,
     export_task: Option<Task<()>>,
     vim: Vim,
-    _vim_interceptor: Subscription,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl QueryTab {
@@ -109,10 +103,14 @@ impl QueryTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let host_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("xxxx.datawarehouse.fabric.microsoft.com")
-                .default_value(fields.host)
+        let connection_select = cx.new(|cx| {
+            let names = connections::names(cx);
+            let selected = fields
+                .connection
+                .as_ref()
+                .and_then(|name| names.iter().position(|candidate| candidate == name))
+                .map(IndexPath::new);
+            SelectState::new(names, selected, window, cx)
         });
         let database_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -144,10 +142,16 @@ impl QueryTab {
             }
         });
 
+        let subscriptions = vec![
+            vim_interceptor,
+            cx.subscribe_in(&connection_select, window, Self::on_connection_selected),
+            cx.observe_global_in::<ConnectionStore>(window, Self::on_connections_changed),
+        ];
+
         Self {
             number,
             focus_handle: cx.focus_handle(),
-            host_input,
+            connection_select,
             database_input,
             editor,
             results,
@@ -160,15 +164,62 @@ impl QueryTab {
             export_notice: None,
             export_task: None,
             vim: Vim::default(),
-            _vim_interceptor: vim_interceptor,
+            _subscriptions: subscriptions,
         }
     }
 
     pub fn connection_fields(&self, cx: &App) -> ConnectionFields {
         ConnectionFields {
-            host: self.host_input.read(cx).value().trim().to_owned(),
+            connection: self.connection_select.read(cx).selected_value().cloned(),
             database: self.database_input.read(cx).value().trim().to_owned(),
         }
+    }
+
+    /// Points this tab at a saved connection and its default database.
+    pub fn use_connection(
+        &mut self,
+        name: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_select.update(cx, |select, cx| {
+            select.set_selected_value(name, window, cx);
+        });
+        self.fill_default_database(name, window, cx);
+    }
+
+    fn on_connection_selected(
+        &mut self,
+        _: &Entity<ConnectionSelect>,
+        event: &SelectEvent<Vec<SharedString>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let SelectEvent::Confirm(Some(name)) = event else {
+            return;
+        };
+        self.fill_default_database(name, window, cx);
+    }
+
+    fn fill_default_database(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let database = connections::find(cx, name)
+            .and_then(|connection| connection.config().ok())
+            .map(|config| config.database)
+            .filter(|database| !database.is_empty());
+        if let Some(database) = database {
+            self.database_input.update(cx, |input, cx| {
+                input.set_value(database, window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    fn on_connections_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let names = connections::names(cx);
+        self.connection_select.update(cx, |select, cx| {
+            select.set_items(names, window, cx);
+        });
+        cx.notify();
     }
 
     /// Mode and pending keys for the status bar; `None` when vim is off.
@@ -253,11 +304,25 @@ impl QueryTab {
     }
 
     fn connection_config(&self, cx: &Context<Self>) -> Result<FabricConfig, SharedString> {
-        let ConnectionFields { host, database } = self.connection_fields(cx);
-        if host.is_empty() || database.is_empty() {
-            return Err("Enter the SQL endpoint host and the warehouse or lakehouse name.".into());
+        let ConnectionFields {
+            connection,
+            database,
+        } = self.connection_fields(cx);
+        let Some(name) = connection else {
+            return Err("Pick a connection, or add one with + in the Connections sidebar.".into());
+        };
+        let saved = connections::find(cx, &name)
+            .ok_or_else(|| SharedString::from(format!("Connection {name} no longer exists.")))?;
+        let mut config = saved
+            .config()
+            .map_err(|error| SharedString::from(format!("Connection {name}: {error}")))?;
+        if !database.is_empty() {
+            config.database = database;
         }
-        Ok(FabricConfig::new(host, database))
+        if config.database.is_empty() {
+            return Err("Enter the warehouse or lakehouse name.".into());
+        }
+        Ok(config)
     }
 
     /// The selection if there is one, else the statement under the cursor.
@@ -473,8 +538,12 @@ impl QueryTab {
             .border_color(cx.theme().border)
             .child(
                 div()
-                    .w(px(420.))
-                    .child(Input::new(&self.host_input).small()),
+                    .w(px(240.))
+                    .child(
+                        Select::new(&self.connection_select)
+                            .small()
+                            .placeholder("Connection"),
+                    ),
             )
             .child(
                 div()
