@@ -28,6 +28,7 @@ pub struct SelectTheme(pub SharedString);
 struct ThemeCatalog {
     configs: BTreeMap<SharedString, Rc<ThemeConfig>>,
     selected: SharedString,
+    config_dir: Option<PathBuf>,
     themes_dir: Option<PathBuf>,
     _watcher: Option<notify::RecommendedWatcher>,
 }
@@ -58,6 +59,7 @@ pub fn init(cx: &mut App) {
     cx.set_global(ThemeCatalog {
         configs,
         selected: selected.clone(),
+        config_dir,
         themes_dir,
         _watcher: watcher,
     });
@@ -66,7 +68,11 @@ pub fn init(cx: &mut App) {
 }
 
 pub fn names(cx: &App) -> Vec<SharedString> {
-    cx.global::<ThemeCatalog>().configs.keys().cloned().collect()
+    cx.global::<ThemeCatalog>()
+        .configs
+        .keys()
+        .cloned()
+        .collect()
 }
 
 pub fn selected(cx: &App) -> SharedString {
@@ -80,7 +86,7 @@ fn select(name: SharedString, cx: &mut App) {
     cx.global_mut::<ThemeCatalog>().selected = name.clone();
     apply(&name, cx);
 
-    let Some(config_dir) = settings::config_dir() else {
+    let Some(config_dir) = cx.global::<ThemeCatalog>().config_dir.clone() else {
         return;
     };
     cx.background_executor()

@@ -27,7 +27,15 @@ Without the UI:
 cargo run -p sql_db --example fabric -- <host> <database> "select top 10 * from sys.tables"
 ```
 
-Keys: `Ctrl+Enter` runs the selection or the statement under the cursor, `Ctrl+Shift+Enter` runs everything, `Ctrl+Shift+C` cancels.
+Keys:
+
+| Key | Action |
+| --- | --- |
+| `Ctrl+Enter` | Run the selection, or the statement under the cursor |
+| `Ctrl+Shift+Enter` | Run everything in the tab |
+| `Ctrl+Shift+C` | Cancel the running query |
+| `Ctrl+T` / `Ctrl+W` | New tab / close tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 
 Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `information_schema.tables`.
 

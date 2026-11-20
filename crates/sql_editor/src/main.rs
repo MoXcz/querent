@@ -1,13 +1,15 @@
-mod query_window;
+mod query_tab;
 mod results_table;
 mod settings;
 mod themes;
 mod tokio_bridge;
+mod workspace;
 
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
-use crate::query_window::{CancelQuery, QueryWindow, RunAll, RunQuery};
+use crate::query_tab::{CancelQuery, RunAll, RunQuery};
+use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
 
 const KEY_CONTEXT: &str = "SqlEditor";
 
@@ -36,10 +38,10 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn bind_keys(cx: &mut App) {
-    let (run, run_all) = if cfg!(target_os = "macos") {
-        ("cmd-enter", "cmd-shift-enter")
+    let (run, run_all, new_tab, close_tab) = if cfg!(target_os = "macos") {
+        ("cmd-enter", "cmd-shift-enter", "cmd-t", "cmd-w")
     } else {
-        ("ctrl-enter", "ctrl-shift-enter")
+        ("ctrl-enter", "ctrl-shift-enter", "ctrl-t", "ctrl-w")
     };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
@@ -48,6 +50,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(run_all, RunAll, Some(KEY_CONTEXT)),
         KeyBinding::new(run_all, RunAll, Some("Input")),
         KeyBinding::new("ctrl-shift-c", CancelQuery, Some(KEY_CONTEXT)),
+        KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-pagedown", NextTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new("ctrl-pageup", PreviousTab, Some(WORKSPACE_CONTEXT)),
     ]);
 }
 
@@ -62,7 +70,7 @@ fn open_main_window(cx: &mut App) {
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
         window.set_window_title("SQL Editor");
-        cx.new(|cx| QueryWindow::new(window, cx))
+        cx.new(|cx| Workspace::new(window, cx))
     });
     if let Err(error) = opened {
         tracing::error!(%error, "failed to open window");

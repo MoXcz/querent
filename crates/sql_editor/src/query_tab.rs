@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, Input, InputState};
-use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::table::{DataTable, TableState};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
@@ -19,7 +18,6 @@ use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::results_table::ResultsTable;
-use crate::themes::{self, SelectTheme};
 use crate::tokio_bridge;
 
 actions!(
@@ -57,7 +55,24 @@ enum QueryState {
     },
 }
 
-pub struct QueryWindow {
+/// Connection fields a new tab starts with.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionFields {
+    pub host: String,
+    pub database: String,
+}
+
+impl ConnectionFields {
+    pub fn from_env() -> Self {
+        Self {
+            host: std::env::var(HOST_ENV).unwrap_or_default(),
+            database: std::env::var(DATABASE_ENV).unwrap_or_default(),
+        }
+    }
+}
+
+pub struct QueryTab {
+    number: usize,
     focus_handle: FocusHandle,
     host_input: Entity<InputState>,
     database_input: Entity<InputState>,
@@ -66,21 +81,28 @@ pub struct QueryWindow {
     connection: Option<SharedConnection>,
     state: QueryState,
     running_query: Option<Task<()>>,
+    /// Bumped per run so a replaced query's late result is ignored.
+    query_generation: u64,
     /// Which lines the last run sent, shown in the status line.
     ran_lines: Option<SharedString>,
 }
 
-impl QueryWindow {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+impl QueryTab {
+    pub fn new(
+        number: usize,
+        fields: ConnectionFields,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let host_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("xxxx.datawarehouse.fabric.microsoft.com")
-                .default_value(std::env::var(HOST_ENV).unwrap_or_default())
+                .default_value(fields.host)
         });
         let database_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("warehouse or lakehouse")
-                .default_value(std::env::var(DATABASE_ENV).unwrap_or_default())
+                .default_value(fields.database)
         });
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -91,10 +113,8 @@ impl QueryWindow {
         });
         let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
 
-        let editor_focus = editor.focus_handle(cx);
-        window.defer(cx, move |window, cx| editor_focus.focus(window, cx));
-
         Self {
+            number,
             focus_handle: cx.focus_handle(),
             host_input,
             database_input,
@@ -103,13 +123,54 @@ impl QueryWindow {
             connection: None,
             state: QueryState::Idle,
             running_query: None,
+            query_generation: 0,
             ran_lines: None,
         }
     }
 
+    pub fn connection_fields(&self, cx: &App) -> ConnectionFields {
+        ConnectionFields {
+            host: self.host_input.read(cx).value().trim().to_owned(),
+            database: self.database_input.read(cx).value().trim().to_owned(),
+        }
+    }
+
+    pub fn editor_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.editor.focus_handle(cx)
+    }
+
+    pub fn is_running(&self) -> bool {
+        matches!(self.state, QueryState::Running { .. })
+    }
+
+    pub fn title(&self, cx: &App) -> SharedString {
+        let database = self.database_input.read(cx).value();
+        let database = database.trim();
+        if database.is_empty() {
+            format!("Query {}", self.number).into()
+        } else {
+            format!("{} · {database}", self.number).into()
+        }
+    }
+
+    /// Cancels the running query on the server and lets it finish in the
+    /// background. Dropping the task instead would abort it mid-response and
+    /// leave nothing to tell the server to stop.
+    pub fn stop_running_query(&mut self, cx: &mut Context<Self>) {
+        if let QueryState::Running { cancel, .. } = &self.state {
+            cancel.cancel();
+        }
+        if let Some(task) = self.running_query.take() {
+            task.detach();
+        }
+        if self.is_running() {
+            self.state = QueryState::Idle;
+            cx.notify();
+        }
+    }
+
     fn connection_config(&self, cx: &Context<Self>) -> Result<FabricConfig, SharedString> {
-        let host = self.host_input.read(cx).value().trim().to_owned();
-        let database = self.database_input.read(cx).value().trim().to_owned();
+        let ConnectionFields { host, database } = self.connection_fields(cx);
         if host.is_empty() || database.is_empty() {
             return Err("Enter the SQL endpoint host and the warehouse or lakehouse name.".into());
         }
@@ -159,9 +220,7 @@ impl QueryWindow {
     }
 
     fn start_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(self.state, QueryState::Running { .. }) {
-            return;
-        }
+        self.stop_running_query(cx);
         let config = match self.connection_config(cx) {
             Ok(config) => config,
             Err(message) => {
@@ -192,9 +251,15 @@ impl QueryWindow {
             started: Instant::now(),
             cancel,
         };
+        self.query_generation += 1;
+        let generation = self.query_generation;
         self.running_query = Some(cx.spawn_in(window, async move |this, cx| {
             let outcome = query.await;
-            let updated = this.update(cx, |this, cx| this.finish_query(outcome, cx));
+            let updated = this.update(cx, |this, cx| {
+                if this.query_generation == generation {
+                    this.finish_query(outcome, cx);
+                }
+            });
             if let Err(error) = updated {
                 tracing::debug!(%error, "query window closed before the query finished");
             }
@@ -322,7 +387,7 @@ impl QueryWindow {
         }
     }
 
-    fn status_text(&self) -> String {
+    pub fn status_text(&self) -> String {
         match &self.state {
             QueryState::Idle => "Ready".to_owned(),
             QueryState::Running { .. } => "Running…".to_owned(),
@@ -357,13 +422,13 @@ impl QueryWindow {
     }
 }
 
-impl Focusable for QueryWindow {
+impl Focusable for QueryTab {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl Render for QueryWindow {
+impl Render for QueryTab {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
@@ -376,7 +441,7 @@ impl Render for QueryWindow {
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
             .child(
-                // min_h_0 lets the split shrink so the status bar stays on screen.
+                // min_h_0 lets the split shrink so the workspace status bar stays on screen.
                 div().flex_1().min_h_0().child(
                     v_resizable("editor-results")
                         .child(
@@ -387,40 +452,7 @@ impl Render for QueryWindow {
                         .child(resizable_panel().child(self.render_results(cx))),
                 ),
             )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .px_2()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(cx.theme().status_bar_border)
-                    .bg(cx.theme().status_bar)
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.status_text())
-                    .child(render_theme_picker(cx)),
-            )
     }
-}
-
-fn render_theme_picker(cx: &App) -> impl IntoElement {
-    let selected = themes::selected(cx);
-    let names = themes::names(cx);
-    Button::new("theme-picker")
-        .ghost()
-        .xsmall()
-        .label(selected.clone())
-        .tooltip("Theme")
-        .dropdown_menu(move |mut menu, _, _| {
-            for name in &names {
-                menu = menu.menu_with_check(
-                    name.clone(),
-                    *name == selected,
-                    Box::new(SelectTheme(name.clone())),
-                );
-            }
-            menu
-        })
 }
 
 /// "line 3" or "lines 3–5", 1-based, for the byte range that ran.
