@@ -1,3 +1,4 @@
+mod command_palette;
 mod connection_form;
 mod connections;
 mod lsp_servers;
@@ -15,6 +16,7 @@ use gpui_kit::component::input::DeleteToPreviousWordStart;
 use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 
+use crate::command_palette::{OpenCommandPalette, OpenSettings};
 use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
 use crate::workspace::{CloseTab, NewTab, NextTab, PreviousTab, WORKSPACE_CONTEXT, Workspace};
 
@@ -40,6 +42,7 @@ fn main() -> anyhow::Result<()> {
             schema_cache::init(cx);
             lsp_servers::init(cx);
             themes::init(cx);
+            command_palette::init(cx);
             cx.on_action(|_: &ToggleVimMode, cx| {
                 settings::update(cx, |settings| settings.vim_mode = !settings.vim_mode);
                 cx.refresh_windows();
@@ -53,6 +56,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn bind_keys(cx: &mut App) {
+    let (palette, open_settings) = if cfg!(target_os = "macos") {
+        ("cmd-shift-p", "cmd-,")
+    } else {
+        ("ctrl-shift-p", "ctrl-,")
+    };
     let (run, run_all, new_tab, close_tab, format) = if cfg!(target_os = "macos") {
         (
             "cmd-enter",
@@ -80,6 +88,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-e", ExportCsv, Some(KEY_CONTEXT)),
         KeyBinding::new(format, FormatSql, Some(KEY_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(palette, OpenCommandPalette, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(open_settings, OpenSettings, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.
         KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),

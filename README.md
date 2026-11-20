@@ -90,6 +90,8 @@ Keys:
 | `Ctrl+Shift+C` | Cancel the running query |
 | `Ctrl+Shift+E` | Export the result as CSV |
 | `Ctrl+Shift+F` | Format SQL with the connection's language server |
+| `Ctrl+Shift+P` | Command palette: every command, theme and setting by name |
+| `Ctrl+,` | Settings (theme, vim mode, explorer grouping); also the gear in the status bar |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
 | `Ctrl+N` / `Ctrl+P` with the completion menu open | Next / previous suggestion (`Ctrl+N` opens a tab only when no menu is open) |
 | `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |
@@ -99,11 +101,11 @@ Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `inform
 
 ## Vim
 
-Vim keys are on by default in the SQL editor; the status bar shows the mode and has a button to turn them off. `ROADMAP.md` (0.0.6) lists the supported commands. App shortcuts such as `Ctrl+Enter` work in every mode.
+Vim keys are on by default in the SQL editor; the status bar shows the mode. Turn them off in Settings (`Ctrl+,`) or with "Vim mode" in the command palette. `ROADMAP.md` (0.0.6) lists the supported commands. App shortcuts such as `Ctrl+Enter` work in every mode.
 
 ## Themes
 
-Solitude is built in and is the default. Pick a theme from the status bar; the choice is saved in `~/.config/sql-editor/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/sql-editor/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
+Solitude is built in and is the default. Pick a theme in Settings (`Ctrl+,`) or type "Theme" in the command palette (`Ctrl+Shift+P`); the choice is saved in `~/.config/sql-editor/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/sql-editor/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
 
 ## Linux build dependencies
 

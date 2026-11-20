@@ -1,23 +1,21 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
-use gpui_kit::component::menu::DropdownMenu as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, h_resizable, resizable_panel,
     v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
+    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, actions, div, px,
 };
 
+use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
 use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
-use crate::query_tab::{ConnectionFields, QueryTab, ToggleVimMode};
-use crate::settings;
-use crate::themes::{self, SelectTheme};
+use crate::query_tab::{ConnectionFields, QueryTab};
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 
@@ -31,7 +29,9 @@ actions!(
         /// Switch to the next tab.
         NextTab,
         /// Switch to the previous tab.
-        PreviousTab
+        PreviousTab,
+        /// Open the dialog to add a connection.
+        AddConnection
     ]
 );
 
@@ -342,7 +342,6 @@ impl Workspace {
                     format!("{command}: {message}; retry in {}s", wait.as_secs())
                 }
             });
-        let vim_enabled = settings::get(cx).vim_mode;
         h_flex()
             .justify_between()
             .px_2()
@@ -365,19 +364,13 @@ impl Workspace {
             )
             .children(server_status.map(|text| div().child(text)))
             .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        Button::new("vim-toggle")
-                            .ghost()
-                            .xsmall()
-                            .label(if vim_enabled { "Vim on" } else { "Vim off" })
-                            .tooltip("Toggle vim keys")
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(ToggleVimMode), cx);
-                            }),
-                    )
-                    .child(render_theme_picker(cx)),
+                Button::new("open-settings")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Settings)
+                    .tooltip("Settings (or ctrl-shift-p for every command)")
+                    // Opened directly: with nothing focused an action would not reach the workspace.
+                    .on_click(|_, window, cx| command_palette::open_settings(window, cx)),
             )
     }
 }
@@ -391,6 +384,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
+            .on_action(cx.listener(|_, _: &AddConnection, window, cx| {
+                Self::open_connection_dialog(None, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &OpenCommandPalette, window, cx| {
+                command_palette::open_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &OpenSettings, window, cx| {
+                command_palette::open_settings(window, cx);
+            }))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(
@@ -426,24 +428,4 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
     }
-}
-
-fn render_theme_picker(cx: &App) -> impl IntoElement {
-    let selected = themes::selected(cx);
-    let names = themes::names(cx);
-    Button::new("theme-picker")
-        .ghost()
-        .xsmall()
-        .label(selected.clone())
-        .tooltip("Theme")
-        .dropdown_menu(move |mut menu, _, _| {
-            for name in &names {
-                menu = menu.menu_with_check(
-                    name.clone(),
-                    *name == selected,
-                    Box::new(SelectTheme(name.clone())),
-                );
-            }
-            menu
-        })
 }

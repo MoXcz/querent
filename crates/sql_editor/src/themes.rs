@@ -71,7 +71,7 @@ pub fn selected(cx: &App) -> SharedString {
     cx.global::<ThemeCatalog>().selected.clone()
 }
 
-fn select(name: &SharedString, cx: &mut App) {
+pub fn select(name: &SharedString, cx: &mut App) {
     if !cx.global::<ThemeCatalog>().configs.contains_key(name) {
         return;
     }
