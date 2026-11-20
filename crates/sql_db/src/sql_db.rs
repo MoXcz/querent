@@ -5,6 +5,7 @@ mod connection;
 mod connection_settings;
 mod connection_string;
 mod csv_export;
+pub mod entra;
 mod postgres;
 mod snowflake;
 mod sqlite;
@@ -124,5 +125,10 @@ impl CancelHandle {
     pub fn cancel(&self) {
         self.inner.cancel();
         self.token.cancel();
+    }
+
+    /// Resolves once [`Self::cancel`] is called; for steps with no server-side query, like connecting.
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await;
     }
 }

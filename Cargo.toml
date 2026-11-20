@@ -14,11 +14,11 @@ sql_text = { path = "crates/sql_text" }
 sql_lsp = { path = "crates/sql_lsp" }
 anyhow = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-mssql-tds = { version = "=0.4.0", default-features = false }
+mssql-tds = { version = "=0.4.0", default-features = false, features = ["integrated-auth"] }
 azure_identity = "1"
 azure_core = "1"
 gpui-kit = { version = "=0.10.0", features = ["tree-sitter-sql"] }
@@ -38,6 +38,12 @@ tree-sitter-sequel = "0.3.13"
 lsp-types = "=0.97.0"
 sqlformat = "0.5"
 rusqlite = { version = "0.43.0", features = ["bundled", "column_decltype"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "form", "json"] }
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+url = "2"
+keyring = "=4.2.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

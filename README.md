@@ -14,6 +14,8 @@ Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Serve
 | --- | --- |
 | SQL Server login, or user name and password (PostgreSQL) | user, password |
 | Entra ID (az login session) | none; run `az login` first |
+| Entra ID (browser sign-in) | all optional: user to preselect, tenant ID, client ID, and "Sign in with a code on another device" |
+| Windows authentication (SQL Server) | none; uses your Windows sign-in, or on Linux and macOS a Kerberos ticket from `kinit` |
 | Entra ID service principal | tenant ID, client ID, client secret |
 | None (SQLite) | the database file, typed or chosen with Browse… |
 | Key pair (Snowflake) | user, private key file (`.p8`), passphrase if the key is encrypted |
@@ -45,10 +47,11 @@ A bare server name also works; then type the database name in the tab's database
 | Authentication / fedauth | Sign-in |
 | --- | --- |
 | none, with `User ID` and `Password`, or `SqlPassword` | SQL Server login |
-| `ActiveDirectoryDefault`, `ActiveDirectoryInteractive` and other Entra methods | your `az login` session |
+| `ActiveDirectoryInteractive` | Entra browser sign-in; `User ID` preselects the account |
+| `ActiveDirectoryDeviceCodeFlow` | Entra sign-in with a device code |
+| `ActiveDirectoryDefault`, `ActiveDirectoryIntegrated`, `ActiveDirectoryManagedIdentity` | your `az login` session |
+| `Integrated Security=SSPI` or `Trusted_Connection=yes` | Windows authentication |
 | `ActiveDirectoryServicePrincipal` | client ID and secret from the string; the user is `client_id@tenant_id` (`%40` in the URL form), or add `tenant id=...` |
-
-Windows authentication (`Integrated Security`) is not supported yet.
 
 | Setting | Values |
 | --- | --- |
@@ -57,7 +60,9 @@ Windows authentication (`Integrated Security`) is not supported yet.
 | `TrustServerCertificate` | `True` for servers with a self-signed certificate |
 | `HostNameInCertificate` | the name the certificate carries, when it differs from the server name |
 
-Connections are saved as fields in `~/.config/sql-editor/connections.toml`, readable only by you, because they hold passwords and client secrets.
+Browser sign-in opens your browser on the first connect and shows a notification until you finish; later connections, and later starts, reuse the sign-in until Entra asks again. With a device code, the code is copied to the clipboard and the notification links to the page where you enter it. `Ctrl+Shift+C` stops a sign-in that a tab is waiting on.
+
+Connections are saved as fields in `~/.config/sql-editor/connections.toml`. Passwords, client secrets, key passphrases and Entra sign-ins go to the OS keychain (Keychain on macOS, Credential Manager on Windows, a Secret Service such as GNOME Keyring or KeePassXC on Linux). Without a keychain they go to `~/.config/sql-editor/secrets.toml`, readable only by you. Secrets that older versions wrote into `connections.toml` move out on the first start.
 
 Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 

@@ -19,10 +19,6 @@ pub enum ConnectionStringError {
         "Authentication={0} is not supported yet; use SqlPassword, ActiveDirectoryDefault, ActiveDirectoryInteractive or ActiveDirectoryServicePrincipal"
     )]
     UnsupportedAuthentication(String),
-    #[error(
-        "Windows authentication (Integrated Security) is not supported yet; use a SQL login or Entra ID"
-    )]
-    IntegratedSecurityNotSupported,
     #[error("a SQL login needs a User ID")]
     MissingUser,
     #[error("a service principal connection string needs a {0}")]
@@ -30,13 +26,13 @@ pub enum ConnectionStringError {
 }
 
 /// Entra methods that can use the signed-in Azure CLI session's token.
-const ENTRA_METHODS: [&str; 5] = [
+const ENTRA_METHODS: [&str; 3] = [
     "activedirectorydefault",
-    "activedirectoryinteractive",
     "activedirectoryintegrated",
-    "activedirectorydevicecodeflow",
     "activedirectorymanagedidentity",
 ];
+const INTERACTIVE: &str = "activedirectoryinteractive";
+const DEVICE_CODE: &str = "activedirectorydevicecodeflow";
 const SERVICE_PRINCIPAL: &str = "activedirectoryserviceprincipal";
 const SQL_PASSWORD: &str = "sqlpassword";
 
@@ -147,11 +143,19 @@ fn authentication(fields: &Fields) -> Result<Authentication, ConnectionStringErr
     });
     let has_user = fields.user.as_deref().is_some_and(|user| !user.is_empty());
     match fields.authentication.as_deref().map(normalize_key) {
-        None if integrated => Err(ConnectionStringError::IntegratedSecurityNotSupported),
+        None if integrated => Ok(Authentication::Integrated),
         None if has_user => sql_login(fields),
         None => Ok(Authentication::AzureCli),
         Some(method) if method == SQL_PASSWORD => sql_login(fields),
         Some(method) if ENTRA_METHODS.contains(&method.as_str()) => Ok(Authentication::AzureCli),
+        Some(method) if method == INTERACTIVE || method == DEVICE_CODE => {
+            Ok(Authentication::EntraInteractive {
+                tenant_id: fields.tenant.clone().unwrap_or_default(),
+                user: fields.user.clone().unwrap_or_default(),
+                client_id: String::new(),
+                device_code: method == DEVICE_CODE,
+            })
+        }
         Some(method) if method == SERVICE_PRINCIPAL => service_principal(fields),
         Some(_) => Err(ConnectionStringError::UnsupportedAuthentication(
             fields.authentication.clone().unwrap_or_default(),
@@ -687,15 +691,33 @@ mod tests {
     }
 
     #[test]
+    fn reads_windows_and_interactive_logins() {
+        for text in [
+            "Server=h;Integrated Security=SSPI",
+            "Server=h;Trusted_Connection=yes",
+        ] {
+            assert_eq!(
+                parse_connection_string(text).unwrap().authentication,
+                Authentication::Integrated
+            );
+        }
+        assert_eq!(
+            parse_connection_string(
+                "Server=h;Authentication=ActiveDirectoryDeviceCodeFlow;User ID=ana@example.com"
+            )
+            .unwrap()
+            .authentication,
+            Authentication::EntraInteractive {
+                tenant_id: String::new(),
+                user: "ana@example.com".to_owned(),
+                client_id: String::new(),
+                device_code: true,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_unsupported_logins() {
-        assert_eq!(
-            parse_connection_string("Server=h;Integrated Security=SSPI"),
-            Err(ConnectionStringError::IntegratedSecurityNotSupported)
-        );
-        assert_eq!(
-            parse_connection_string("Server=h;Trusted_Connection=yes"),
-            Err(ConnectionStringError::IntegratedSecurityNotSupported)
-        );
         assert_eq!(
             parse_connection_string("Server=h;Authentication=ActiveDirectoryPassword"),
             Err(ConnectionStringError::UnsupportedAuthentication(

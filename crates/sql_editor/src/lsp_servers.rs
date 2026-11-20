@@ -433,6 +433,8 @@ fn sqls_configuration(settings: &ConnectionSettings) -> Option<Value> {
         (
             DriverKind::Postgres | DriverKind::SqlServer,
             Authentication::AzureCli
+            | Authentication::EntraInteractive { .. }
+            | Authentication::Integrated
             | Authentication::ServicePrincipal { .. }
             | Authentication::None
             | Authentication::KeyPair { .. },

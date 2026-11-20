@@ -1,8 +1,6 @@
-//! Saved connections in `<config dir>/connections.toml`.
-//!
-//! Passwords and service principal secrets are saved here, so the file is
-//! owner-only (0600) until they can move to the OS keychain.
+//! Saved connections in `<config dir>/connections.toml`; secrets go to [`crate::secrets`].
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -10,7 +8,7 @@ use gpui_kit::{App, BorrowAppContext as _, Global, SharedString};
 use serde::{Deserialize, Serialize};
 use sql_db::{ConnectionConfig, ConnectionSettings, ConnectionStringError, Dialect};
 
-use crate::settings;
+use crate::{secrets, settings};
 
 const CONNECTIONS_FILE: &str = "connections.toml";
 
@@ -86,19 +84,54 @@ pub struct ConnectionStore {
     connections: Vec<SavedConnection>,
     /// Entries this version cannot read, kept so saving does not delete them.
     unreadable: Vec<StoredConnection>,
-    path: Option<PathBuf>,
+    /// Each connection's secret as last sent to the secret store, so a save
+    /// only writes the ones that changed.
+    stored_secrets: HashMap<String, String>,
+    /// Saves go to one thread in order, so an older save never lands last.
+    writer: Option<std::sync::mpsc::Sender<Persist>>,
 }
 
 impl Global for ConnectionStore {}
 
+struct Persist {
+    /// Secrets to store (`Some`) or delete (`None`), by connection name.
+    secret_changes: Vec<(String, Option<String>)>,
+    file: ConnectionsFile,
+}
+
+fn secret_key(name: &str) -> String {
+    format!("connection:{name}")
+}
+
 pub fn init(cx: &mut App) {
     let path = settings::config_dir(cx).map(|directory| directory.join(CONNECTIONS_FILE));
-    let (connections, unreadable) = path.as_deref().map(load).unwrap_or_default();
+    let (mut connections, unreadable) = path.as_deref().map(load).unwrap_or_default();
+    // Secrets written inline by older versions move out on the first save.
+    let mut migrate = false;
+    let mut stored_secrets = HashMap::new();
+    for connection in &mut connections {
+        let Some(secret) = connection.settings.authentication.secret_mut() else {
+            continue;
+        };
+        if secret.is_empty() {
+            if let Some(stored) = secrets::get(&secret_key(&connection.name)) {
+                stored_secrets.insert(connection.name.clone(), stored.clone());
+                *secret = stored;
+            }
+        } else {
+            migrate = true;
+        }
+    }
+    let writer = path.and_then(spawn_writer);
     cx.set_global(ConnectionStore {
         connections,
         unreadable,
-        path,
+        stored_secrets,
+        writer,
     });
+    if migrate {
+        persist(cx);
+    }
 }
 
 pub fn all(cx: &App) -> &[SavedConnection] {
@@ -155,26 +188,96 @@ pub fn remove(cx: &mut App, name: &str) {
 }
 
 fn persist(cx: &mut App) {
-    let store = cx.global::<ConnectionStore>();
-    let Some(path) = store.path.clone() else {
-        return;
-    };
-    let file = ConnectionsFile {
-        connections: store
-            .connections
-            .iter()
-            .cloned()
-            .map(StoredConnection::from)
-            .chain(store.unreadable.iter().cloned())
-            .collect(),
-    };
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = write(&path, &file) {
-                tracing::warn!(%error, "could not save connections");
+    cx.update_global::<ConnectionStore, _>(|store, _| {
+        let mut current = HashMap::new();
+        for connection in &store.connections {
+            if let Some(secret) = connection
+                .settings
+                .authentication
+                .secret()
+                .filter(|secret| !secret.is_empty())
+            {
+                current.insert(connection.name.clone(), secret.to_owned());
             }
-        })
-        .detach();
+        }
+        let mut secret_changes: Vec<(String, Option<String>)> = current
+            .iter()
+            .filter(|(name, secret)| store.stored_secrets.get(*name) != Some(*secret))
+            .map(|(name, secret)| (name.clone(), Some(secret.clone())))
+            .collect();
+        secret_changes.extend(
+            store
+                .stored_secrets
+                .keys()
+                .filter(|name| !current.contains_key(*name))
+                .map(|name| (name.clone(), None)),
+        );
+        store.stored_secrets = current;
+        let file = ConnectionsFile {
+            connections: store
+                .connections
+                .iter()
+                .cloned()
+                .map(StoredConnection::from)
+                .chain(store.unreadable.iter().cloned())
+                .collect(),
+        };
+        if let Some(writer) = &store.writer
+            && writer
+                .send(Persist {
+                    secret_changes,
+                    file,
+                })
+                .is_err()
+        {
+            tracing::warn!("connections writer stopped");
+        }
+    });
+}
+
+fn spawn_writer(path: PathBuf) -> Option<std::sync::mpsc::Sender<Persist>> {
+    let (sender, jobs) = std::sync::mpsc::channel::<Persist>();
+    let spawned = std::thread::Builder::new()
+        .name("connections".to_owned())
+        .spawn(move || {
+            // Names whose secret could not be stored elsewhere stay in the file.
+            let mut kept_inline = std::collections::HashSet::new();
+            for mut job in jobs {
+                for (name, secret) in &job.secret_changes {
+                    match secrets::set(&secret_key(name), secret.as_deref()) {
+                        Ok(()) => {
+                            kept_inline.remove(name);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, connection = %name, "keeping a secret in connections.toml");
+                            kept_inline.insert(name.clone());
+                        }
+                    }
+                }
+                for entry in &mut job.file.connections {
+                    if kept_inline.contains(&entry.name) {
+                        continue;
+                    }
+                    if let Some(secret) = entry
+                        .settings
+                        .as_mut()
+                        .and_then(|settings| settings.authentication.secret_mut())
+                    {
+                        secret.clear();
+                    }
+                }
+                if let Err(error) = write(&path, &job.file) {
+                    tracing::warn!(%error, "could not save connections");
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => Some(sender),
+        Err(error) => {
+            tracing::warn!(%error, "connections will not be saved");
+            None
+        }
+    }
 }
 
 fn load(path: &Path) -> (Vec<SavedConnection>, Vec<StoredConnection>) {
@@ -301,7 +404,7 @@ connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analyt
         let text = r#"
 [[connection]]
 name = "Old"
-connection_string = "Server=h;Integrated Security=SSPI"
+connection_string = "Server=h;Authentication=ActiveDirectoryPassword"
 "#;
         let parsed: ConnectionsFile = toml::from_str(text).unwrap();
         let (saved, unreadable) = split(parsed.connections);
@@ -310,6 +413,6 @@ connection_string = "Server=h;Integrated Security=SSPI"
             connections: unreadable,
         })
         .unwrap();
-        assert!(rewritten.contains("Integrated Security=SSPI"));
+        assert!(rewritten.contains("Authentication=ActiveDirectoryPassword"));
     }
 }

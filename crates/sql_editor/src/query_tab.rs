@@ -804,9 +804,14 @@ impl QueryTab {
         let query = tokio_bridge::spawn(cx, {
             let cancel = cancel.clone();
             async move {
-                let connection = match reusable {
-                    Some(connection) => connection,
-                    None => Arc::new(Mutex::new(Connection::connect(config).await?)),
+                let connection = if let Some(connection) = reusable {
+                    connection
+                } else {
+                    // Connecting can wait minutes on a browser sign-in, so cancel stops it too.
+                    tokio::select! {
+                        connected = Connection::connect(config) => Arc::new(Mutex::new(connected?)),
+                        () = cancel.cancelled() => return Err(QueryError::Cancelled),
+                    }
                 };
                 let output = {
                     let mut connection = connection.lock().await;

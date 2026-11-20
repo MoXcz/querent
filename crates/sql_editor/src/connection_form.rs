@@ -23,6 +23,8 @@ pub struct ConnectionForm {
     auth_method: AuthMethod,
     encryption: Encryption,
     trust_server_certificate: bool,
+    /// Entra sign-in with a code typed on another device.
+    device_code: bool,
     /// No input field; copied from the loaded settings or a filled string.
     host_name_in_certificate: Option<String>,
     driver_select: Entity<LabelSelect>,
@@ -83,6 +85,7 @@ impl ConnectionForm {
             auth_method: AuthMethod::from(&settings.authentication),
             encryption: settings.encryption,
             trust_server_certificate: settings.trust_server_certificate,
+            device_code: false,
             host_name_in_certificate: None,
             driver_select,
             auth_select,
@@ -157,6 +160,13 @@ impl ConnectionForm {
                 password: self.password.read(cx).value().to_string(),
             },
             AuthMethod::AzureCli => Authentication::AzureCli,
+            AuthMethod::EntraInteractive => Authentication::EntraInteractive {
+                tenant_id: value(&self.tenant_id),
+                user: value(&self.user),
+                client_id: value(&self.client_id),
+                device_code: self.device_code,
+            },
+            AuthMethod::Integrated => Authentication::Integrated,
             AuthMethod::ServicePrincipal => Authentication::ServicePrincipal {
                 tenant_id: required(&self.tenant_id, "tenant ID")?,
                 client_id: required(&self.client_id, "client ID")?,
@@ -216,7 +226,18 @@ impl ConnectionForm {
                 set_text(&self.user, user, window, cx);
                 set_text(&self.password, password, window, cx);
             }
-            Authentication::AzureCli | Authentication::None => {}
+            Authentication::AzureCli | Authentication::Integrated | Authentication::None => {}
+            Authentication::EntraInteractive {
+                tenant_id,
+                user,
+                client_id,
+                device_code,
+            } => {
+                set_text(&self.tenant_id, tenant_id, window, cx);
+                set_text(&self.user, user, window, cx);
+                set_text(&self.client_id, client_id, window, cx);
+                self.device_code = *device_code;
+            }
             Authentication::KeyPair {
                 user,
                 private_key_path,
@@ -425,6 +446,43 @@ impl ConnectionForm {
                 div()
                     .text_xs()
                     .child("Uses the token from your `az login` session."),
+            )],
+            AuthMethod::EntraInteractive => {
+                let form = cx.weak_entity();
+                vec![
+                    row("User", Input::new(&self.user)),
+                    row("Tenant ID", Input::new(&self.tenant_id)),
+                    row("Client ID", Input::new(&self.client_id)),
+                    row(
+                        "",
+                        Checkbox::new("device-code")
+                            .label("Sign in with a code on another device (no browser here)")
+                            .checked(self.device_code)
+                            .on_click(move |checked, _, cx| {
+                                let checked = *checked;
+                                if let Err(error) = form.update(cx, |form, cx| {
+                                    form.device_code = checked;
+                                    cx.notify();
+                                }) {
+                                    tracing::debug!(%error, "connection form closed");
+                                }
+                            }),
+                    ),
+                    row(
+                        "",
+                        div().text_xs().child(
+                            "All optional. Opens the browser on first connect; later connections reuse the sign-in.",
+                        ),
+                    ),
+                ]
+            }
+            AuthMethod::Integrated => vec![row(
+                "",
+                div().text_xs().child(if cfg!(windows) {
+                    "Uses your Windows sign-in."
+                } else {
+                    "Uses your Kerberos ticket; run `kinit` first."
+                }),
             )],
             AuthMethod::ServicePrincipal => vec![
                 row("Tenant ID", Input::new(&self.tenant_id)),

@@ -97,10 +97,16 @@ impl DriverKind {
         match self {
             Self::SqlServer => &[
                 AuthMethod::Password,
+                AuthMethod::Integrated,
                 AuthMethod::AzureCli,
+                AuthMethod::EntraInteractive,
                 AuthMethod::ServicePrincipal,
             ],
-            Self::Fabric => &[AuthMethod::AzureCli, AuthMethod::ServicePrincipal],
+            Self::Fabric => &[
+                AuthMethod::AzureCli,
+                AuthMethod::EntraInteractive,
+                AuthMethod::ServicePrincipal,
+            ],
             Self::Postgres => &[AuthMethod::Password],
             Self::Sqlite => &[AuthMethod::None],
             Self::Snowflake => &[AuthMethod::Password, AuthMethod::KeyPair],
@@ -122,7 +128,9 @@ impl DriverKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMethod {
     Password,
+    Integrated,
     AzureCli,
+    EntraInteractive,
     ServicePrincipal,
     None,
     KeyPair,
@@ -142,6 +150,8 @@ impl AuthMethod {
             ) => "User name and password",
             (Self::KeyPair, _) => "Key pair (private key file)",
             (Self::AzureCli, _) => "Entra ID (az login session)",
+            (Self::EntraInteractive, _) => "Entra ID (browser sign-in)",
+            (Self::Integrated, _) => "Windows authentication (Kerberos)",
             (Self::ServicePrincipal, _) => "Entra ID service principal",
             (Self::None, _) => "None",
         }
@@ -156,6 +166,13 @@ impl AuthMethod {
                 password: String::new(),
             },
             Self::AzureCli => Authentication::AzureCli,
+            Self::EntraInteractive => Authentication::EntraInteractive {
+                tenant_id: String::new(),
+                user: String::new(),
+                client_id: String::new(),
+                device_code: false,
+            },
+            Self::Integrated => Authentication::Integrated,
             Self::ServicePrincipal => Authentication::ServicePrincipal {
                 tenant_id: String::new(),
                 client_id: String::new(),
@@ -176,6 +193,8 @@ impl From<&Authentication> for AuthMethod {
         match authentication {
             Authentication::Password { .. } => Self::Password,
             Authentication::AzureCli => Self::AzureCli,
+            Authentication::EntraInteractive { .. } => Self::EntraInteractive,
+            Authentication::Integrated => Self::Integrated,
             Authentication::ServicePrincipal { .. } => Self::ServicePrincipal,
             Authentication::None => Self::None,
             Authentication::KeyPair { .. } => Self::KeyPair,

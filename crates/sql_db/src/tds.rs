@@ -31,6 +31,22 @@ pub enum Authentication {
     /// Entra ID token from the signed-in Azure CLI (or Azure Developer CLI) session.
     #[default]
     AzureCli,
+    /// Entra ID sign-in in the browser, or with a device code; the token is cached and refreshed.
+    EntraInteractive {
+        /// Empty means any work or school account.
+        #[serde(default)]
+        tenant_id: String,
+        /// Account to preselect; empty lets the user pick.
+        #[serde(default)]
+        user: String,
+        /// Empty means the Azure SDKs' default public client.
+        #[serde(default)]
+        client_id: String,
+        #[serde(default)]
+        device_code: bool,
+    },
+    /// Windows authentication: SSPI on Windows, a Kerberos ticket (`kinit`) elsewhere.
+    Integrated,
     /// Entra ID token from an app registration's client credentials.
     ServicePrincipal {
         tenant_id: String,
@@ -54,6 +70,19 @@ impl std::fmt::Debug for Authentication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AzureCli => formatter.write_str("AzureCli"),
+            Self::EntraInteractive {
+                tenant_id,
+                user,
+                client_id,
+                device_code,
+            } => formatter
+                .debug_struct("EntraInteractive")
+                .field("tenant_id", tenant_id)
+                .field("user", user)
+                .field("client_id", client_id)
+                .field("device_code", device_code)
+                .finish(),
+            Self::Integrated => formatter.write_str("Integrated"),
             Self::ServicePrincipal {
                 tenant_id,
                 client_id,
@@ -77,6 +106,28 @@ impl std::fmt::Debug for Authentication {
                 .field("user", user)
                 .field("private_key_path", private_key_path)
                 .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl Authentication {
+    /// The password, client secret or key passphrase, which belongs in the keychain.
+    #[must_use]
+    pub fn secret(&self) -> Option<&str> {
+        match self {
+            Self::Password { password, .. } => Some(password),
+            Self::ServicePrincipal { client_secret, .. } => Some(client_secret),
+            Self::KeyPair { passphrase, .. } => Some(passphrase),
+            Self::AzureCli | Self::EntraInteractive { .. } | Self::Integrated | Self::None => None,
+        }
+    }
+
+    pub fn secret_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Self::Password { password, .. } => Some(password),
+            Self::ServicePrincipal { client_secret, .. } => Some(client_secret),
+            Self::KeyPair { passphrase, .. } => Some(passphrase),
+            Self::AzureCli | Self::EntraInteractive { .. } | Self::Integrated | Self::None => None,
         }
     }
 }
@@ -284,6 +335,7 @@ const LOGIN_FAILED: u32 = 18456;
 enum Login {
     Password { user: String, password: String },
     Token(String),
+    Integrated,
 }
 
 async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
@@ -294,6 +346,21 @@ async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
                 user: user.clone(),
                 password: password.clone(),
             });
+        }
+        Authentication::Integrated => return Ok(Login::Integrated),
+        Authentication::EntraInteractive {
+            tenant_id,
+            user,
+            client_id,
+            device_code,
+        } => {
+            let request = crate::entra::SignInRequest {
+                tenant_id: tenant_id.clone(),
+                user: user.clone(),
+                client_id: client_id.clone(),
+                device_code: *device_code,
+            };
+            return crate::entra::access_token(&request).await.map(Login::Token);
         }
         Authentication::None | Authentication::KeyPair { .. } => {
             return Err(QueryError::Auth(
@@ -339,6 +406,9 @@ async fn open_client(config: &TdsConfig, login: &Login) -> TdsResult<TdsClient> 
         Login::Token(token) => {
             context.tds_authentication_method = TdsAuthenticationMethod::AccessToken;
             context.access_token = Some(token.clone());
+        }
+        Login::Integrated => {
+            context.tds_authentication_method = TdsAuthenticationMethod::SSPI;
         }
     }
     context.encryption_options.mode = config.encryption_setting();

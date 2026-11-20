@@ -391,6 +391,8 @@ async fn auth_config(authentication: &Authentication) -> Result<(String, AuthCon
             Ok((user.clone(), AuthConfig::key_pair(key)))
         }
         Authentication::AzureCli
+        | Authentication::EntraInteractive { .. }
+        | Authentication::Integrated
         | Authentication::ServicePrincipal { .. }
         | Authentication::None => Err(QueryError::Auth(
             "Snowflake connections sign in with a password or a key pair".to_owned(),

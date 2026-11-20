@@ -59,6 +59,7 @@ pub struct Workspace {
     /// Pending session write; tabs notify often, so writes are batched.
     session_save: Option<Task<()>>,
     last_saved: Option<Session>,
+    _sign_in_prompts: Option<Task<()>>,
 }
 
 impl Workspace {
@@ -79,6 +80,7 @@ impl Workspace {
             }),
             session_save: None,
             last_saved: None,
+            _sign_in_prompts: crate::sign_in::show_prompts(window, cx),
         };
         // Closing the last window may drop the workspace before quit hooks run.
         let closing = cx.weak_entity();

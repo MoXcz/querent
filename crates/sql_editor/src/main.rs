@@ -7,8 +7,10 @@ mod object_explorer;
 mod query_tab;
 mod results_table;
 mod schema_cache;
+mod secrets;
 mod session;
 mod settings;
+mod sign_in;
 mod sql_language;
 mod themes;
 mod tokio_bridge;
@@ -42,6 +44,8 @@ fn main() -> anyhow::Result<()> {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             settings::init(cx);
+            secrets::init(settings::config_dir(cx));
+            sign_in::init(cx);
             connections::init(cx);
             schema_cache::init(cx);
             history::init(cx);
