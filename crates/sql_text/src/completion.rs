@@ -180,6 +180,173 @@ impl Token {
     }
 }
 
+/// Whether `text` is one statement that only reads, so a client may stop it
+/// once it has enough rows. Errs toward `false`: a write word, or a call to a
+/// function that is not a known built-in (it might write), disqualifies it.
+#[must_use]
+pub fn is_read_only_query(text: &str) -> bool {
+    const READS: [&str; 4] = ["select", "with", "values", "table"];
+    const WRITES: [&str; 13] = [
+        "insert", "update", "delete", "merge", "into", "exec", "execute", "call", "create",
+        "alter", "drop", "truncate", "grant",
+    ];
+    if crate::statements(text).len() != 1 {
+        return false;
+    }
+    let tokens = tokenize(text, 0);
+    let is_one_of =
+        |word: &str, list: &[&str]| list.iter().any(|item| word.eq_ignore_ascii_case(item));
+    let mut words = tokens.iter().filter_map(Token::word);
+    let reads = words.next().is_some_and(|first| is_one_of(first, &READS))
+        && !words.any(|word| is_one_of(word, &WRITES));
+    let unknown_call = tokens.windows(2).any(|pair| match pair {
+        [word, open] if open.kind == Kind::Open => word
+            .word()
+            .is_some_and(|word| !is_one_of(word, NOT_CALLS) && !is_one_of(word, BUILT_INS)),
+        _ => false,
+    });
+    reads && !unknown_call
+}
+
+/// Words a `(` can follow without being a function call.
+const NOT_CALLS: &[&str] = &[
+    "select",
+    "from",
+    "join",
+    "on",
+    "where",
+    "and",
+    "or",
+    "not",
+    "in",
+    "exists",
+    "as",
+    "over",
+    "filter",
+    "within",
+    "any",
+    "all",
+    "some",
+    "using",
+    "when",
+    "then",
+    "else",
+    "case",
+    "by",
+    "having",
+    "top",
+    "values",
+    "table",
+    "lateral",
+    "union",
+    "intersect",
+    "except",
+    "with",
+    "between",
+    "is",
+    "like",
+    "ilike",
+    "partition",
+    "rows",
+    "range",
+];
+
+/// Common read-only functions; any other call stops the early cancel.
+const BUILT_INS: &[&str] = &[
+    "count",
+    "sum",
+    "avg",
+    "min",
+    "max",
+    "cast",
+    "convert",
+    "try_cast",
+    "try_convert",
+    "coalesce",
+    "isnull",
+    "nullif",
+    "iif",
+    "ifnull",
+    "nvl",
+    "upper",
+    "lower",
+    "trim",
+    "ltrim",
+    "rtrim",
+    "substring",
+    "substr",
+    "left",
+    "right",
+    "len",
+    "length",
+    "char_length",
+    "concat",
+    "concat_ws",
+    "replace",
+    "round",
+    "floor",
+    "ceiling",
+    "ceil",
+    "abs",
+    "power",
+    "sqrt",
+    "format",
+    "year",
+    "month",
+    "day",
+    "datepart",
+    "datename",
+    "dateadd",
+    "datediff",
+    "date_trunc",
+    "date_part",
+    "extract",
+    "getdate",
+    "getutcdate",
+    "sysdatetime",
+    "now",
+    "current_date",
+    "to_char",
+    "to_date",
+    "to_timestamp",
+    "string_agg",
+    "array_agg",
+    "listagg",
+    "row_number",
+    "rank",
+    "dense_rank",
+    "ntile",
+    "lag",
+    "lead",
+    "first_value",
+    "last_value",
+    "generate_series",
+    "unnest",
+    "json_value",
+    "json_query",
+    "openjson",
+    "charindex",
+    "position",
+    "strpos",
+    "patindex",
+    "stuff",
+    "reverse",
+    "md5",
+    "random",
+    "rand",
+    "newid",
+    "decimal",
+    "numeric",
+    "varchar",
+    "nvarchar",
+    "char",
+    "nchar",
+    "datetime2",
+    "float",
+    "int",
+    "bigint",
+];
+
 /// The completion context for a cursor at byte offset `cursor`.
 #[must_use]
 pub fn context_at(text: &str, cursor: usize) -> CompletionContext {
@@ -653,5 +820,22 @@ mod tests {
         assert_eq!(&text[range], "name");
         let (parts, _) = name_at(text, 26).unwrap();
         assert_eq!(parts, vec!["dbo", "customers"]);
+    }
+
+    #[test]
+    fn read_only_queries() {
+        assert!(is_read_only_query("select * from t where a = 'update'"));
+        assert!(is_read_only_query(
+            "-- top\nwith x as (select 1) select * from x;"
+        ));
+        assert!(!is_read_only_query("select * into t2 from t"));
+        assert!(!is_read_only_query("with x as (select 1) delete from t"));
+        assert!(!is_read_only_query("select 1; select 2"));
+        assert!(!is_read_only_query("exec sp_who"));
+        assert!(!is_read_only_query("select * from t for update"));
+        assert!(!is_read_only_query("select log_insert(x) from t"));
+        assert!(is_read_only_query(
+            "select count(*), cast(a as int) from t where b in (select 1) and exists (select 2)"
+        ));
     }
 }

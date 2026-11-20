@@ -1,6 +1,7 @@
 mod command_palette;
 mod connection_form;
 mod connections;
+mod database_picker;
 mod history;
 mod lsp_servers;
 mod object_explorer;
@@ -16,8 +17,12 @@ mod themes;
 mod tokio_bridge;
 mod workspace;
 
+use gpui_kit::base::actions::{SelectDown, SelectUp};
 use gpui_kit::component::input::DeleteToPreviousWordStart;
-use gpui_kit::{App, AppContext as _, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{
+    App, AppContext as _, AssetSource, Bounds, KeyBinding, SharedString, WindowBounds,
+    WindowOptions, px, size,
+};
 use tracing_subscriber::EnvFilter;
 
 use crate::command_palette::{OpenCommandPalette, OpenSettings};
@@ -27,6 +32,8 @@ use crate::workspace::{
 };
 
 const KEY_CONTEXT: &str = "SqlEditor";
+/// gpui-kit's key context for `Command` lists.
+const PALETTE_CONTEXT: &str = "Command";
 
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -40,7 +47,7 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio_bridge::TokioRuntime::new()?;
 
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(AppAssets)
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             settings::init(cx);
@@ -62,6 +69,28 @@ fn main() -> anyhow::Result<()> {
             cx.activate(true);
         });
     Ok(())
+}
+
+// Icons beyond gpui-kit's default set, embedded one by one.
+gpui_kit::assets::icon_assets!(ExtraIcons, [CircleStop, Download]);
+
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        if let Some(bytes) = ExtraIcons.load(path)? {
+            return Ok(Some(bytes));
+        }
+        gpui_kit::assets::Assets.load(path)
+    }
+
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
 }
 
 fn bind_keys(cx: &mut App) {
@@ -103,6 +132,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.
         KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
+        // Vim-style list movement in the palette and the history list.
+        KeyBinding::new("ctrl-n", SelectDown, Some(PALETTE_CONTEXT)),
+        KeyBinding::new("ctrl-p", SelectUp, Some(PALETTE_CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new("ctrl-pagedown", NextTab, Some(WORKSPACE_CONTEXT)),

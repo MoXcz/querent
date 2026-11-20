@@ -1,4 +1,5 @@
-//! Tables, views and columns per connection and database, for completion and hover.
+//! Database names per connection, and tables, views and columns per database,
+//! for the tab's database picker, completion and hover.
 //!
 //! Loaded in the background on first use with two catalog queries (objects,
 //! then every column at once) on a connection of its own, so typing never
@@ -89,9 +90,16 @@ enum Entry {
 
 type CatalogConnection = Arc<Mutex<Option<Connection>>>;
 
+enum DatabaseList {
+    Loading(u64),
+    Loaded(Arc<Vec<SharedString>>),
+    Failed(Instant),
+}
+
 #[derive(Default)]
 pub struct SchemaCache {
     entries: HashMap<(SharedString, String), Entry>,
+    databases: HashMap<SharedString, DatabaseList>,
     next_load: u64,
     connections: HashMap<SharedString, CatalogConnection>,
 }
@@ -104,6 +112,7 @@ pub fn init(cx: &mut App) {
     cx.observe_global::<ConnectionStore>(|cx| {
         cx.update_global::<SchemaCache, _>(|cache, _| {
             cache.entries.clear();
+            cache.databases.clear();
             cache.connections.clear();
         });
     })
@@ -130,7 +139,111 @@ pub fn invalidate(cx: &mut App, connection: &SharedString, database: Option<&str
         cache.entries.retain(|(owner, name), _| {
             owner != connection || database.is_some_and(|database| database != name)
         });
+        if database.is_none() {
+            cache.databases.remove(connection);
+        }
     });
+}
+
+/// The connection's database names, when loaded.
+pub fn databases(cx: &App, connection: &SharedString) -> Option<Arc<Vec<SharedString>>> {
+    match cx.global::<SchemaCache>().databases.get(connection)? {
+        DatabaseList::Loaded(names) => Some(names.clone()),
+        DatabaseList::Loading(_) | DatabaseList::Failed(_) => None,
+    }
+}
+
+/// Stores names the explorer loaded, so the picker need not ask again.
+pub fn set_databases(cx: &mut App, connection: &SharedString, names: Arc<Vec<SharedString>>) {
+    cx.update_global::<SchemaCache, _>(|cache, _| {
+        cache
+            .databases
+            .insert(connection.clone(), DatabaseList::Loaded(names));
+    });
+}
+
+/// Starts loading the connection's database names unless they are loaded or loading.
+pub fn load_databases(cx: &mut App, connection: &SharedString) {
+    match cx.global::<SchemaCache>().databases.get(connection) {
+        Some(DatabaseList::Loaded(_) | DatabaseList::Loading(_)) => return,
+        Some(DatabaseList::Failed(at)) if at.elapsed() < RETRY_AFTER => return,
+        Some(DatabaseList::Failed(_)) | None => {}
+    }
+    let Some(config) = connections::find(cx, connection).and_then(|saved| saved.config().ok())
+    else {
+        return;
+    };
+    let connection = connection.clone();
+    let (load_id, catalog) = cx.update_global::<SchemaCache, _>(|cache, _| {
+        cache.next_load += 1;
+        let load_id = cache.next_load;
+        cache
+            .databases
+            .insert(connection.clone(), DatabaseList::Loading(load_id));
+        (load_id, catalog_connection(cache, &connection))
+    });
+    let task = tokio_bridge::spawn(cx, async move {
+        with_catalog(&catalog, config, |connection| {
+            Box::pin(connection.list_databases())
+        })
+        .await
+    });
+    cx.spawn(async move |cx| {
+        let list = match task.await {
+            Ok(Ok(names)) => {
+                DatabaseList::Loaded(Arc::new(names.into_iter().map(SharedString::from).collect()))
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "database list failed");
+                DatabaseList::Failed(Instant::now())
+            }
+            Err(error) => {
+                tracing::debug!(%error, "database list task failed");
+                DatabaseList::Failed(Instant::now())
+            }
+        };
+        cx.update(|cx| {
+            cx.update_global::<SchemaCache, _>(|cache, _| {
+                if matches!(cache.databases.get(&connection), Some(DatabaseList::Loading(id)) if *id == load_id) {
+                    cache.databases.insert(connection, list);
+                }
+            });
+        });
+    })
+    .detach();
+}
+
+fn catalog_connection(cache: &mut SchemaCache, connection: &SharedString) -> CatalogConnection {
+    cache
+        .connections
+        .entry(connection.clone())
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone()
+}
+
+type CatalogWork<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, sql_db::QueryError>> + Send + 'a>>;
+
+/// Runs `work` on the cache's own connection, opening it first, and drops it when lost.
+async fn with_catalog<T>(
+    catalog: &CatalogConnection,
+    config: sql_db::ConnectionConfig,
+    work: impl for<'a> FnOnce(&'a mut Connection) -> CatalogWork<'a, T>,
+) -> Result<T, sql_db::QueryError> {
+    let mut guard = catalog.lock().await;
+    if guard.is_none() {
+        *guard = Some(Connection::connect(config).await?);
+    }
+    let Some(connection) = guard.as_mut() else {
+        return Err(sql_db::QueryError::ConnectionLost(
+            "schema connection missing".to_owned(),
+        ));
+    };
+    let result = work(connection).await;
+    if matches!(result, Err(sql_db::QueryError::ConnectionLost(_))) {
+        *guard = None;
+    }
+    result
 }
 
 fn load(cx: &mut App, entry_key: (SharedString, String)) {
@@ -148,33 +261,17 @@ fn load(cx: &mut App, entry_key: (SharedString, String)) {
         cache
             .entries
             .insert(entry_key.clone(), Entry::Loading(load_id));
-        let catalog = cache
-            .connections
-            .entry(connection_name.clone())
-            .or_insert_with(|| Arc::new(Mutex::new(None)))
-            .clone();
-        (load_id, catalog)
+        (load_id, catalog_connection(cache, &connection_name))
     });
     let task = tokio_bridge::spawn(cx, async move {
-        let mut guard = catalog.lock().await;
-        if guard.is_none() {
-            *guard = Some(Connection::connect(config).await?);
-        }
-        let Some(connection) = guard.as_mut() else {
-            return Err(sql_db::QueryError::ConnectionLost(
-                "schema connection missing".to_owned(),
-            ));
-        };
-        let result = async {
-            let objects = connection.list_objects(&database).await?;
-            let columns = connection.list_all_columns(&database).await?;
-            Ok::<_, sql_db::QueryError>((objects, columns))
-        }
-        .await;
-        if matches!(result, Err(sql_db::QueryError::ConnectionLost(_))) {
-            *guard = None;
-        }
-        result
+        with_catalog(&catalog, config, |connection| {
+            Box::pin(async move {
+                let objects = connection.list_objects(&database).await?;
+                let columns = connection.list_all_columns(&database).await?;
+                Ok((objects, columns))
+            })
+        })
+        .await
     });
     cx.spawn(async move |cx| {
         let entry = match task.await {

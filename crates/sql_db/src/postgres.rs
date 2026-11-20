@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::types::Type;
 use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage};
+use tokio_util::sync::CancellationToken;
 
 use crate::catalog::Dialect;
 use crate::{
@@ -137,23 +138,40 @@ impl PgConnection {
             config,
             ..
         } = self;
-        let work = run_batch(&session.client, sql, config.max_rows, cancel);
-        pin_mut!(work);
-        let result = tokio::select! {
-            result = &mut work => result,
-            () = cancel.token.cancelled() => {
-                let request = session.cancel_token.cancel_query(tls.clone());
-                match tokio::time::timeout(CANCEL_REQUEST_TIMEOUT, request).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => tracing::debug!(%error, "cancel request failed"),
-                    Err(_) => tracing::debug!("cancel request timed out"),
+        // Cancelling inside a transaction block would abort it, so only a lone
+        // read in autocommit is stopped at the limit instead of drained.
+        let stop_at_limit = config.max_rows != usize::MAX
+            && sql_text::completion::is_read_only_query(sql)
+            && !in_transaction_block(&session.client).await;
+        let stop = CancellationToken::new();
+        let mut output = QueryOutput::default();
+        let result = {
+            let limit = Limit {
+                max_rows: config.max_rows,
+                stop: stop_at_limit.then_some(&stop),
+            };
+            let work = run_batch(&session.client, sql, &limit, cancel, &mut output);
+            pin_mut!(work);
+            tokio::select! {
+                result = &mut work => result,
+                () = async { tokio::select! {
+                    () = cancel.token.cancelled() => {}
+                    () = stop.cancelled() => {}
+                } } => {
+                    send_cancel(&session.cancel_token, tls).await;
+                    work.await
                 }
-                work.await
             }
         };
         let notices = drain(&mut session.notices);
         match result {
-            Ok(mut output) => {
+            Ok(()) => {
+                output.messages.extend(notices);
+                Ok(output)
+            }
+            Err(error)
+                if stop.is_cancelled() && !cancel.token.is_cancelled() && is_cancel(&error) =>
+            {
                 output.messages.extend(notices);
                 Ok(output)
             }
@@ -433,12 +451,43 @@ async fn open_session(config: &PgConfig, tls: &MakeTlsConnector) -> Result<Sessi
     })
 }
 
+async fn send_cancel(token: &CancelToken, tls: &MakeTlsConnector) {
+    let request = token.cancel_query(tls.clone());
+    match tokio::time::timeout(CANCEL_REQUEST_TIMEOUT, request).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::debug!(%error, "cancel request failed"),
+        Err(_) => tracing::debug!("cancel request timed out"),
+    }
+}
+
+/// `now()` is fixed at transaction start, so it differs from the statement's time inside a block.
+async fn in_transaction_block(client: &Client) -> bool {
+    match client
+        .simple_query("select now() <> statement_timestamp()")
+        .await
+    {
+        Ok(messages) => messages.iter().any(
+            |message| matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t")),
+        ),
+        // Unknown: assume a block, which only means draining instead of stopping.
+        Err(_) => true,
+    }
+}
+
+/// The row cap, and the token that asks `execute` to stop the server once it is reached.
+struct Limit<'a> {
+    max_rows: usize,
+    stop: Option<&'a CancellationToken>,
+}
+
+/// Fills `output` as it reads, so rows read before a stop at the limit are kept.
 async fn run_batch(
     client: &Client,
     sql: &str,
-    max_rows: usize,
+    limit: &Limit<'_>,
     cancel: &CancelHandle,
-) -> Result<QueryOutput, tokio_postgres::Error> {
+    output: &mut QueryOutput,
+) -> Result<(), tokio_postgres::Error> {
     // Only a single statement is prepared: a failed prepare inside an open
     // transaction would abort it before the batch runs. A batch's values stay text.
     let types: Option<Vec<Type>> = if sql_text::statements(sql).len() == 1 {
@@ -459,14 +508,13 @@ async fn run_batch(
     };
     if cancel.token.is_cancelled() {
         // The cancel request reached an idle backend; run nothing.
-        return Ok(QueryOutput {
-            messages: vec!["query cancelled before it started".to_owned()],
-            ..QueryOutput::default()
-        });
+        output
+            .messages
+            .push("query cancelled before it started".to_owned());
+        return Ok(());
     }
     let stream = client.simple_query_raw(sql).await?;
     pin_mut!(stream);
-    let mut output = QueryOutput::default();
     let mut current: Option<ResultSet> = None;
     while let Some(message) = stream.next().await {
         match message? {
@@ -492,8 +540,13 @@ async fn run_batch(
                 let Some(result_set) = current.as_mut() else {
                     continue;
                 };
-                if result_set.rows.len() >= max_rows {
+                if result_set.rows.len() >= limit.max_rows {
                     result_set.truncated = true;
+                    if let Some(stop) = limit.stop {
+                        // Keep what was read; the stream then ends in a cancel error.
+                        output.result_sets.extend(current.take());
+                        stop.cancel();
+                    }
                     continue;
                 }
                 let column_types = types.as_deref().filter(|types| types.len() == row.len());
@@ -508,12 +561,14 @@ async fn run_batch(
             }
             SimpleQueryMessage::CommandComplete(count) => match current.take() {
                 Some(result_set) => output.result_sets.push(result_set),
+                // The count of a result stopped at the limit is not rows affected.
+                None if limit.stop.is_some_and(CancellationToken::is_cancelled) => {}
                 None => *output.rows_affected.get_or_insert(0) += count,
             },
             _ => {}
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 /// Turns the server's text for a value into a typed value when the type is known.

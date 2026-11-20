@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
+use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, MoveDown, MoveUp, RangeDecoration,
-    RangeDecorationCollection, RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
+    Editor, EditorState, InputEvent, MoveDown, MoveUp, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::{DataTable, TableState};
@@ -31,9 +33,11 @@ use tokio::sync::Mutex;
 
 use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
+use crate::database_picker::{DatabaseChoices, DatabaseSelect};
 use crate::history;
 use crate::lsp_servers::{self, LspServers};
 use crate::results_table::ResultsTable;
+use crate::schema_cache::{self, SchemaCache};
 use crate::settings::{self, SettingsStore};
 use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
@@ -105,7 +109,9 @@ pub struct QueryTab {
     number: usize,
     focus_handle: FocusHandle,
     connection_select: Entity<ConnectionSelect>,
-    database_input: Entity<InputState>,
+    database_select: Entity<DatabaseSelect>,
+    /// The list the picker was last filled from, to tell when the cache has a newer one.
+    database_list: Option<Arc<Vec<SharedString>>>,
     editor: Entity<EditorState>,
     results: Entity<TableState<ResultsTable>>,
     connection: Option<SharedConnection>,
@@ -160,11 +166,7 @@ impl QueryTab {
                 .map(IndexPath::new);
             SelectState::new(names, selected, window, cx)
         });
-        let database_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder("database")
-                .default_value(fields.database)
-        });
+        let database_select = new_database_select(fields.database, window, cx);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql".to_owned())
@@ -175,7 +177,7 @@ impl QueryTab {
         let document = tab_document(number);
         let target = TabTarget {
             connection: connection_select.downgrade(),
-            database: database_input.downgrade(),
+            database: database_select.downgrade(),
             document: document.clone(),
         };
         editor.update(cx, |editor, _| {
@@ -207,6 +209,12 @@ impl QueryTab {
         let subscriptions = vec![
             vim_interceptor,
             cx.subscribe_in(&connection_select, window, Self::on_connection_selected),
+            cx.subscribe_in(&database_select, window, Self::on_database_chosen),
+            // Tabbing to the picker loads its list too, not only a click.
+            cx.on_focus_in(&database_select.focus_handle(cx), window, |this, _, cx| {
+                this.request_databases(cx);
+            }),
+            cx.observe_global_in::<SchemaCache>(window, Self::on_schema_cache_changed),
             cx.observe_global_in::<ConnectionStore>(window, Self::on_connections_changed),
             // The editor notifies on every cursor move and caret blink.
             cx.observe(&editor, |this, _, cx| this.update_block_cursor(cx)),
@@ -224,7 +232,8 @@ impl QueryTab {
             number,
             focus_handle: cx.focus_handle(),
             connection_select,
-            database_input,
+            database_select,
+            database_list: None,
             editor,
             results,
             connection: None,
@@ -255,7 +264,7 @@ impl QueryTab {
     pub fn connection_fields(&self, cx: &App) -> ConnectionFields {
         ConnectionFields {
             connection: self.connection_select.read(cx).selected_value().cloned(),
-            database: self.database_input.read(cx).value().trim().to_owned(),
+            database: self.database(cx),
         }
     }
 
@@ -273,9 +282,93 @@ impl QueryTab {
     }
 
     pub fn set_database(&mut self, database: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.database_input.update(cx, |input, cx| {
-            input.set_value(database.to_owned(), window, cx);
+        self.fill_database_choices(database, window, cx);
+        let value = SharedString::from(database.to_owned());
+        self.database_select.update(cx, |select, cx| {
+            if value.is_empty() {
+                select.clear_selection(cx);
+            } else {
+                select.set_selected_values(&[value], window, cx);
+            }
         });
+        cx.notify();
+    }
+
+    fn database(&self, cx: &App) -> String {
+        self.database_select
+            .read(cx)
+            .selected_value()
+            .map(|database| database.trim().to_owned())
+            .unwrap_or_default()
+    }
+
+    /// Refills the picker from the cached list, keeping `current` in it.
+    fn fill_database_choices(
+        &mut self,
+        current: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let list = self
+            .connection_select
+            .read(cx)
+            .selected_value()
+            .cloned()
+            .and_then(|connection| schema_cache::databases(cx, &connection));
+        let names = list.as_deref().cloned().unwrap_or_default();
+        self.database_list = list;
+        let choices = DatabaseChoices::new(names, current.to_owned());
+        let current = SharedString::from(current.to_owned());
+        self.database_select.update(cx, |select, cx| {
+            select.set_items(choices, window, cx);
+            // New items start unfiltered: filter again by what is typed, or, with
+            // nothing typed, point the selection at the current name's new row.
+            let query = select.query(cx);
+            if !query.is_empty() {
+                select.set_query(query, window, cx);
+            } else if !current.is_empty() {
+                select.set_selected_values(&[current], window, cx);
+            }
+        });
+    }
+
+    /// Opening the picker loads the connection's databases, the list the explorer shows.
+    fn request_databases(&mut self, cx: &mut Context<Self>) {
+        if let Some(connection) = self.connection_select.read(cx).selected_value().cloned() {
+            schema_cache::load_databases(cx, &connection);
+        }
+    }
+
+    fn on_schema_cache_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list = self
+            .connection_select
+            .read(cx)
+            .selected_value()
+            .cloned()
+            .and_then(|connection| schema_cache::databases(cx, &connection));
+        let same = match (&list, &self.database_list) {
+            (Some(new), Some(old)) => Arc::ptr_eq(new, old),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        if !same {
+            let current = self.database(cx);
+            self.fill_database_choices(&current, window, cx);
+        }
+    }
+
+    fn on_database_chosen(
+        &mut self,
+        _: &Entity<DatabaseSelect>,
+        event: &ComboboxEvent<DatabaseChoices>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A typed name joins the list, so it shows as a plain choice next time.
+        if let ComboboxEvent::Confirm(_) = event {
+            let current = self.database(cx);
+            self.fill_database_choices(&current, window, cx);
+        }
         cx.notify();
     }
 
@@ -314,14 +407,20 @@ impl QueryTab {
     }
 
     fn fill_default_database(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A file has no databases; a name picked on a server connection would linger.
+        if connections::find(cx, name).is_some_and(|saved| saved.settings.driver.is_file()) {
+            self.set_database("", window, cx);
+            return;
+        }
         let database = connections::find(cx, name)
             .and_then(|connection| connection.config().ok())
             .map(|config| config.database().to_owned())
             .filter(|database| !database.is_empty());
         if let Some(database) = database {
-            self.database_input.update(cx, |input, cx| {
-                input.set_value(database, window, cx);
-            });
+            self.set_database(&database, window, cx);
+        } else {
+            let current = self.database(cx);
+            self.fill_database_choices(&current, window, cx);
         }
         cx.notify();
     }
@@ -675,8 +774,7 @@ impl QueryTab {
     }
 
     pub fn title(&self, cx: &App) -> SharedString {
-        let database = self.database_input.read(cx).value();
-        let database = database.trim();
+        let database = self.database(cx);
         if database.is_empty() {
             format!("Query {}", self.number).into()
         } else {
@@ -1027,6 +1125,15 @@ impl QueryTab {
         }));
     }
 
+    /// SQLite opens one file and has no databases to pick.
+    fn connection_is_file(&self, cx: &App) -> bool {
+        self.connection_select
+            .read(cx)
+            .selected_value()
+            .and_then(|name| connections::find(cx, name))
+            .is_some_and(|saved| saved.settings.driver.is_file())
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let running = matches!(self.state, QueryState::Running { .. });
         h_flex()
@@ -1043,15 +1150,24 @@ impl QueryTab {
                             .placeholder("Connection"),
                     ),
             )
-            .child(
+            .children((!self.connection_is_file(cx)).then(|| {
                 div()
                     .w(px(220.))
-                    .child(Input::new(&self.database_input).small()),
-            )
+                    .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
+                        this.request_databases(cx);
+                    }))
+                    .child(
+                        Combobox::new(&self.database_select)
+                            .small()
+                            .placeholder("database")
+                            .search_placeholder("Search, or type a name"),
+                    )
+            }))
             .child(
                 Button::new("run")
                     .primary()
                     .small()
+                    .icon(LucideIcon::Play)
                     .label("Run")
                     .tooltip("Run statement under cursor or selection (Ctrl+Enter). Run all: Ctrl+Shift+Enter")
                     .disabled(running)
@@ -1062,6 +1178,7 @@ impl QueryTab {
             .child(
                 Button::new("cancel")
                     .small()
+                    .icon(LucideIcon::CircleStop)
                     .label("Cancel")
                     .disabled(!running)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1070,7 +1187,7 @@ impl QueryTab {
             )
     }
 
-    /// Row count and Export CSV under the grid, shown while it holds a result.
+    /// Row count and the no-limit rerun under the grid, shown while it holds a result.
     fn render_results_footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let result = self
             .shown_result
@@ -1100,17 +1217,7 @@ impl QueryTab {
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.rerun_without_limit(window, cx);
                         }))
-                }))
-                .child(
-                    Button::new("export-csv")
-                        .ghost()
-                        .xsmall()
-                        .label("Export CSV")
-                        .tooltip("Save the result as CSV (Ctrl+Shift+E)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.export_csv(&ExportCsv, window, cx);
-                        })),
-                ),
+                })),
         )
     }
 
@@ -1170,14 +1277,32 @@ impl QueryTab {
         }
     }
 
-    /// One button per result set, and one for messages, when there is more than one view.
+    /// Above the grid: one button per result set and one for messages when there
+    /// is more than one view, and Export CSV while a result with columns shows.
     fn render_result_switcher(&self, output: &QueryOutput, cx: &mut Context<Self>) -> AnyElement {
         let views = output.result_sets.len() + usize::from(!output.messages.is_empty());
-        if views < 2 {
+        let exportable = !self.show_messages
+            && self
+                .shown_result
+                .as_ref()
+                .is_some_and(|result| !result.columns.is_empty());
+        if views < 2 && !exportable {
             return div().into_any_element();
         }
-        let mut bar = h_flex()
-            .gap_1()
+        let export = exportable.then(|| {
+            Button::new("export-csv")
+                .ghost()
+                .xsmall()
+                .icon(LucideIcon::Download)
+                .label("Export CSV")
+                .tooltip("Save the result as CSV (Ctrl+Shift+E)")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.export_csv(&ExportCsv, window, cx);
+                }))
+        });
+        let mut views_bar = h_flex().gap_1();
+        let bar = h_flex()
+            .justify_between()
             .px_2()
             .py_1()
             .border_b_1()
@@ -1194,7 +1319,7 @@ impl QueryTab {
             } else {
                 button.ghost()
             };
-            bar = bar.child(button);
+            views_bar = views_bar.child(button);
         }
         if !output.messages.is_empty() {
             let label = format!("Messages · {}", output.messages.len());
@@ -1210,9 +1335,12 @@ impl QueryTab {
             } else {
                 button.ghost()
             };
-            bar = bar.child(button);
+            views_bar = views_bar.child(button);
         }
-        bar.into_any_element()
+        // A single view needs no switcher, only the export button.
+        bar.child(if views < 2 { h_flex() } else { views_bar })
+            .children(export)
+            .into_any_element()
     }
 
     pub fn status_text(&self) -> String {
@@ -1288,6 +1416,26 @@ impl Render for QueryTab {
                 ),
             )
     }
+}
+
+fn new_database_select(
+    database: String,
+    window: &mut Window,
+    cx: &mut Context<QueryTab>,
+) -> Entity<DatabaseSelect> {
+    cx.new(|cx| {
+        let selected = (!database.is_empty())
+            .then(|| IndexPath::new(0))
+            .into_iter()
+            .collect();
+        ComboboxState::new(
+            DatabaseChoices::new(Vec::new(), database),
+            selected,
+            window,
+            cx,
+        )
+        .searchable(true)
+    })
 }
 
 fn apply_vim_edit(

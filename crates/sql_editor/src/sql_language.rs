@@ -4,9 +4,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use gpui_kit::component::input::{
-    CompletionProvider, HoverProvider, InputState, Rope, RopeExt as _,
-};
+use gpui_kit::component::input::{CompletionProvider, HoverProvider, Rope, RopeExt as _};
 use gpui_kit::component::select::SelectState;
 use gpui_kit::{App, SharedString, Task, WeakEntity, Window};
 use lsp_types::{
@@ -28,7 +26,7 @@ const MAX_ITEMS: usize = 200;
 #[derive(Clone)]
 pub struct TabTarget {
     pub connection: WeakEntity<SelectState<Vec<SharedString>>>,
-    pub database: WeakEntity<InputState>,
+    pub database: WeakEntity<crate::database_picker::DatabaseSelect>,
     /// The tab's document for a language server.
     pub document: Option<lsp_types::Uri>,
 }
@@ -74,9 +72,9 @@ fn tab_schema(target: &TabTarget, cx: &mut App) -> Option<Arc<Schema>> {
         .database
         .upgrade()?
         .read(cx)
-        .value()
-        .trim()
-        .to_owned();
+        .selected_value()
+        .map(|database| database.trim().to_owned())
+        .unwrap_or_default();
     let database = match database.as_str() {
         "" => crate::connections::find(cx, &connection)
             .filter(|saved| saved.settings.driver.is_file())

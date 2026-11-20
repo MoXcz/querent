@@ -274,11 +274,15 @@ impl ObjectExplorer {
             connection,
             cx,
             |tds| Box::pin(tds.list_databases()),
-            move |this, result, _| {
+            move |this, result, cx| {
                 let load = match result {
-                    Ok(names) => Load::Loaded(Arc::new(
-                        names.into_iter().map(SharedString::from).collect(),
-                    )),
+                    Ok(names) => {
+                        let names: Arc<Vec<SharedString>> =
+                            Arc::new(names.into_iter().map(SharedString::from).collect());
+                        // The tabs' database pickers show the same list.
+                        schema_cache::set_databases(cx, &key, names.clone());
+                        Load::Loaded(names)
+                    }
                     Err(message) => Load::Failed(message),
                 };
                 this.databases.insert(key, load);

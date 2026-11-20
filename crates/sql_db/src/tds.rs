@@ -283,7 +283,18 @@ impl TdsConnection {
         max_rows: usize,
     ) -> Result<QueryOutput, QueryError> {
         let options = ExecuteOptions::new().cancel(&cancel.inner);
-        let result = collect_batch(&mut self.client, sql, options, max_rows).await;
+        // Cancelling a statement can roll back an open transaction (XACT_ABORT), so only
+        // a lone read outside one is stopped at the limit instead of drained.
+        let stop_at_limit = max_rows != usize::MAX
+            && !self.client.has_active_transaction()
+            && sql_text::completion::is_read_only_query(sql);
+        let mut output = QueryOutput::default();
+        let mut limit = Limit {
+            max_rows,
+            stop: stop_at_limit.then_some(&cancel.inner),
+            stopped: false,
+        };
+        let result = collect_batch(&mut self.client, sql, options, &mut limit, &mut output).await;
         let messages = self
             .client
             .take_info_messages()
@@ -291,7 +302,16 @@ impl TdsConnection {
             .map(|message| message.message)
             .collect::<Vec<_>>();
         match result {
-            Ok(mut output) => {
+            Ok(()) => {
+                output.messages = messages;
+                Ok(output)
+            }
+            // Only the cancel this stop caused; a real failure still reports.
+            Err(TdsError::OperationCancelledError(_)) if limit.stopped => {
+                tracing::debug!("query stopped at the row limit");
+                if let Err(close_error) = self.client.close_query().await {
+                    tracing::debug!(%close_error, "close_query after stopping at the limit");
+                }
                 output.messages = messages;
                 Ok(output)
             }
@@ -422,20 +442,33 @@ async fn open_client(config: &TdsConfig, login: &Login) -> TdsResult<TdsClient> 
         .await
 }
 
+/// The row cap, and the cancel that stops the server once it is reached.
+struct Limit<'a> {
+    max_rows: usize,
+    stop: Option<&'a mssql_tds::core::CancelHandle>,
+    stopped: bool,
+}
+
+/// Fills `output` as it reads, so rows read before a stop at the limit are kept.
 async fn collect_batch(
     client: &mut TdsClient,
     sql: &str,
     options: ExecuteOptions<'_>,
-    max_rows: usize,
-) -> TdsResult<QueryOutput> {
-    let mut output = QueryOutput::default();
+    limit: &mut Limit<'_>,
+    output: &mut QueryOutput,
+) -> TdsResult<()> {
     let mut statement = client.execute(sql.to_owned(), options).await?;
     loop {
         match statement {
             StatementResult::Rows => {
-                output
-                    .result_sets
-                    .push(read_result_set(client, max_rows).await?);
+                let result_set = read_result_set(client, limit).await?;
+                output.result_sets.push(result_set);
+                if limit.stopped {
+                    // The cancel ends the batch: this returns its error, or End if the
+                    // server had already sent everything.
+                    client.advance().await?;
+                    break;
+                }
             }
             StatementResult::NoRows { rows_affected } => {
                 if let Some(count) = rows_affected {
@@ -446,11 +479,10 @@ async fn collect_batch(
         }
         statement = client.advance().await?;
     }
-    client.close_query().await?;
-    Ok(output)
+    client.close_query().await
 }
 
-async fn read_result_set(client: &mut TdsClient, max_rows: usize) -> TdsResult<ResultSet> {
+async fn read_result_set(client: &mut TdsClient, limit: &mut Limit<'_>) -> TdsResult<ResultSet> {
     let columns = client
         .get_metadata()
         .iter()
@@ -464,9 +496,13 @@ async fn read_result_set(client: &mut TdsClient, max_rows: usize) -> TdsResult<R
         ..ResultSet::default()
     };
     while let Some(row) = client.next_row().await? {
-        if result_set.rows.len() == max_rows {
-            // `advance` drains the remaining rows without decoding them into values.
+        if result_set.rows.len() == limit.max_rows {
             result_set.truncated = true;
+            if let Some(stop) = limit.stop {
+                stop.cancel();
+                limit.stopped = true;
+            }
+            // Otherwise `advance` drains the remaining rows without decoding them.
             break;
         }
         result_set

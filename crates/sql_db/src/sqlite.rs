@@ -296,10 +296,15 @@ fn run_batch(
             columns,
             ..ResultSet::default()
         };
+        let read_only = statement.readonly();
         let mut rows = statement.raw_query();
         while let Some(row) = rows.next()? {
             if result_set.rows.len() >= max_rows {
                 result_set.truncated = true;
+                // Stepping is the work; a statement that only reads can stop here.
+                if read_only {
+                    break;
+                }
                 continue;
             }
             let values = (0..width)

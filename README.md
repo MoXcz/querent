@@ -42,7 +42,7 @@ sqlserver://<client_id>%40<tenant_id>:<secret>@xxxx.datawarehouse.fabric.microso
 sqlserver://report:<password>@db1/SQLEXPRESS?database=sales&TrustServerCertificate=true
 ```
 
-A bare server name also works; then type the database name in the tab's database field.
+A bare server name also works; then pick the database in the tab's database picker.
 
 | Authentication / fedauth | Sign-in |
 | --- | --- |
@@ -64,7 +64,9 @@ Browser sign-in opens your browser on the first connect and shows a notification
 
 Connections are saved as fields in `~/.config/sql-editor/connections.toml`. Passwords, client secrets, key passphrases and Entra sign-ins go to the OS keychain (Keychain on macOS, Credential Manager on Windows, a Secret Service such as GNOME Keyring or KeePassXC on Linux). Without a keychain they go to `~/.config/sql-editor/secrets.toml`, readable only by you. Secrets that older versions wrote into `connections.toml` move out on the first start.
 
-Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
+Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. The tab's database picker lists the same databases; type to filter it, or type a name that is not listed and pick "Use …". Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
+
+Results show above the grid a button per result set, Messages, and Export CSV. With a row limit set (Settings), a single read-only statement stops on the server once the limit is reached; a script with several statements, a statement calling a function that is not a common built-in (it might write), or a run inside an open transaction still reads to the end and only keeps the first rows, so nothing it would write is cut short.
 
 While typing, a menu offers tables after `from` and `join`, the columns of `alias.`, and keywords; hover over a table or column to see its columns or type. The tables and columns are read once per database in the background. PostgreSQL, SQLite and Snowflake tabs also underline syntax errors.
 
@@ -101,7 +103,7 @@ Keys:
 | `Ctrl+,` | Settings (theme, vim mode, explorer grouping); also the gear in the status bar |
 | `Ctrl+Shift+H` | Query history for the current connection |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
-| `Ctrl+N` / `Ctrl+P` with the completion menu open | Next / previous suggestion (`Ctrl+N` opens a tab only when no menu is open) |
+| `Ctrl+N` / `Ctrl+P` with the completion menu, command palette or query history open | Next / previous item (`Ctrl+N` opens a tab only when no menu is open) |
 | `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 
