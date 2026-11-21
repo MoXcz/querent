@@ -66,7 +66,7 @@ Connections are saved as fields in `~/.config/querent/connections.toml`. Passwor
 
 Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. The tab's database picker lists the same databases; type to filter it, or type a name that is not listed and pick "Use …". Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 
-Results show above the grid a button per result set, Messages, and Export CSV. With a row limit set (Settings), a single read-only statement stops on the server once the limit is reached; a script with several statements, a statement calling a function that is not a common built-in (it might write), or a run inside an open transaction still reads to the end and only keeps the first rows, so nothing it would write is cut short.
+Results show above the grid a button per result set, Messages, and Export CSV. When SQL Server or PostgreSQL reports where a statement failed, the error starts with the tab's line number and a button jumps to that line. With a row limit set (Settings), a single read-only statement stops on the server once the limit is reached; a script with several statements, a statement calling a function that is not a common built-in (it might write), or a run inside an open transaction still reads to the end and only keeps the first rows, so nothing it would write is cut short.
 
 While typing, a menu offers tables after `from` and `join`, the columns of `alias.`, and keywords; hover over a table or column to see its columns or type. The tables and columns are read once per database in the background. PostgreSQL, SQLite and Snowflake tabs also underline syntax errors.
 
@@ -81,6 +81,8 @@ pass_connection = true   # send the connection, including its password, to the s
 ```
 
 The status line shows the server's state; a server that stops restarts on next use.
+
+Two more commands live in the command palette: "Refresh schema" reads a database's tables and columns again for completion, and "Sign out of Entra ID" forgets a connection's browser sign-in so the next run asks again.
 
 A tab can hold a `.sql` file: its title is the file name, with `*` while it has changes that are not saved, and closing it then asks first. Files are read as UTF-8, as UTF-16 when they start with a byte order mark (as SQL Server Management Studio writes them), or as Windows-1252 when they are not valid UTF-8. They are always saved as UTF-8.
 

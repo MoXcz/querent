@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::RopeExt as _;
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::table::DataTable;
 use gpui_kit::component::{
@@ -49,6 +50,15 @@ impl QueryTab {
         cx.notify();
     }
 
+    /// Puts the cursor at the start of a 1-based line of the editor.
+    fn go_to_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| {
+            let offset = editor.text().line_start_offset(line.saturating_sub(1));
+            editor.set_selected_range(offset..offset, cx);
+            editor.focus(window, cx);
+        });
+    }
+
     pub(super) fn select_result_set(&mut self, index: usize, cx: &mut Context<Self>) {
         self.show_messages = false;
         let QueryState::Done { output, .. } = &self.state else {
@@ -74,7 +84,7 @@ impl QueryTab {
             return;
         }
         self.without_row_limit = true;
-        self.start_query(run.sql, window, cx);
+        self.start_query(run.sql, run.lines_before, window, cx);
     }
 
     pub(super) fn export_csv(&mut self, _: &ExportCsv, _: &mut Window, cx: &mut Context<Self>) {
@@ -219,11 +229,22 @@ impl QueryTab {
                     elapsed.as_secs_f64()
                 ))
                 .into_any_element(),
-            QueryState::Failed { message } => div()
+            QueryState::Failed { message, line } => v_flex()
                 .size_full()
                 .p_3()
-                .text_color(cx.theme().danger)
-                .child(message.clone())
+                .gap_2()
+                .child(div().text_color(cx.theme().danger).child(message.clone()))
+                .children(line.map(|line| {
+                    h_flex().child(
+                        Button::new("go-to-error-line")
+                            .ghost()
+                            .xsmall()
+                            .label(format!("Go to line {line}"))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.go_to_line(line, window, cx);
+                            })),
+                    )
+                }))
                 .into_any_element(),
             QueryState::Done { output, failed, .. } if output.result_sets.is_empty() && !failed => {
                 div()

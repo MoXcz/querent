@@ -66,6 +66,32 @@ pub enum Authentication {
     },
 }
 
+impl Authentication {
+    /// The Entra account this method signs in with a browser or a device code.
+    #[must_use]
+    pub fn sign_in_request(&self) -> Option<crate::entra::SignInRequest> {
+        match self {
+            Self::EntraInteractive {
+                tenant_id,
+                user,
+                client_id,
+                device_code,
+            } => Some(crate::entra::SignInRequest {
+                tenant_id: tenant_id.clone(),
+                user: user.clone(),
+                client_id: client_id.clone(),
+                device_code: *device_code,
+            }),
+            Self::AzureCli
+            | Self::Integrated
+            | Self::ServicePrincipal { .. }
+            | Self::Password { .. }
+            | Self::None
+            | Self::KeyPair { .. } => None,
+        }
+    }
+}
+
 impl std::fmt::Debug for Authentication {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -297,19 +323,24 @@ impl TdsConnection {
                 if cancel.token.is_cancelled() {
                     return Err(QueryError::Cancelled);
                 }
+                let lines = crate::lines_before(sql, batch.start);
                 let Some(batch) = sql.get(batch) else {
                     continue;
                 };
                 // The stop at the limit cancels through the run's own handle, which
                 // would then stop the batches after this one too: scripts read to the end.
                 self.run_batch(batch, cancel, max_rows, StopAtLimit::Never, output)
-                    .await?;
+                    .await
+                    .map_err(|error| error.after_lines(lines))?;
             }
             return Ok(());
         };
+        // The server counts lines from the batch it got, which starts after any blank lines.
+        let lines = crate::lines_before(sql, batch.start);
         let batch = sql.get(batch.clone()).unwrap_or(sql);
         self.run_batch(batch, cancel, max_rows, StopAtLimit::LoneRead, output)
             .await
+            .map_err(|error| error.after_lines(lines))
     }
 
     /// Runs one batch and adds its result sets, row count and messages to `output`.
@@ -407,17 +438,9 @@ async fn login(authentication: &Authentication) -> Result<Login, QueryError> {
             });
         }
         Authentication::Integrated => return Ok(Login::Integrated),
-        Authentication::EntraInteractive {
-            tenant_id,
-            user,
-            client_id,
-            device_code,
-        } => {
-            let request = crate::entra::SignInRequest {
-                tenant_id: tenant_id.clone(),
-                user: user.clone(),
-                client_id: client_id.clone(),
-                device_code: *device_code,
+        Authentication::EntraInteractive { .. } => {
+            let Some(request) = authentication.sign_in_request() else {
+                return Err(QueryError::Auth("no sign-in to start".to_owned()));
             };
             return crate::entra::access_token(&request).await.map(Login::Token);
         }
@@ -583,7 +606,22 @@ fn error_numbers(error: &TdsError) -> Vec<u32> {
 fn map_error(error: TdsError) -> QueryError {
     match error {
         TdsError::OperationCancelledError(_) => QueryError::Cancelled,
-        TdsError::SqlServerError { .. } => QueryError::Server(error.to_string()),
+        TdsError::SqlServerError { ref diagnostics } => {
+            // Inside a procedure the server counts lines of the procedure, not of the batch.
+            let line = diagnostics
+                .errors
+                .iter()
+                .filter(|info| info.proc_name.as_deref().is_none_or(str::is_empty))
+                .filter_map(|info| info.line_number)
+                .find_map(|line| usize::try_from(line).ok().filter(|line| *line > 0));
+            match line {
+                Some(line) => QueryError::ServerAt {
+                    message: error.to_string(),
+                    line,
+                },
+                None => QueryError::Server(error.to_string()),
+            }
+        }
         other => QueryError::ConnectionLost(other.to_string()),
     }
 }

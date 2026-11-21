@@ -198,6 +198,19 @@ pub async fn access_token(request: &SignInRequest) -> Result<String, QueryError>
     Ok(store(&mut account, &key, tokens).await)
 }
 
+/// Forgets the account's tokens, in memory and where they are stored, so the
+/// next connect signs in again.
+pub async fn sign_out(request: &SignInRequest) {
+    let key = request.cache_key();
+    let account = account(&key);
+    let mut account = account.lock().await;
+    account.token = None;
+    account.refresh_token = None;
+    // Nothing is left to read, so the next connect need not look.
+    account.loaded = true;
+    save_refresh_token(&key, None).await;
+}
+
 async fn store(account: &mut Account, key: &str, tokens: TokenResponse) -> String {
     account.token = Some(CachedToken {
         access_token: tokens.access_token.clone(),

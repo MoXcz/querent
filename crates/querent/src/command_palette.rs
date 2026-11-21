@@ -12,7 +12,8 @@ use gpui_kit::{
 };
 
 use crate::query_tab::{
-    CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
+    CancelQuery, ExportCsv, FormatSql, RefreshSchema, RunAll, RunQuery, SaveFile, SaveFileAs,
+    SignOut, ToggleVimMode,
 };
 use crate::settings;
 use crate::themes::{self, SelectTheme};
@@ -86,6 +87,18 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
         command("Tabs", "Close tab", &[], CloseTab),
         command("Tabs", "Next tab", &[], NextTab),
         command("Tabs", "Previous tab", &[], PreviousTab),
+        command(
+            "Query",
+            "Refresh schema",
+            &["reload", "tables", "columns", "completion"],
+            RefreshSchema,
+        ),
+        command(
+            "Connections",
+            "Sign out of Entra ID",
+            &["logout", "account", "browser"],
+            SignOut,
+        ),
         command(
             "Connections",
             "Add connection",

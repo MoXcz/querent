@@ -13,7 +13,8 @@ use gpui_kit::component::input::{
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::TableState;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, resizable_panel,
+    v_flex, v_resizable,
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
@@ -57,7 +58,11 @@ actions!(
         /// Save the tab to its `.sql` file, asking for one the first time.
         SaveFile,
         /// Save the tab to a `.sql` file chosen now.
-        SaveFileAs
+        SaveFileAs,
+        /// Load the database's tables and columns again for completion and hover.
+        RefreshSchema,
+        /// Forget this connection's Entra sign-in, so the next run asks again.
+        SignOut
     ]
 );
 
@@ -95,12 +100,16 @@ enum QueryState {
     },
     Failed {
         message: SharedString,
+        /// The line of the tab the server blames, 1-based.
+        line: Option<usize>,
     },
 }
 
 #[derive(Clone)]
 struct RunRecord {
     sql: String,
+    /// Lines of the tab before the text that was sent, to place a server's error line.
+    lines_before: usize,
     connection: SharedString,
     database: String,
 }
@@ -688,8 +697,11 @@ impl QueryTab {
             Some((sql, range)) => {
                 let text = self.editor.read(cx).value();
                 self.ran_lines = Some(line_span(&text, &range));
+                let lines_before = text
+                    .get(..range.start)
+                    .map_or(0, |before| before.matches('\n').count());
                 self.flash_run_range(range, cx);
-                self.start_query(sql, window, cx);
+                self.start_query(sql, lines_before, window, cx);
             }
             None => self.show_error("No statement under the cursor.".into(), cx),
         }
@@ -702,14 +714,17 @@ impl QueryTab {
         }
         self.ran_lines = Some("all".into());
         self.flash_run_range(0..sql.len(), cx);
-        self.start_query(sql, window, cx);
+        self.start_query(sql, 0, window, cx);
     }
 
     fn show_error(&mut self, message: SharedString, cx: &mut Context<Self>) {
         if matches!(self.state, QueryState::Running { .. }) {
             return;
         }
-        self.state = QueryState::Failed { message };
+        self.state = QueryState::Failed {
+            message,
+            line: None,
+        };
         cx.notify();
     }
 
@@ -720,7 +735,13 @@ impl QueryTab {
         }
     }
 
-    fn start_query(&mut self, sql: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn start_query(
+        &mut self,
+        sql: String,
+        lines_before: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.stop_running_query(cx);
         self.export_notice = None;
         let limit = self.row_limit(cx);
@@ -736,6 +757,7 @@ impl QueryTab {
         let fields = self.connection_fields(cx);
         let run = RunRecord {
             sql: sql.clone(),
+            lines_before,
             connection: fields.connection.unwrap_or_default(),
             database: fields.database,
         };
@@ -851,13 +873,22 @@ impl QueryTab {
                 // A lost connection is not reused; any other error leaves it usable.
                 self.connection =
                     (!matches!(error, QueryError::ConnectionLost(_))).then_some(connection);
+                let line = error
+                    .line()
+                    .zip(run.as_ref())
+                    .map(|(line, run)| run.lines_before + line);
+                let message = match line {
+                    Some(line) => format!("Line {line}: {error}"),
+                    None => error.to_string(),
+                };
                 if output.result_sets.is_empty() && output.messages.is_empty() {
                     QueryState::Failed {
-                        message: error.to_string().into(),
+                        message: message.into(),
+                        line,
                     }
                 } else {
                     // Earlier statements answered: keep their results next to the error.
-                    output.messages.push(error.to_string());
+                    output.messages.push(message);
                     let last = output.result_sets.len().saturating_sub(1);
                     self.show_result_set(&output, last, cx);
                     self.show_messages = true;
@@ -872,12 +903,14 @@ impl QueryTab {
                 self.connection = None;
                 QueryState::Failed {
                     message: error.to_string().into(),
+                    line: None,
                 }
             }
             Err(error) => {
                 self.connection = None;
                 QueryState::Failed {
                     message: format!("query task failed: {error}").into(),
+                    line: None,
                 }
             }
         };
@@ -935,6 +968,30 @@ impl QueryTab {
             file: self.file().map(std::path::Path::to_path_buf),
             modified: self.is_modified(),
         }
+    }
+
+    fn sign_out(&mut self, _: &SignOut, window: &mut Window, cx: &mut Context<Self>) {
+        let request = self
+            .connection_fields(cx)
+            .connection
+            .and_then(|name| connections::find(cx, &name))
+            .and_then(|saved| saved.settings.authentication.sign_in_request());
+        let Some(request) = request else {
+            window.push_notification(
+                "This connection does not use the Entra browser sign-in.",
+                cx,
+            );
+            return;
+        };
+        // A running query keeps its connection and token; the next run opens a new one.
+        if !self.is_running() {
+            self.connection = None;
+        }
+        tokio_bridge::spawn(cx, async move { sql_db::entra::sign_out(&request).await }).detach();
+        window.push_notification(
+            "Signed out. The next run on this connection asks you to sign in again.",
+            cx,
+        );
     }
 
     fn cancel_query(&mut self, _: &CancelQuery, _: &mut Window, cx: &mut Context<Self>) {
@@ -1096,6 +1153,8 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::format_sql))
             .on_action(cx.listener(Self::save_file))
             .on_action(cx.listener(Self::save_file_as))
+            .on_action(cx.listener(Self::refresh_schema))
+            .on_action(cx.listener(Self::sign_out))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))

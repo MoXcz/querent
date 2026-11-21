@@ -10,7 +10,7 @@ use gpui_kit::{App, Context, Window};
 use sql_db::Dialect;
 use sql_text::format::FormatDialect;
 
-use super::{FormatSql, QueryTab, ServerView};
+use super::{FormatSql, QueryTab, RefreshSchema, ServerView};
 use crate::connections;
 use crate::lsp_servers;
 use crate::settings;
@@ -106,6 +106,24 @@ impl QueryTab {
             }
             cx.notify();
         });
+    }
+
+    pub(super) fn refresh_schema(
+        &mut self,
+        _: &RefreshSchema,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let fields = self.connection_fields(cx);
+        let Some(connection) = fields.connection else {
+            window.push_notification("Pick a connection first.", cx);
+            return;
+        };
+        crate::schema_cache::invalidate(cx, &connection, Some(&fields.database));
+        window.push_notification(
+            "The next completion or hover reads the tables and columns again.",
+            cx,
+        );
     }
 
     /// Closes this tab's document on the language server it was sent to.

@@ -178,7 +178,7 @@ impl PgConnection {
                 if matches!(mapped, QueryError::Cancelled) && !cancel.token.is_cancelled() {
                     Err(QueryError::Server(error.to_string()))
                 } else {
-                    Err(mapped)
+                    Err(located(mapped, &error, sql))
                 }
             }
         }
@@ -614,6 +614,29 @@ fn drain(notices: &mut mpsc::UnboundedReceiver<String>) -> Vec<String> {
         messages.push(message);
     }
     messages
+}
+
+/// Adds the line PostgreSQL points at: it reports a character position in the sent text.
+fn located(mapped: QueryError, error: &tokio_postgres::Error, sql: &str) -> QueryError {
+    let position = error
+        .as_db_error()
+        .and_then(tokio_postgres::error::DbError::position);
+    match (mapped, position) {
+        (
+            QueryError::Server(message),
+            Some(tokio_postgres::error::ErrorPosition::Original(position)),
+        ) => {
+            let characters = usize::try_from(*position).unwrap_or(1).saturating_sub(1);
+            let line = sql
+                .chars()
+                .take(characters)
+                .filter(|character| *character == '\n')
+                .count()
+                + 1;
+            QueryError::ServerAt { message, line }
+        }
+        (mapped, _) => mapped,
+    }
 }
 
 fn map_error(error: &tokio_postgres::Error) -> QueryError {

@@ -35,10 +35,50 @@ pub enum QueryError {
     Connect(String),
     #[error("{0}")]
     Server(String),
+    /// A server error that names a line, 1-based, of the text that was sent.
+    #[error("{message}")]
+    ServerAt { message: String, line: usize },
     #[error("connection lost: {0}")]
     ConnectionLost(String),
     #[error("query cancelled")]
     Cancelled,
+}
+
+impl QueryError {
+    /// The line of the sent text the server blames, 1-based.
+    #[must_use]
+    pub fn line(&self) -> Option<usize> {
+        match self {
+            Self::ServerAt { line, .. } => Some(*line),
+            Self::Auth(_)
+            | Self::Connect(_)
+            | Self::Server(_)
+            | Self::ConnectionLost(_)
+            | Self::Cancelled => None,
+        }
+    }
+
+    /// The same error for text that started `lines` lines into what was sent.
+    #[must_use]
+    pub(crate) fn after_lines(self, lines: usize) -> Self {
+        match self {
+            Self::ServerAt { message, line } => Self::ServerAt {
+                message,
+                line: line + lines,
+            },
+            other @ (Self::Auth(_)
+            | Self::Connect(_)
+            | Self::Server(_)
+            | Self::ConnectionLost(_)
+            | Self::Cancelled) => other,
+        }
+    }
+}
+
+/// How many line breaks come before byte `offset` of `text`.
+pub(crate) fn lines_before(text: &str, offset: usize) -> usize {
+    text.get(..offset)
+        .map_or(0, |before| before.matches('\n').count())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,6 +208,22 @@ impl CancelHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_line_moves_with_the_text_before_it() {
+        let error = QueryError::ServerAt {
+            message: "bad".to_owned(),
+            line: 2,
+        };
+        let sql = "select 1\nGO\n\nselect\n  oops";
+        let batch_start = sql.find("select\n").unwrap();
+        assert_eq!(lines_before(sql, batch_start), 3);
+        assert_eq!(
+            error.after_lines(lines_before(sql, batch_start)).line(),
+            Some(5)
+        );
+        assert_eq!(QueryError::Cancelled.after_lines(3).line(), None);
+    }
 
     #[test]
     fn a_result_set_is_full_at_the_row_limit_or_the_memory_budget() {

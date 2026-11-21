@@ -89,6 +89,51 @@ async fn check_partial_output(variable: &str) {
     assert_eq!(next.result_sets.len(), 1);
 }
 
+/// The error names the line of the sent text, counted from its first line.
+#[expect(clippy::unwrap_used, reason = "a test helper")]
+async fn check_error_line(variable: &str, sql: &str, line: usize) {
+    let text = std::env::var(variable).unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    let error = connection
+        .execute(sql, &CancelHandle::new())
+        .await
+        .unwrap_err();
+    assert_eq!(error.line(), Some(line), "{error}");
+}
+
+#[tokio::test]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
+async fn sql_server_errors_name_their_line() {
+    let missing = "\n\nselect 1\nfrom querent_no_such_table";
+    check_error_line("QUERENT_SQLSERVER", missing, 3).await;
+    let second_batch = "select 1\nGO\n\nselect *\nfrom querent_no_such_table";
+    check_error_line("QUERENT_SQLSERVER", second_batch, 4).await;
+    // An error raised inside a procedure names a line of the procedure, so none is reported.
+    let text = std::env::var("QUERENT_SQLSERVER").unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    let in_procedure = "\n\n\nexec sp_executesql N'select * from querent_no_such_table'";
+    let error = connection
+        .execute(in_procedure, &CancelHandle::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error.line(), None | Some(4)), "{error:?}");
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
+async fn postgres_errors_name_their_line() {
+    let missing = "select 1;\nselect *\nfrom querent_no_such_table";
+    check_error_line("QUERENT_PG_URL", missing, 3).await;
+}
+
 #[tokio::test]
 #[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
 async fn sql_server_keeps_results_from_before_an_error() {
