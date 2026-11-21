@@ -109,7 +109,7 @@ impl SnowflakeConnection {
         cancel: &CancelHandle,
     ) -> Result<QueryOutput, QueryError> {
         let mut output = QueryOutput::default();
-        for range in sql_text::statements(sql) {
+        for range in sql_text::split(sql, sql_text::Delimiters::Semicolon) {
             let Some(statement) = sql.get(range) else {
                 continue;
             };

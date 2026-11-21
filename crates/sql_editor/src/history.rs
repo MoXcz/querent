@@ -45,8 +45,15 @@ impl Global for QueryHistory {}
 
 pub fn init(cx: &mut App) {
     let path = settings::config_dir(cx).map(|directory| directory.join(HISTORY_FILE));
-    let entries = path.as_deref().map(load).unwrap_or_default();
+    let (entries, overgrown) = path.as_deref().map(load).unwrap_or_default();
     let writer = path.and_then(spawn_writer);
+    // Appends alone never shrink the file; without this it grows across sessions.
+    if overgrown
+        && let Some(writer) = &writer
+        && writer.send(Write::Rewrite(entries.clone())).is_err()
+    {
+        tracing::warn!("query history writer stopped");
+    }
     cx.set_global(QueryHistory { entries, writer });
 }
 
@@ -133,13 +140,14 @@ pub fn age(at: u64, now: u64) -> String {
     }
 }
 
-fn load(path: &Path) -> Vec<HistoryEntry> {
+/// The newest [`MAX_ENTRIES`] runs, and whether the file holds more than that.
+fn load(path: &Path) -> (Vec<HistoryEntry>, bool) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), false),
         Err(error) => {
             tracing::warn!(path = %path.display(), %error, "cannot read query history");
-            return Vec::new();
+            return (Vec::new(), false);
         }
     };
     // A line cut by a crash is skipped, not fatal.
@@ -149,7 +157,7 @@ fn load(path: &Path) -> Vec<HistoryEntry> {
         .collect();
     let excess = entries.len().saturating_sub(MAX_ENTRIES);
     entries.drain(..excess);
-    entries
+    (entries, excess > 0)
 }
 
 fn append(path: &Path, entry: &HistoryEntry) -> std::io::Result<()> {
@@ -213,8 +221,37 @@ mod tests {
             .unwrap()
             .write_all(b"{\"at\":2,\"conn")
             .unwrap();
-        let loaded = load(&path);
+        let (loaded, overgrown) = load(&path);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(loaded, vec![entry]);
+        assert!(!overgrown);
+    }
+
+    #[test]
+    fn an_overgrown_file_is_reported_for_trimming() {
+        let path = std::env::temp_dir().join(format!(
+            "sql-editor-history-long-{}.jsonl",
+            std::process::id()
+        ));
+        let entries: Vec<HistoryEntry> = (0..MAX_ENTRIES as u64 + 500)
+            .map(|at| HistoryEntry {
+                at,
+                connection: "c".to_owned(),
+                database: String::new(),
+                sql: "select 1".to_owned(),
+                elapsed_ms: 1,
+                rows: None,
+                succeeded: true,
+            })
+            .collect();
+        rewrite_file(&path, &entries).unwrap();
+        let (loaded, overgrown) = load(&path);
+        assert!(overgrown);
+        assert_eq!(loaded.len(), MAX_ENTRIES);
+        assert_eq!(loaded.first().map(|entry| entry.at), Some(500));
+        rewrite_file(&path, &loaded).unwrap();
+        let (_, overgrown) = load(&path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(!overgrown);
     }
 }

@@ -44,6 +44,29 @@ async fn sql_server_stops_at_the_limit() {
 }
 
 #[tokio::test]
+#[ignore = "needs a SQL Server; set SQL_EDITOR_SQLSERVER"]
+async fn sql_server_runs_go_batches_and_unseparated_statements() {
+    let text = std::env::var("SQL_EDITOR_SQLSERVER").unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    connection.set_max_rows(10);
+    let script = "select 1\nGO\nselect 2\ngo\n";
+    let output = connection
+        .execute(script, &CancelHandle::new())
+        .await
+        .unwrap();
+    assert_eq!(output.result_sets.len(), 2);
+    // No `;` between them: the stop at the limit must not drop the second statement.
+    let two = "select top 1000 a.object_id from sys.all_columns a select 2";
+    let output = connection.execute(two, &CancelHandle::new()).await.unwrap();
+    assert_eq!(output.result_sets.len(), 2);
+    assert!(output.result_sets[0].truncated);
+}
+
+#[tokio::test]
 #[ignore = "needs a PostgreSQL server; set SQL_EDITOR_PG_URL"]
 async fn postgres_stops_at_the_limit() {
     check(

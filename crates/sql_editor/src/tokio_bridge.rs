@@ -35,6 +35,16 @@ where
     })
 }
 
+/// Blocks this thread until `future` ends or `limit` passes. Only for app
+/// quit, where nothing else will run the tasks that send a cancel request.
+pub fn block_on_for(cx: &App, limit: std::time::Duration, future: impl Future<Output = ()>) {
+    let runtime = &cx.global::<TokioRuntime>().0;
+    let finished = runtime.block_on(async { tokio::time::timeout(limit, future).await });
+    if finished.is_err() {
+        tracing::warn!("gave up waiting for running queries to stop");
+    }
+}
+
 struct AbortOnDrop(tokio::task::AbortHandle);
 
 impl Drop for AbortOnDrop {

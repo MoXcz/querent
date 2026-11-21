@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -22,6 +22,7 @@ use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab};
 use crate::session::{self, Session};
+use crate::tokio_bridge;
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 
@@ -76,6 +77,7 @@ impl Workspace {
             _servers_observation: cx.observe_global::<LspServers>(|_, cx| cx.notify()),
             _quit_subscription: cx.on_app_quit(|workspace, cx| {
                 session::save_now(&workspace.session(cx), cx);
+                workspace.stop_queries_for_quit(cx);
                 async {}
             }),
             session_save: None,
@@ -86,7 +88,9 @@ impl Workspace {
         let closing = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
             if let Some(workspace) = closing.upgrade() {
-                session::save_now(&workspace.read(cx).session(cx), cx);
+                let workspace = workspace.read(cx);
+                session::save_now(&workspace.session(cx), cx);
+                workspace.stop_queries_for_quit(cx);
             }
             true
         });
@@ -128,6 +132,26 @@ impl Workspace {
         }
         self.activate(active.min(self.tabs.len().saturating_sub(1)), window, cx);
         self.last_saved = Some(self.session(cx));
+    }
+
+    /// Cancels every running query on its server and waits briefly for the
+    /// cancels to land: ending the process alone leaves PostgreSQL and
+    /// Snowflake statements running.
+    fn stop_queries_for_quit(&self, cx: &App) {
+        let mut finished: Vec<_> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.view.read(cx).cancel_for_quit())
+            .collect();
+        if finished.is_empty() {
+            return;
+        }
+        tokio_bridge::block_on_for(cx, QUIT_CANCEL_WAIT, async move {
+            for run in &mut finished {
+                // An error means the sender is gone: the run has ended.
+                while run.changed().await.is_ok() {}
+            }
+        });
     }
 
     fn session(&self, cx: &App) -> Session {
@@ -267,6 +291,22 @@ impl Workspace {
             ExplorerEvent::AddConnection => Self::open_connection_dialog(None, window, cx),
             ExplorerEvent::EditConnection(saved) => {
                 Self::open_connection_dialog(Some(saved.clone()), window, cx);
+            }
+            ExplorerEvent::DeleteConnection(name) => {
+                let name = name.clone();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let name = name.clone();
+                    alert
+                        .confirm()
+                        .title(format!("Delete connection {name}?"))
+                        .description("Its saved password or secret is deleted too.")
+                        .ok_text("Delete")
+                        .ok_variant(ButtonVariant::Danger)
+                        .on_ok(move |_, _, cx| {
+                            connections::remove(cx, &name);
+                            true
+                        })
+                });
             }
         }
     }
@@ -579,6 +619,9 @@ impl Render for Workspace {
             .child(self.render_status_bar(cx))
     }
 }
+
+/// The longest a quit waits for running queries to stop on their servers.
+const QUIT_CANCEL_WAIT: Duration = Duration::from_secs(3);
 
 /// Wait after a change before the session is written.
 const SESSION_SAVE_DELAY: Duration = Duration::from_secs(2);

@@ -44,6 +44,8 @@ pub enum ExplorerEvent {
     InsertText(String),
     AddConnection,
     EditConnection(SavedConnection),
+    /// Ask before deleting: the connection's stored secret goes with it.
+    DeleteConnection(SharedString),
 }
 
 impl EventEmitter<ExplorerEvent> for ObjectExplorer {}
@@ -114,6 +116,8 @@ pub struct ObjectExplorer {
     objects: HashMap<(SharedString, SharedString), Load<Arc<Vec<CatalogObject>>>>,
     columns: HashMap<ObjectKey, Load<Arc<Vec<ColumnInfo>>>>,
     catalog_connections: HashMap<SharedString, CatalogConnection>,
+    /// Bumped when the connections change, so a load that started before is ignored.
+    generation: u64,
     rows: Vec<Row>,
     _subscriptions: Vec<Subscription>,
 }
@@ -137,6 +141,7 @@ impl ObjectExplorer {
             objects: HashMap::new(),
             columns: HashMap::new(),
             catalog_connections: HashMap::new(),
+            generation: 0,
             rows: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -151,6 +156,7 @@ impl ObjectExplorer {
         self.objects.clear();
         self.columns.clear();
         self.catalog_connections.clear();
+        self.generation += 1;
         cx.notify();
     }
 
@@ -229,6 +235,7 @@ impl ObjectExplorer {
         };
         let catalog = self.catalog_connection(connection);
         let connection_name = connection.clone();
+        let generation = self.generation;
         let task = tokio_bridge::spawn(cx, async move {
             let started = std::time::Instant::now();
             tracing::debug!(connection = %connection_name, "catalog query queued");
@@ -257,8 +264,12 @@ impl ObjectExplorer {
                 Err(error) => Err(SharedString::from(format!("catalog task failed: {error}"))),
             };
             let updated = this.update(cx, |this, cx| {
-                done(this, result, cx);
-                cx.notify();
+                // The connections changed meanwhile: this answer may describe
+                // another server.
+                if this.generation == generation {
+                    done(this, result, cx);
+                    cx.notify();
+                }
             });
             if let Err(error) = updated {
                 tracing::debug!(%error, "explorer closed before the catalog query finished");
@@ -686,7 +697,9 @@ impl ObjectExplorer {
                 }
                 menu.item(item(
                     "Delete connection",
-                    Box::new(move |_, cx| connections::remove(cx, &delete_name)),
+                    Box::new(move |_, cx| {
+                        cx.emit(ExplorerEvent::DeleteConnection(delete_name.clone()));
+                    }),
                 ))
             }
             NodeId::Database(connection, database) => {

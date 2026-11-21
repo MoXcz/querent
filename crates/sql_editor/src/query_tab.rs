@@ -83,6 +83,8 @@ enum QueryState {
         run: RunRecord,
         /// Cancel was pressed; the server has not confirmed the stop yet.
         cancelling: bool,
+        /// Closes when the run's task ends, so quitting can wait for a cancel to land.
+        finished: tokio::sync::watch::Receiver<()>,
     },
     /// Stopped on request.
     Cancelled {
@@ -810,6 +812,19 @@ impl QueryTab {
         }
     }
 
+    /// Asks the server to stop the running query as the app quits. The
+    /// receiver closes once the run has ended and the cancel has been sent.
+    pub fn cancel_for_quit(&self) -> Option<tokio::sync::watch::Receiver<()>> {
+        let QueryState::Running {
+            cancel, finished, ..
+        } = &self.state
+        else {
+            return None;
+        };
+        cancel.cancel();
+        Some(finished.clone())
+    }
+
     fn connection_config(&self, cx: &Context<Self>) -> Result<ConnectionConfig, SharedString> {
         let ConnectionFields {
             connection,
@@ -911,9 +926,11 @@ impl QueryTab {
                 .is_ok_and(|connection| connection.matches(&config))
         });
         let cancel = CancelHandle::new();
+        let (running, finished) = tokio::sync::watch::channel(());
         let query = tokio_bridge::spawn(cx, {
             let cancel = cancel.clone();
             async move {
+                let _running = running;
                 let connection = if let Some(connection) = reusable {
                     connection
                 } else {
@@ -937,6 +954,7 @@ impl QueryTab {
             cancel,
             run,
             cancelling: false,
+            finished,
         };
         self.query_generation += 1;
         let generation = self.query_generation;

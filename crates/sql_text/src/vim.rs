@@ -197,6 +197,10 @@ struct Visual {
 }
 
 const HALF_PAGE_LINES: usize = 15;
+/// Counts above this are typos; unbounded, `99999999999w` would loop for minutes.
+const MAX_COUNT: usize = 10_000;
+/// A paste with a count never builds more text than this.
+const MAX_PASTE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct Vim {
@@ -852,7 +856,8 @@ impl Vim {
         let Some(register) = self.register.clone() else {
             return Vec::new();
         };
-        let content = register.text.repeat(count);
+        let fits = MAX_PASTE_BYTES / register.text.len().max(1);
+        let content = register.text.repeat(count.min(fits.max(1)));
         if let Some(visual) = self.visual {
             let (range, _) = self.visual_range(text);
             self.visual = None;
@@ -972,7 +977,7 @@ fn parse(keys: &[Key], visual: bool) -> Parse {
         let inner_count = parse_count(keys, &mut index);
         let count = match (count, inner_count) {
             (None, None) => None,
-            (outer, inner) => Some(outer.unwrap_or(1) * inner.unwrap_or(1)),
+            (outer, inner) => Some((outer.unwrap_or(1) * inner.unwrap_or(1)).min(MAX_COUNT)),
         };
         let Some(&next) = keys.get(index) else {
             return Parse::Incomplete;
@@ -1102,7 +1107,8 @@ fn parse_count(keys: &[Key], index: &mut usize) -> Option<usize> {
             count
                 .unwrap_or(0)
                 .saturating_mul(10)
-                .saturating_add(value as usize),
+                .saturating_add(value as usize)
+                .min(MAX_COUNT),
         );
         *index += 1;
     }
@@ -1781,6 +1787,15 @@ fn toggle_case(text: &str, range: Range<usize>, cursor_after: usize) -> Vec<Edit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huge_counts_do_not_panic_or_hang() {
+        let mut vim = Vim::default();
+        let (text, _) = run_with(&mut vim, "a|b\n", "yy99999999999999999999p");
+        assert!(text.len() <= MAX_PASTE_BYTES + 8);
+        run("|one two", "99999999999999999999w", "one tw|o");
+        run("|one two", "9999999999d9999999999w", "|");
+    }
 
     /// `|` marks the cursor in `before` and `after`.
     fn run(before: &str, keys: &str, after: &str) {

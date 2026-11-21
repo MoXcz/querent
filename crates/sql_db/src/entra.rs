@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -113,7 +113,14 @@ fn non_empty(text: &str) -> Option<&str> {
 #[derive(Clone)]
 struct CachedToken {
     access_token: String,
-    expires_at: Instant,
+    /// Wall-clock: `Instant` stands still while the machine sleeps.
+    expires_at: SystemTime,
+}
+
+impl CachedToken {
+    fn is_fresh(&self, now: SystemTime) -> bool {
+        self.expires_at > now + EXPIRY_MARGIN
+    }
 }
 
 #[derive(Default)]
@@ -142,7 +149,7 @@ pub async fn access_token(request: &SignInRequest) -> Result<String, QueryError>
     let account = account(&key);
     let mut account = account.lock().await;
     if let Some(token) = &account.token
-        && token.expires_at > Instant::now() + EXPIRY_MARGIN
+        && token.is_fresh(SystemTime::now())
     {
         return Ok(token.access_token.clone());
     }
@@ -182,8 +189,8 @@ pub async fn access_token(request: &SignInRequest) -> Result<String, QueryError>
 async fn store(account: &mut Account, key: &str, tokens: TokenResponse) -> String {
     account.token = Some(CachedToken {
         access_token: tokens.access_token.clone(),
-        // Capped, so an absurd value cannot overflow `Instant`.
-        expires_at: Instant::now() + Duration::from_secs(tokens.expires_in.min(86_400)),
+        // Capped, so an absurd value cannot overflow the clock.
+        expires_at: SystemTime::now() + Duration::from_secs(tokens.expires_in.min(86_400)),
     });
     if let Some(refresh_token) = tokens.refresh_token
         && account.refresh_token.as_deref() != Some(refresh_token.as_str())
@@ -572,6 +579,19 @@ mod tests {
             denied.to_string(),
             "sign-in failed: access_denied: User cancelled"
         );
+    }
+
+    #[test]
+    fn a_token_near_expiry_is_not_fresh() {
+        let now = SystemTime::now();
+        let token = |seconds| CachedToken {
+            access_token: String::new(),
+            expires_at: now + Duration::from_secs(seconds),
+        };
+        assert!(token(3_600).is_fresh(now));
+        assert!(!token(60).is_fresh(now));
+        // The clock moved on while the machine slept.
+        assert!(!token(3_600).is_fresh(now + Duration::from_secs(7_200)));
     }
 
     #[test]

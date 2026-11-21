@@ -48,18 +48,23 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// A missing file gives defaults; an unreadable one is logged and gives defaults.
-    fn load(config_dir: &Path) -> Self {
+    /// The settings, and whether they may be saved. A missing file gives
+    /// defaults. A file that does not parse is set aside as `settings.toml.bad`;
+    /// one that cannot be read or set aside is never written over.
+    fn load(config_dir: &Path) -> (Self, bool) {
         let path = config_dir.join(SETTINGS_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).unwrap_or_else(|error| {
-                tracing::warn!(path = %path.display(), %error, "ignoring invalid settings file");
-                Self::default()
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Ok(text) => match toml::from_str(&text) {
+                Ok(settings) => (settings, true),
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "invalid settings file");
+                    (Self::default(), crate::connections::set_aside(&path))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), true),
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "cannot read settings file");
-                Self::default()
+                tracing::warn!(path = %path.display(), %error, "cannot read settings file; settings will not be saved");
+                (Self::default(), false)
             }
         }
     }
@@ -68,7 +73,7 @@ impl Settings {
         std::fs::create_dir_all(config_dir)
             .with_context(|| format!("creating {}", config_dir.display()))?;
         let path = config_dir.join(SETTINGS_FILE);
-        std::fs::write(&path, toml::to_string_pretty(self)?)
+        crate::connections::replace_owner_only(&path, toml::to_string_pretty(self)?.as_bytes())
             .with_context(|| format!("writing {}", path.display()))
     }
 }
@@ -76,6 +81,8 @@ impl Settings {
 pub struct SettingsStore {
     settings: Settings,
     config_dir: Option<PathBuf>,
+    /// Saves go to one thread in order, so an older save never lands last.
+    writer: Option<std::sync::mpsc::Sender<Settings>>,
 }
 
 impl Global for SettingsStore {}
@@ -83,14 +90,38 @@ impl Global for SettingsStore {}
 pub fn init(cx: &mut App) {
     let config_dir = directories::ProjectDirs::from("", "", "sql-editor")
         .map(|directories| directories.config_dir().to_path_buf());
-    let settings = config_dir
+    let (settings, may_save) = config_dir
         .as_deref()
-        .map(Settings::load)
-        .unwrap_or_default();
+        .map_or_else(|| (Settings::default(), false), Settings::load);
+    let writer = config_dir
+        .clone()
+        .filter(|_| may_save)
+        .and_then(spawn_writer);
     cx.set_global(SettingsStore {
         settings,
         config_dir,
+        writer,
     });
+}
+
+fn spawn_writer(config_dir: PathBuf) -> Option<std::sync::mpsc::Sender<Settings>> {
+    let (sender, jobs) = std::sync::mpsc::channel::<Settings>();
+    let spawned = std::thread::Builder::new()
+        .name("settings".to_owned())
+        .spawn(move || {
+            for settings in jobs {
+                if let Err(error) = settings.save(&config_dir) {
+                    tracing::warn!(%error, "could not save settings");
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => Some(sender),
+        Err(error) => {
+            tracing::warn!(%error, "settings will not be saved");
+            None
+        }
+    }
 }
 
 pub fn get(cx: &App) -> &Settings {
@@ -106,17 +137,11 @@ pub fn config_dir(cx: &App) -> Option<&Path> {
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     let store = cx.global_mut::<SettingsStore>();
     change(&mut store.settings);
-    let Some(config_dir) = store.config_dir.clone() else {
-        return;
-    };
-    let settings = store.settings.clone();
-    cx.background_executor()
-        .spawn(async move {
-            if let Err(error) = settings.save(&config_dir) {
-                tracing::warn!(%error, "could not save settings");
-            }
-        })
-        .detach();
+    if let Some(writer) = &store.writer
+        && writer.send(store.settings.clone()).is_err()
+    {
+        tracing::warn!("settings writer stopped");
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +174,21 @@ mod tests {
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_set_aside() {
+        let directory =
+            std::env::temp_dir().join(format!("sql-editor-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(SETTINGS_FILE), "row_limit = 7\n[").unwrap();
+        let (settings, may_save) = Settings::load(&directory);
+        assert_eq!(settings, Settings::default());
+        assert!(may_save);
+        settings.save(&directory).unwrap();
+        let kept = std::fs::read_to_string(directory.join("settings.toml.bad")).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(kept.contains("row_limit = 7"));
     }
 
     #[test]

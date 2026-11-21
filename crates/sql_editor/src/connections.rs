@@ -105,7 +105,10 @@ fn secret_key(name: &str) -> String {
 
 pub fn init(cx: &mut App) {
     let path = settings::config_dir(cx).map(|directory| directory.join(CONNECTIONS_FILE));
-    let (mut connections, unreadable) = path.as_deref().map(load).unwrap_or_default();
+    let loaded = path.as_deref().map(load);
+    // A file that could not be read is left alone: saving over it would delete its connections.
+    let path = path.filter(|_| loaded.as_ref().is_some_and(Option::is_some));
+    let (mut connections, unreadable) = loaded.flatten().unwrap_or_default();
     // Secrets written inline by older versions move out on the first save.
     let mut migrate = false;
     let mut stored_secrets = HashMap::new();
@@ -280,19 +283,50 @@ fn spawn_writer(path: PathBuf) -> Option<std::sync::mpsc::Sender<Persist>> {
     }
 }
 
-fn load(path: &Path) -> (Vec<SavedConnection>, Vec<StoredConnection>) {
+/// `None` when the file exists but cannot be read, so nothing may be saved over it.
+/// A file that does not parse is set aside as `connections.toml.bad` first.
+fn load(path: &Path) -> Option<(Vec<SavedConnection>, Vec<StoredConnection>)> {
     match std::fs::read_to_string(path) {
         Ok(text) => match toml::from_str::<ConnectionsFile>(&text) {
-            Ok(file) => split(file.connections),
+            Ok(file) => Some(split(file.connections)),
             Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "ignoring invalid connections file");
-                (Vec::new(), Vec::new())
+                tracing::warn!(path = %path.display(), %error, "invalid connections file");
+                set_aside(path).then(Default::default)
             }
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Default::default()),
         Err(error) => {
-            tracing::warn!(path = %path.display(), %error, "cannot read connections file");
-            (Vec::new(), Vec::new())
+            tracing::warn!(path = %path.display(), %error, "cannot read connections file; connections will not be saved");
+            None
+        }
+    }
+}
+
+/// Renames a file this version cannot parse to an unused `<name>.bad` (then
+/// `.bad.1`, ...), so neither the next save nor a later bad file destroys it.
+pub(crate) fn set_aside(path: &Path) -> bool {
+    let aside = (0..100).find_map(|attempt| {
+        let mut name = path.as_os_str().to_owned();
+        name.push(if attempt == 0 {
+            ".bad".to_owned()
+        } else {
+            format!(".bad.{attempt}")
+        });
+        let candidate = PathBuf::from(name);
+        matches!(candidate.try_exists(), Ok(false)).then_some(candidate)
+    });
+    let Some(aside) = aside else {
+        tracing::warn!(path = %path.display(), "too many set-aside copies; the invalid file will not be overwritten");
+        return false;
+    };
+    match std::fs::rename(path, &aside) {
+        Ok(()) => {
+            tracing::warn!(kept = %aside.display(), "kept the invalid file under a new name");
+            true
+        }
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "could not set the invalid file aside; it will not be overwritten");
+            false
         }
     }
 }
@@ -347,7 +381,9 @@ pub(crate) fn write_owner_only(path: &Path, bytes: &[u8]) -> std::io::Result<()>
         .open(path)?;
     // `mode` only applies when creating; tighten a file made by an older version.
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(bytes)
+    file.write_all(bytes)?;
+    // Without this a power loss after the rename can leave an empty file.
+    file.sync_all()
 }
 
 #[cfg(not(unix))]
@@ -397,6 +433,26 @@ connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analyt
         let (saved, _) = split(parsed.connections);
         assert_eq!(saved[0].settings.driver, DriverKind::Fabric);
         assert_eq!(saved[0].settings.database, "analytics");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_set_aside_not_overwritten() {
+        let directory =
+            std::env::temp_dir().join(format!("sql-editor-connections-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(CONNECTIONS_FILE);
+        std::fs::write(&path, "[[connection]]\nname = \"Fabric\"\n[").unwrap();
+        let (saved, unreadable) = load(&path).unwrap();
+        assert!(saved.is_empty() && unreadable.is_empty());
+        write(&path, &ConnectionsFile::default()).unwrap();
+        // A second bad file must not replace the first copy.
+        std::fs::write(&path, "second [").unwrap();
+        assert!(load(&path).is_some());
+        let kept = std::fs::read_to_string(directory.join("connections.toml.bad")).unwrap();
+        let second = std::fs::read_to_string(directory.join("connections.toml.bad.1")).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(kept.contains("Fabric"));
+        assert!(second.contains("second"));
     }
 
     #[test]

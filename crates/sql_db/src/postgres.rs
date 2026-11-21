@@ -490,22 +490,23 @@ async fn run_batch(
 ) -> Result<(), tokio_postgres::Error> {
     // Only a single statement is prepared: a failed prepare inside an open
     // transaction would abort it before the batch runs. A batch's values stay text.
-    let types: Option<Vec<Type>> = if sql_text::statements(sql).len() == 1 {
-        match client.prepare(sql).await {
-            Ok(statement) => Some(
-                statement
-                    .columns()
-                    .iter()
-                    .map(|column| column.type_().clone())
-                    .collect(),
-            ),
-            Err(error) if is_cancel(&error) => return Err(error),
-            // The batch itself reports the same error with its position.
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
+    let types: Option<Vec<Type>> =
+        if sql_text::split(sql, sql_text::Delimiters::Semicolon).len() == 1 {
+            match client.prepare(sql).await {
+                Ok(statement) => Some(
+                    statement
+                        .columns()
+                        .iter()
+                        .map(|column| column.type_().clone())
+                        .collect(),
+                ),
+                Err(error) if is_cancel(&error) => return Err(error),
+                // The batch itself reports the same error with its position.
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
     if cancel.token.is_cancelled() {
         // The cancel request reached an idle backend; run nothing.
         output

@@ -275,45 +275,77 @@ impl TdsConnection {
         self.execute_with_limit(sql, cancel, max_rows).await
     }
 
-    /// `execute` with its own row cap; catalog reads pass `usize::MAX`.
+    /// `execute` with its own row cap (catalog reads pass `usize::MAX`); `GO` lines split the text into batches.
     pub(crate) async fn execute_with_limit(
         &mut self,
         sql: &str,
         cancel: &CancelHandle,
         max_rows: usize,
     ) -> Result<QueryOutput, QueryError> {
+        let batches = sql_text::split(sql, sql_text::Delimiters::GoLine);
+        let mut output = QueryOutput::default();
+        let [batch] = batches.as_slice() else {
+            for batch in batches {
+                if cancel.token.is_cancelled() {
+                    return Err(QueryError::Cancelled);
+                }
+                let Some(batch) = sql.get(batch) else {
+                    continue;
+                };
+                // The stop at the limit cancels through the run's own handle, which
+                // would then stop the batches after this one too: scripts read to the end.
+                self.run_batch(batch, cancel, max_rows, StopAtLimit::Never, &mut output)
+                    .await?;
+            }
+            return Ok(output);
+        };
+        let batch = sql.get(batch.clone()).unwrap_or(sql);
+        self.run_batch(batch, cancel, max_rows, StopAtLimit::LoneRead, &mut output)
+            .await?;
+        Ok(output)
+    }
+
+    /// Runs one batch and adds its result sets, row count and messages to `output`.
+    async fn run_batch(
+        &mut self,
+        sql: &str,
+        cancel: &CancelHandle,
+        max_rows: usize,
+        stop_at_limit: StopAtLimit,
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         let options = ExecuteOptions::new().cancel(&cancel.inner);
         // Cancelling a statement can roll back an open transaction (XACT_ABORT), so only
         // a lone read outside one is stopped at the limit instead of drained.
-        let stop_at_limit = max_rows != usize::MAX
-            && !self.client.has_active_transaction()
-            && sql_text::completion::is_read_only_query(sql);
-        let mut output = QueryOutput::default();
+        let stop_at_limit = match stop_at_limit {
+            StopAtLimit::Never => false,
+            StopAtLimit::LoneRead => {
+                max_rows != usize::MAX
+                    && !self.client.has_active_transaction()
+                    && sql_text::completion::is_read_only_query(sql)
+            }
+        };
         let mut limit = Limit {
             max_rows,
             stop: stop_at_limit.then_some(&cancel.inner),
             stopped: false,
         };
-        let result = collect_batch(&mut self.client, sql, options, &mut limit, &mut output).await;
-        let messages = self
-            .client
-            .take_info_messages()
-            .into_iter()
-            .map(|message| message.message)
-            .collect::<Vec<_>>();
+        let result = collect_batch(&mut self.client, sql, options, &mut limit, output).await;
+        output.messages.extend(
+            self.client
+                .take_info_messages()
+                .into_iter()
+                .map(|message| message.message),
+        );
         match result {
-            Ok(()) => {
-                output.messages = messages;
-                Ok(output)
-            }
+            Ok(()) => Ok(()),
             // Only the cancel this stop caused; a real failure still reports.
             Err(TdsError::OperationCancelledError(_)) if limit.stopped => {
                 tracing::debug!("query stopped at the row limit");
                 if let Err(close_error) = self.client.close_query().await {
                     tracing::debug!(%close_error, "close_query after stopping at the limit");
                 }
-                output.messages = messages;
-                Ok(output)
+                Ok(())
             }
             Err(error) => {
                 // Leave the connection ready for the next batch; a close failure here
@@ -440,6 +472,14 @@ async fn open_client(config: &TdsConfig, login: &Login) -> TdsResult<TdsClient> 
     TdsConnectionProvider {}
         .create_client(context, &config.data_source(), None)
         .await
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StopAtLimit {
+    /// Read every row the server sends and keep the first ones.
+    Never,
+    /// Cancel on the server once the limit is reached, when the batch is one read.
+    LoneRead,
 }
 
 /// The row cap, and the cancel that stops the server once it is reached.

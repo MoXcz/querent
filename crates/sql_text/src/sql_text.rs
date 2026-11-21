@@ -7,6 +7,35 @@ pub mod vim;
 
 use std::ops::Range;
 
+/// What ends a statement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delimiters {
+    /// `;`, a line holding only `GO`, or a blank line: what the editor runs under the cursor.
+    Editor,
+    /// `;` only: what a server takes as one statement.
+    Semicolon,
+    /// A line holding only `GO`: the batches SQL Server tools send one by one.
+    GoLine,
+}
+
+impl Delimiters {
+    fn splits_at_semicolon(self) -> bool {
+        match self {
+            Self::Editor | Self::Semicolon => true,
+            Self::GoLine => false,
+        }
+    }
+
+    fn splits_at_line(self, line: &str) -> bool {
+        let line = line.trim();
+        match self {
+            Self::Editor => line.is_empty() || line.eq_ignore_ascii_case("go"),
+            Self::Semicolon => false,
+            Self::GoLine => line.eq_ignore_ascii_case("go"),
+        }
+    }
+}
+
 /// Byte ranges of the statements in `text`, trimmed of surrounding whitespace.
 ///
 /// A statement ends at `;`, at a line holding only `GO`, or at a blank line,
@@ -16,6 +45,12 @@ use std::ops::Range;
 /// Comment-only segments are skipped.
 #[must_use]
 pub fn statements(text: &str) -> Vec<Range<usize>> {
+    split(text, Delimiters::Editor)
+}
+
+/// [`statements`] with a chosen set of delimiters.
+#[must_use]
+pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
     let bytes = text.as_bytes();
     let mut statements = Vec::new();
     let mut segment = Segment::new(0);
@@ -54,12 +89,12 @@ pub fn statements(text: &str) -> Vec<Range<usize>> {
                 index = skip_block_comment(bytes, index);
                 continue;
             }
-            b';' => {
+            b';' if delimiters.splits_at_semicolon() => {
                 segment.finish(text, index, &mut statements);
                 segment = Segment::new(index + 1);
             }
             b'\n' => {
-                if is_delimiter_line(text.get(line_start..index).unwrap_or_default()) {
+                if delimiters.splits_at_line(text.get(line_start..index).unwrap_or_default()) {
                     segment.finish(text, line_start, &mut statements);
                     segment = Segment::new(index + 1);
                 }
@@ -72,7 +107,7 @@ pub fn statements(text: &str) -> Vec<Range<usize>> {
     }
 
     let last_line = text.get(line_start..).unwrap_or_default();
-    let end = if is_delimiter_line(last_line) {
+    let end = if delimiters.splits_at_line(last_line) {
         line_start
     } else {
         text.len()
@@ -134,11 +169,6 @@ impl Segment {
         let trailing = raw.len() - raw.trim_end().len();
         statements.push(self.start + leading..end - trailing);
     }
-}
-
-fn is_delimiter_line(line: &str) -> bool {
-    let line = line.trim();
-    line.is_empty() || line.eq_ignore_ascii_case("go")
 }
 
 /// Byte ranges of the `$tag$ ... $tag$` bodies in `text`, skipping strings and comments.
@@ -245,6 +275,27 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn splits_by_the_chosen_delimiters() {
+        let found = |text: &'static str, delimiters| -> Vec<&'static str> {
+            split(text, delimiters)
+                .into_iter()
+                .map(|range| &text[range])
+                .collect()
+        };
+        let delete = "delete from t\n\nwhere id = 1;\nselect 1";
+        assert_eq!(
+            found(delete, Delimiters::Semicolon),
+            vec!["delete from t\n\nwhere id = 1", "select 1"]
+        );
+        assert_eq!(found(delete, Delimiters::Editor).len(), 3);
+        let script = "select 1;\nselect 'go\nGO\n';\nGO\n\nselect 2\n  go  \n";
+        assert_eq!(
+            found(script, Delimiters::GoLine),
+            vec!["select 1;\nselect 'go\nGO\n';", "select 2"]
+        );
+    }
 
     #[test]
     fn keeps_dollar_quoted_bodies_whole() {
