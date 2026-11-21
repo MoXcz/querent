@@ -513,7 +513,7 @@ async fn collect_batch(
         match statement {
             StatementResult::Rows => {
                 let result_set = read_result_set(client, limit).await?;
-                output.result_sets.push(result_set);
+                output.result_sets.push(Arc::new(result_set));
                 if limit.stopped {
                     // The cancel ends the batch: this returns its error, or End if the
                     // server had already sent everything.
@@ -547,7 +547,7 @@ async fn read_result_set(client: &mut TdsClient, limit: &mut Limit<'_>) -> TdsRe
         ..ResultSet::default()
     };
     while let Some(row) = client.next_row().await? {
-        if result_set.rows.len() == limit.max_rows {
+        if result_set.is_full(limit.max_rows) {
             result_set.truncated = true;
             if let Some(stop) = limit.stop {
                 stop.cancel();
@@ -556,9 +556,7 @@ async fn read_result_set(client: &mut TdsClient, limit: &mut Limit<'_>) -> TdsRe
             // Otherwise `advance` drains the remaining rows without decoding them.
             break;
         }
-        result_set
-            .rows
-            .push(row.into_iter().map(to_value).collect());
+        result_set.push_row(row.into_iter().map(to_value).collect());
     }
     Ok(result_set)
 }

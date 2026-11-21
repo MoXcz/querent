@@ -119,6 +119,11 @@ pub struct ConnectionFields {
 
 type ConnectionSelect = SelectState<Vec<SharedString>>;
 
+type ServerView = (bool, Vec<lsp_types::Diagnostic>);
+
+/// Messages drawn at once; a loop of `PRINT`s can produce far more.
+const MAX_SHOWN_MESSAGES: usize = 1_000;
+
 pub struct QueryTab {
     number: usize,
     focus_handle: FocusHandle,
@@ -162,6 +167,8 @@ pub struct QueryTab {
     format_task: Option<Task<()>>,
     /// Pending syntax check; replacing it restarts the delay.
     syntax_check: Option<Task<()>>,
+    /// The server state and diagnostics the last syntax check used.
+    seen_server: ServerView,
     run_highlight_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -236,7 +243,7 @@ impl QueryTab {
             cx.observe(&editor, |this, _, cx| this.update_block_cursor(cx)),
             cx.observe_global::<SettingsStore>(Self::update_block_cursor),
             // Server diagnostics arrive on their own schedule.
-            cx.observe_global::<LspServers>(Self::check_syntax),
+            cx.observe_global::<LspServers>(Self::on_servers_changed),
             cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.schedule_syntax_check(cx);
@@ -271,6 +278,7 @@ impl QueryTab {
             run_highlight: None,
             run_highlight_task: None,
             syntax_check: None,
+            seen_server: ServerView::default(),
             document,
             server_connection: None,
             format_task: None,
@@ -499,6 +507,10 @@ impl QueryTab {
         let Some(key) = vim_key(keystroke) else {
             return false;
         };
+        // Insert mode leaves every key but Escape to the editor; copying the buffer for each would slow typing.
+        if self.vim.mode() == Mode::Insert && !matches!(key, Key::Escape) {
+            return false;
+        }
         let (text, cursor) = {
             let editor = self.editor.read(cx);
             (editor.value(), editor.cursor())
@@ -537,6 +549,30 @@ impl QueryTab {
         }));
     }
 
+    /// Whether this tab's language server runs, and its diagnostics for the tab.
+    fn server_view(&self, cx: &App) -> ServerView {
+        let (Some(connection), Some(document)) =
+            (self.connection_fields(cx).connection, &self.document)
+        else {
+            return ServerView::default();
+        };
+        let running = matches!(
+            lsp_servers::status(cx, &connection),
+            Some((_, lsp_servers::ServerStatus::Running))
+        );
+        (
+            running,
+            lsp_servers::diagnostics(cx, &connection, document.as_str()),
+        )
+    }
+
+    /// Every tab hears every server change; only one that concerns this tab rechecks.
+    fn on_servers_changed(&mut self, cx: &mut Context<Self>) {
+        if self.server_view(cx) != self.seen_server {
+            self.check_syntax(cx);
+        }
+    }
+
     /// Marks syntax errors in the editor. T-SQL is skipped: the grammar does
     /// not know `TOP`, `[names]`, `GO` or `DECLARE` and would flag valid code.
     fn check_syntax(&mut self, cx: &mut Context<Self>) {
@@ -562,6 +598,7 @@ impl QueryTab {
             }
             _ => Vec::new(),
         };
+        self.seen_server = self.server_view(cx);
         let rope = Rope::from(text.as_str());
         self.editor.update(cx, |editor, cx| {
             let Some(diagnostics) = editor.diagnostics_mut() else {
@@ -727,12 +764,12 @@ impl QueryTab {
 
     fn update_block_cursor(&mut self, cx: &mut Context<Self>) {
         let wanted = if settings::get(cx).vim_mode && self.vim.mode() != Mode::Insert {
+            // Runs on every caret blink, so it reads one character, not the buffer.
             let editor = self.editor.read(cx);
-            let text = editor.value();
             let cursor = editor.cursor();
-            let end = text
-                .get(cursor..)
-                .and_then(|rest| rest.chars().next())
+            let end = editor
+                .text()
+                .char_at(cursor)
                 .filter(|character| *character != '\n')
                 .map(|character| cursor + character.len_utf8());
             end.map(|end| cursor..end)
@@ -1118,9 +1155,8 @@ impl QueryTab {
         self.show_result(index, shown, cx);
     }
 
-    fn show_result(&mut self, index: usize, shown: ResultSet, cx: &mut Context<Self>) {
+    fn show_result(&mut self, index: usize, shown: Arc<ResultSet>, cx: &mut Context<Self>) {
         self.shown_index = index;
-        let shown = Arc::new(shown);
         self.shown_result = Some(shown.clone());
         self.results.update(cx, |table, cx| {
             table.delegate_mut().set_result(shown);
@@ -1349,7 +1385,9 @@ impl QueryTab {
         let mut summary = format!("{} rows", result.rows.len());
         let truncated = result.truncated;
         if truncated {
-            summary.push_str(" (first rows only: row limit reached)");
+            summary.push_str(
+                " (first rows only: the row limit or the 1 GB result budget was reached)",
+            );
         }
         Some(
             h_flex()
@@ -1366,7 +1404,7 @@ impl QueryTab {
                         .ghost()
                         .xsmall()
                         .label("Run again without limit")
-                        .tooltip("Runs the same SQL again and keeps every row")
+                        .tooltip("Runs the same SQL again without the row limit")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.rerun_without_limit(window, cx);
                         }))
@@ -1412,12 +1450,24 @@ impl QueryTab {
                         .p_3()
                         .gap_1()
                         .text_sm()
-                        .children(output.messages.iter().enumerate().map(|(index, message)| {
-                            let is_error = *failed && index + 1 == output.messages.len();
+                        .children(hidden_messages(output.messages.len()).map(|hidden| {
                             div()
-                                .when(is_error, |line| line.text_color(cx.theme().danger))
-                                .child(message.clone())
-                        })),
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!("{hidden} earlier messages are not shown."))
+                        }))
+                        .children(
+                            output
+                                .messages
+                                .iter()
+                                .enumerate()
+                                .skip(hidden_messages(output.messages.len()).unwrap_or(0))
+                                .map(|(index, message)| {
+                                    let is_error = *failed && index + 1 == output.messages.len();
+                                    div()
+                                        .when(is_error, |line| line.text_color(cx.theme().danger))
+                                        .child(message.clone())
+                                }),
+                        ),
                 )
                 .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
@@ -1682,6 +1732,13 @@ fn vim_key(keystroke: &Keystroke) -> Option<Key> {
             .and_then(single_char)
             .map(Key::Char),
     }
+}
+
+/// How many of `count` messages are left out, the oldest first.
+fn hidden_messages(count: usize) -> Option<usize> {
+    count
+        .checked_sub(MAX_SHOWN_MESSAGES)
+        .filter(|hidden| *hidden > 0)
 }
 
 fn report_export(this: &WeakEntity<QueryTab>, notice: String, cx: &mut AsyncApp) {

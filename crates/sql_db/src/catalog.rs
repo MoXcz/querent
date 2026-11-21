@@ -4,6 +4,7 @@
 //! connection can browse every database on the server or Fabric workspace.
 
 use crate::{CancelHandle, QueryError, ResultSet, TdsConnection, Value};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ObjectKind {
@@ -275,7 +276,9 @@ impl TdsConnection {
         let output = self
             .execute_with_limit(sql, &CancelHandle::new(), usize::MAX)
             .await?;
-        Ok(output.result_sets.into_iter().next().unwrap_or_default())
+        let first = output.result_sets.into_iter().next().unwrap_or_default();
+        // Nothing else holds a catalog result, so this moves the rows out.
+        Ok(Arc::try_unwrap(first).unwrap_or_else(|shared| (*shared).clone()))
     }
 }
 

@@ -64,6 +64,19 @@ pub enum Value {
 }
 
 impl Value {
+    fn estimated_bytes(&self) -> usize {
+        let heap = match self {
+            Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 0,
+            Value::Decimal(text)
+            | Value::Text(text)
+            | Value::Date(text)
+            | Value::Time(text)
+            | Value::Timestamp(text) => text.capacity(),
+            Value::Bytes(bytes) => bytes.capacity(),
+        };
+        std::mem::size_of::<Value>() + heap
+    }
+
     #[must_use]
     pub fn is_numeric(&self) -> bool {
         matches!(self, Value::Int(_) | Value::Float(_) | Value::Decimal(_))
@@ -98,11 +111,30 @@ pub struct ResultSet {
     pub rows: Vec<Vec<Value>>,
     /// True when the server returned more rows than the fetch limit.
     pub truncated: bool,
+    /// Rough memory the rows hold, kept so a run without a row limit cannot exhaust it.
+    estimated_bytes: usize,
+}
+
+/// Past this estimate a result set is cut like at the row limit.
+const MAX_RESULT_BYTES: usize = 1 << 30;
+
+impl ResultSet {
+    pub(crate) fn push_row(&mut self, row: Vec<Value>) {
+        self.estimated_bytes += std::mem::size_of::<Vec<Value>>()
+            + row.iter().map(Value::estimated_bytes).sum::<usize>();
+        self.rows.push(row);
+    }
+
+    /// Whether the row limit or the memory budget is reached.
+    pub(crate) fn is_full(&self, max_rows: usize) -> bool {
+        self.rows.len() >= max_rows || self.estimated_bytes >= MAX_RESULT_BYTES
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QueryOutput {
-    pub result_sets: Vec<ResultSet>,
+    /// Shared, so the grid and an export hold a result set without copying its rows.
+    pub result_sets: Vec<Arc<ResultSet>>,
     pub rows_affected: Option<u64>,
     pub messages: Vec<String>,
 }
@@ -130,5 +162,20 @@ impl CancelHandle {
     /// Resolves once [`Self::cancel`] is called; for steps with no server-side query, like connecting.
     pub async fn cancelled(&self) {
         self.token.cancelled().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_set_is_full_at_the_row_limit_or_the_memory_budget() {
+        let mut result_set = ResultSet::default();
+        result_set.push_row(vec![Value::Int(1), Value::Text("abc".to_owned())]);
+        assert!(result_set.is_full(1));
+        assert!(!result_set.is_full(usize::MAX));
+        result_set.push_row(vec![Value::Bytes(Vec::with_capacity(MAX_RESULT_BYTES))]);
+        assert!(result_set.is_full(usize::MAX));
     }
 }

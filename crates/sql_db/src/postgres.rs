@@ -6,6 +6,7 @@
 //! that text into numbers, booleans, dates and bytes.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{StreamExt as _, pin_mut};
@@ -537,11 +538,11 @@ async fn run_batch(
                 let Some(result_set) = current.as_mut() else {
                     continue;
                 };
-                if result_set.rows.len() >= limit.max_rows {
+                if result_set.is_full(limit.max_rows) {
                     result_set.truncated = true;
                     if let Some(stop) = limit.stop {
                         // Keep what was read; the stream then ends in a cancel error.
-                        output.result_sets.extend(current.take());
+                        output.result_sets.extend(current.take().map(Arc::new));
                         stop.cancel();
                     }
                     continue;
@@ -554,10 +555,10 @@ async fn run_batch(
                             .map_or(Value::Null, |text| text_value(text, ty))
                     })
                     .collect();
-                result_set.rows.push(values);
+                result_set.push_row(values);
             }
             SimpleQueryMessage::CommandComplete(count) => match current.take() {
-                Some(result_set) => output.result_sets.push(result_set),
+                Some(result_set) => output.result_sets.push(Arc::new(result_set)),
                 // The count of a result stopped at the limit is not rows affected.
                 None if limit.stop.is_some_and(CancellationToken::is_cancelled) => {}
                 None => *output.rows_affected.get_or_insert(0) += count,

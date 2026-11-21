@@ -318,7 +318,7 @@ fn fill_batch(
         let read_only = statement.readonly();
         let mut rows = statement.raw_query();
         while let Some(row) = rows.next()? {
-            if result_set.rows.len() >= max_rows {
+            if result_set.is_full(max_rows) {
                 result_set.truncated = true;
                 // Stepping is the work; a statement that only reads can stop here.
                 if read_only {
@@ -329,9 +329,9 @@ fn fill_batch(
             let values = (0..width)
                 .map(|index| row.get_ref(index).map(to_value))
                 .collect::<Result<Vec<_>, _>>()?;
-            result_set.rows.push(values);
+            result_set.push_row(values);
         }
-        output.result_sets.push(result_set);
+        output.result_sets.push(Arc::new(result_set));
     }
     Ok(())
 }

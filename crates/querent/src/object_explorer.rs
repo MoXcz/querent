@@ -119,6 +119,10 @@ pub struct ObjectExplorer {
     /// Bumped when the connections change, so a load that started before is ignored.
     generation: u64,
     rows: Vec<Row>,
+    /// Bumped when what the tree shows changes; the rows are rebuilt only then.
+    tree_version: u64,
+    /// The filter, grouping and tree version `rows` was built from.
+    rows_built_for: Option<(String, bool, u64)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -143,6 +147,8 @@ impl ObjectExplorer {
             catalog_connections: HashMap::new(),
             generation: 0,
             rows: Vec::new(),
+            tree_version: 0,
+            rows_built_for: None,
             _subscriptions: subscriptions,
         }
     }
@@ -157,6 +163,7 @@ impl ObjectExplorer {
         self.columns.clear();
         self.catalog_connections.clear();
         self.generation += 1;
+        self.tree_version += 1;
         cx.notify();
     }
 
@@ -181,6 +188,7 @@ impl ObjectExplorer {
     }
 
     fn toggle(&mut self, id: &NodeId, cx: &mut Context<Self>) {
+        self.tree_version += 1;
         if self.expanded.remove(id) {
             cx.notify();
             return;
@@ -230,6 +238,7 @@ impl ObjectExplorer {
             Ok(config) => config,
             Err(message) => {
                 done(self, Err(message), cx);
+                self.tree_version += 1;
                 return;
             }
         };
@@ -268,6 +277,7 @@ impl ObjectExplorer {
                 // another server.
                 if this.generation == generation {
                     done(this, result, cx);
+                    this.tree_version += 1;
                     cx.notify();
                 }
             });
@@ -279,6 +289,7 @@ impl ObjectExplorer {
     }
 
     fn load_databases(&mut self, connection: &SharedString, cx: &mut Context<Self>) {
+        self.tree_version += 1;
         self.databases.insert(connection.clone(), Load::Loading);
         let key = connection.clone();
         self.run_catalog(
@@ -302,6 +313,7 @@ impl ObjectExplorer {
     }
 
     fn load_objects(&mut self, key: (SharedString, SharedString), cx: &mut Context<Self>) {
+        self.tree_version += 1;
         self.objects.insert(key.clone(), Load::Loading);
         let database = key.1.to_string();
         let connection = key.0.clone();
@@ -320,6 +332,7 @@ impl ObjectExplorer {
     }
 
     fn load_columns(&mut self, key: ObjectKey, cx: &mut Context<Self>) {
+        self.tree_version += 1;
         self.columns.insert(key.clone(), Load::Loading);
         let database = key.database.to_string();
         let object = key.catalog_object();
@@ -339,6 +352,7 @@ impl ObjectExplorer {
     }
 
     fn refresh(&mut self, id: &NodeId, cx: &mut Context<Self>) {
+        self.tree_version += 1;
         match id {
             NodeId::Connection(connection) => {
                 schema_cache::invalidate(cx, connection, None);
@@ -834,8 +848,17 @@ impl ObjectExplorer {
 
 impl Render for ObjectExplorer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.rows = self.build_rows(cx);
         let group_by_schema = settings::get(cx).explorer_group_by_schema;
+        // The workspace re-renders on every keystroke in a tab; the tree rarely changes.
+        let built_for = (
+            self.filter_input.read(cx).value().trim().to_lowercase(),
+            group_by_schema,
+            self.tree_version,
+        );
+        if self.rows_built_for.as_ref() != Some(&built_for) {
+            self.rows = self.build_rows(cx);
+            self.rows_built_for = Some(built_for);
+        }
         let row_count = self.rows.len();
         v_flex()
             .size_full()

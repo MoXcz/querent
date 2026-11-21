@@ -54,6 +54,7 @@ mod tests {
                 vec![Value::Text("a,b".to_owned()), Value::Null, Value::Int(-3)],
             ],
             truncated: false,
+            ..ResultSet::default()
         };
         let mut bytes = Vec::new();
         write_csv(&result_set, &mut bytes).unwrap();
@@ -78,6 +79,7 @@ mod tests {
                 Value::Date("2024-02-29".to_owned()),
             ]],
             truncated: false,
+            ..ResultSet::default()
         };
         let mut bytes = Vec::new();
         write_csv(&result_set, &mut bytes).unwrap();

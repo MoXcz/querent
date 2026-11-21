@@ -4,6 +4,7 @@
 //! `sql_text::statements` and run in order. Each statement keeps its
 //! `QueryCanceller`, which the cancel handle uses to abort it on the server.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use snowflake_connector_rs::{
@@ -119,7 +120,7 @@ impl SnowflakeConnection {
             let result_set = self
                 .run_statement(statement, cancel, self.config.max_rows)
                 .await?;
-            output.result_sets.push(result_set);
+            output.result_sets.push(Arc::new(result_set));
         }
         Ok(())
     }
@@ -329,14 +330,12 @@ impl SnowflakeConnection {
             };
             while let Some(table) = cursor.next_table().await? {
                 for row in table.dynamic_rows()? {
-                    if result_set.rows.len() >= max_rows {
+                    if result_set.is_full(max_rows) {
                         // The rest of the result is never fetched.
                         result_set.truncated = true;
                         return Ok(result_set);
                     }
-                    result_set
-                        .rows
-                        .push(row?.values().iter().map(to_value).collect());
+                    result_set.push_row(row?.values().iter().map(to_value).collect());
                 }
             }
             Ok::<_, snowflake_connector_rs::Error>(result_set)

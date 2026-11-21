@@ -196,12 +196,15 @@ fn candidates(
     dialect: Dialect,
 ) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Vec::new();
+    // A warehouse has thousands of names; only those the prefix fits are built.
+    let prefix = context.prefix.to_lowercase();
     match (&context.expectation, schema) {
         (Expectation::Table { schema: wanted }, Some(schema)) => {
             for object in &schema.objects {
-                if wanted
-                    .as_deref()
-                    .is_none_or(|wanted| object.schema.eq_ignore_ascii_case(wanted))
+                if has_prefix(&object.name, &prefix)
+                    && wanted
+                        .as_deref()
+                        .is_none_or(|wanted| object.schema.eq_ignore_ascii_case(wanted))
                 {
                     candidates.push(Candidate::named(
                         dialect.name_in_sql(&object.name),
@@ -259,7 +262,9 @@ fn candidates(
                 ));
                 if let Some((_, columns)) = schema.resolve(table) {
                     for column in columns {
-                        candidates.push(column_candidate(dialect, column, Some(name)));
+                        if has_prefix(&column.name, &prefix) {
+                            candidates.push(column_candidate(dialect, column, Some(name)));
+                        }
                     }
                 }
             }
@@ -271,6 +276,14 @@ fn candidates(
         }
     }
     candidates
+}
+
+/// Whether `name` starts with `lowered_prefix`, ignoring case, without allocating.
+fn has_prefix(name: &str, lowered_prefix: &str) -> bool {
+    let mut characters = name.chars().flat_map(char::to_lowercase);
+    lowered_prefix
+        .chars()
+        .all(|expected| characters.next() == Some(expected))
 }
 
 /// Built-in items first, then the server's, skipping labels already offered.
@@ -524,6 +537,15 @@ mod tests {
             .into_iter()
             .map(|candidate| candidate.label)
             .collect()
+    }
+
+    #[test]
+    fn matches_prefixes_without_case() {
+        assert!(has_prefix("Customers", "cust"));
+        assert!(has_prefix("ÉTAT", "ét"));
+        assert!(has_prefix("anything", ""));
+        assert!(!has_prefix("cu", "cust"));
+        assert!(!has_prefix("orders", "cust"));
     }
 
     #[test]

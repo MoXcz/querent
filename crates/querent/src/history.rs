@@ -45,16 +45,36 @@ impl Global for QueryHistory {}
 
 pub fn init(cx: &mut App) {
     let path = settings::config_dir(cx).map(|directory| directory.join(HISTORY_FILE));
-    let (entries, overgrown) = path.as_deref().map(load).unwrap_or_default();
-    let writer = path.and_then(spawn_writer);
-    // Appends alone never shrink the file; without this it grows across sessions.
-    if overgrown
-        && let Some(writer) = &writer
-        && writer.send(Write::Rewrite(entries.clone())).is_err()
-    {
-        tracing::warn!("query history writer stopped");
-    }
-    cx.set_global(QueryHistory { entries, writer });
+    let writer = path.clone().and_then(spawn_writer);
+    cx.set_global(QueryHistory {
+        entries: Vec::new(),
+        writer,
+    });
+    let Some(path) = path else {
+        return;
+    };
+    // The file can hold megabytes of SQL; reading it must not delay the window.
+    let loading = cx.background_executor().spawn(async move { load(&path) });
+    cx.spawn(async move |cx| {
+        let (loaded, overgrown) = loading.await;
+        cx.update(|cx| {
+            cx.update_global::<QueryHistory, _>(|history, _| {
+                // Runs recorded while the file loaded come after it.
+                let recent = std::mem::replace(&mut history.entries, loaded);
+                history.entries.extend(recent);
+                // Appends alone never shrink the file; without this it grows across sessions.
+                if overgrown
+                    && let Some(writer) = &history.writer
+                    && writer
+                        .send(Write::Rewrite(history.entries.clone()))
+                        .is_err()
+                {
+                    tracing::warn!("query history writer stopped");
+                }
+            });
+        });
+    })
+    .detach();
 }
 
 /// Newest first, for one connection.

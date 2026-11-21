@@ -106,11 +106,37 @@ impl TableDelegate for ResultsTable {
     }
 }
 
+/// Characters of a value a cell draws; shaping a megabyte of JSON per frame stalls scrolling.
+const MAX_CELL_CHARACTERS: usize = 500;
+
 /// Grid cells are one line high; newlines in text values would be clipped.
 fn single_line(text: &str) -> SharedString {
-    if text.contains(['\n', '\r']) {
-        text.replace("\r\n", "⏎").replace(['\n', '\r'], "⏎").into()
+    let shown = match text.char_indices().nth(MAX_CELL_CHARACTERS) {
+        Some((end, _)) => text.get(..end).unwrap_or(text),
+        None => text,
+    };
+    let mut line = if shown.contains(['\n', '\r']) {
+        shown.replace("\r\n", "⏎").replace(['\n', '\r'], "⏎")
     } else {
-        SharedString::from(text.to_owned())
+        shown.to_owned()
+    };
+    if shown.len() < text.len() {
+        line.push('…');
+    }
+    line.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cells_show_one_short_line() {
+        assert_eq!(single_line("a\r\nb\nc"), "a⏎b⏎c");
+        let long = "é".repeat(MAX_CELL_CHARACTERS + 10);
+        let shown = single_line(&long);
+        assert_eq!(shown.chars().count(), MAX_CELL_CHARACTERS + 1);
+        assert!(shown.ends_with('…'));
+        assert_eq!(single_line("short"), "short");
     }
 }
