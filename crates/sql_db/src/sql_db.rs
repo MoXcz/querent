@@ -21,7 +21,7 @@ pub use catalog::{
 pub use connection::{Connection, ConnectionConfig};
 pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
 pub use connection_string::{ConnectionStringError, parse_connection_string};
-pub use csv_export::write_csv;
+pub use csv_export::{Headers, rows_as_tsv, write_csv};
 pub use postgres::{PgConfig, PgConnection};
 pub use snowflake::{SnowflakeConfig, SnowflakeConnection};
 pub use sqlite::{SqliteConfig, SqliteConnection};
@@ -117,9 +117,67 @@ impl Value {
         std::mem::size_of::<Value>() + heap
     }
 
+    /// The order a grid sorts by: NULL, then numbers by value, then text, then bytes.
+    /// A total order, as sorting needs: a number never compares as text.
+    #[must_use]
+    pub fn compare(&self, other: &Self) -> std::cmp::Ordering {
+        self.sort_key().cmp(&other.sort_key())
+    }
+
+    fn sort_key(&self) -> SortKey<'_> {
+        #[expect(clippy::cast_precision_loss, reason = "the exact integer breaks ties")]
+        let integer = |number: i64| SortKey::Number(TotalF64(number as f64), Some(number));
+        match self {
+            Value::Null => SortKey::Null,
+            Value::Bool(flag) => integer(i64::from(*flag)),
+            Value::Int(number) => integer(*number),
+            Value::Float(number) => SortKey::Number(TotalF64(*number), None),
+            Value::Decimal(text) => text.parse::<f64>().map_or(SortKey::Text(text), |number| {
+                SortKey::Number(TotalF64(number), None)
+            }),
+            Value::Text(text) | Value::Date(text) | Value::Time(text) | Value::Timestamp(text) => {
+                SortKey::Text(text)
+            }
+            Value::Bytes(bytes) => SortKey::Bytes(bytes),
+        }
+    }
+
     #[must_use]
     pub fn is_numeric(&self) -> bool {
         matches!(self, Value::Int(_) | Value::Float(_) | Value::Decimal(_))
+    }
+}
+
+/// Variants in sort order; a number sorts by its value, then by its exact
+/// integer, so two integers that round to one float still differ.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SortKey<'a> {
+    Null,
+    Number(TotalF64, Option<i64>),
+    Text(&'a str),
+    Bytes(&'a [u8]),
+}
+
+/// A float under `total_cmp`, which orders NaN too.
+struct TotalF64(f64);
+
+impl PartialEq for TotalF64 {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for TotalF64 {}
+
+impl PartialOrd for TotalF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TotalF64 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
     }
 }
 
@@ -159,6 +217,25 @@ pub struct ResultSet {
 const MAX_RESULT_BYTES: usize = 1 << 30;
 
 impl ResultSet {
+    /// A complete result set, as tests and other crates build one.
+    #[must_use]
+    pub fn new(columns: Vec<Column>, rows: Vec<Vec<Value>>) -> Self {
+        let mut result_set = Self {
+            columns,
+            ..Self::default()
+        };
+        for row in rows {
+            result_set.push_row(row);
+        }
+        result_set
+    }
+
+    /// Rough memory the rows hold.
+    #[must_use]
+    pub fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
+    }
+
     pub(crate) fn push_row(&mut self, row: Vec<Value>) {
         self.estimated_bytes += std::mem::size_of::<Vec<Value>>()
             + row.iter().map(Value::estimated_bytes).sum::<usize>();
@@ -208,6 +285,62 @@ impl CancelHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn values_order_with_null_first_and_numbers_by_value() {
+        use std::cmp::Ordering;
+        let mut values = vec![
+            Value::Int(10),
+            Value::Null,
+            Value::Decimal("9.5".to_owned()),
+            Value::Float(-1.0),
+            Value::Int(2),
+        ];
+        values.sort_by(Value::compare);
+        assert_eq!(
+            values,
+            vec![
+                Value::Null,
+                Value::Float(-1.0),
+                Value::Int(2),
+                Value::Decimal("9.5".to_owned()),
+                Value::Int(10),
+            ]
+        );
+        let text = |text: &str| Value::Text(text.to_owned());
+        assert_eq!(text("b").compare(&text("a")), Ordering::Greater);
+        assert_eq!(
+            Value::Date("2024-01-02".to_owned()).compare(&Value::Date("2024-01-10".to_owned())),
+            Ordering::Less
+        );
+        assert_eq!(
+            Value::Int(i64::MAX).compare(&Value::Int(i64::MAX - 1)),
+            Ordering::Greater
+        );
+        // A column that mixes numbers and text still sorts: numbers first, by value.
+        let mut mixed = vec![text("5"), Value::Int(10), text("10"), Value::Int(9)];
+        mixed.sort_by(Value::compare);
+        assert_eq!(
+            mixed,
+            vec![Value::Int(9), Value::Int(10), text("10"), text("5")]
+        );
+        let big = 1_i64 << 53;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the float that both integers round to"
+        )]
+        let rounded = Value::Float(big as f64);
+        assert_eq!(
+            Value::Int(big).compare(&Value::Int(big + 1)),
+            Ordering::Less
+        );
+        assert_eq!(rounded.compare(&Value::Int(big)), Ordering::Less);
+        assert_eq!(rounded.compare(&Value::Int(big + 1)), Ordering::Less);
+        assert_eq!(
+            Value::Float(f64::NAN).compare(&Value::Float(f64::NAN)),
+            Ordering::Equal
+        );
+    }
 
     #[test]
     fn an_error_line_moves_with_the_text_before_it() {

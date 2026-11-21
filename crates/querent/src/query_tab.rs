@@ -926,6 +926,7 @@ impl QueryTab {
             self.results.update(cx, |table, cx| {
                 table.delegate_mut().clear();
                 table.refresh(cx);
+                table.clear_selection(cx);
                 cx.notify();
             });
         }

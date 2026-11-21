@@ -14,6 +14,41 @@ pub fn write_csv(result_set: &ResultSet, writer: impl Write) -> csv::Result<()> 
     Ok(())
 }
 
+/// Whether copied rows start with the column names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Headers {
+    Include,
+    Omit,
+}
+
+/// The chosen rows as tab-separated text, the form spreadsheets paste; a value
+/// holding a tab, a quote or a line break is quoted.
+#[must_use]
+pub fn rows_as_tsv(
+    result_set: &ResultSet,
+    rows: impl IntoIterator<Item = usize>,
+    headers: Headers,
+) -> String {
+    let mut writer = csv::WriterBuilder::new()
+        .delimiter(b'\t')
+        .from_writer(Vec::new());
+    let mut written = match headers {
+        Headers::Include => {
+            writer.write_record(result_set.columns.iter().map(|column| column.name.as_str()))
+        }
+        Headers::Omit => Ok(()),
+    };
+    for row in rows.into_iter().filter_map(|row| result_set.rows.get(row)) {
+        written = written.and_then(|()| writer.write_record(row.iter().map(csv_field)));
+    }
+    // Writing to memory cannot fail; an empty string is the fallback all the same.
+    written
+        .ok()
+        .and_then(|()| writer.into_inner().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .unwrap_or_default()
+}
+
 fn csv_field(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
@@ -39,6 +74,24 @@ mod tests {
             name: name.to_owned(),
             type_name: "NVarChar".to_owned(),
         }
+    }
+
+    #[test]
+    fn copies_chosen_rows_as_tab_separated_text() {
+        let result_set = ResultSet {
+            columns: vec![column("id"), column("note")],
+            rows: vec![
+                vec![Value::Int(1), Value::Text("plain".to_owned())],
+                vec![Value::Int(2), Value::Text("a\tb".to_owned())],
+                vec![Value::Int(3), Value::Null],
+            ],
+            ..ResultSet::default()
+        };
+        assert_eq!(
+            rows_as_tsv(&result_set, [2, 1, 9], Headers::Include),
+            "id\tnote\n3\t\n2\t\"a\tb\"\n"
+        );
+        assert_eq!(rows_as_tsv(&result_set, [0], Headers::Omit), "1\tplain\n");
     }
 
     #[test]

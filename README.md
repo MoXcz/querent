@@ -24,6 +24,8 @@ Snowflake also takes an account identifier (`orgname-accountname` or `xy12345.us
 
 SQL Server also has encryption (Mandatory, Optional, Strict) and PostgreSQL has Require (the default) or Prefer, which connects without encryption when the server has none; both have "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption. PostgreSQL may leave the database empty to use the user's default database.
 
+Test connection, at the bottom of the form, connects with the fields as they are and reports the result without saving.
+
 To start from a connection string, paste it in the box at the top of the form and press Fill from string. For example:
 
 ```text
@@ -66,7 +68,7 @@ Connections are saved as fields in `~/.config/querent/connections.toml`. Passwor
 
 Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. The tab's database picker lists the same databases; type to filter it, or type a name that is not listed and pick "Use …". Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 
-Results show above the grid a button per result set, Messages, and Export CSV. When SQL Server or PostgreSQL reports where a statement failed, the error starts with the tab's line number and a button jumps to that line. With a row limit set (Settings), a single read-only statement stops on the server once the limit is reached; a script with several statements, a statement calling a function that is not a common built-in (it might write), or a run inside an open transaction still reads to the end and only keeps the first rows, so nothing it would write is cut short.
+Results show above the grid a button per result set, Messages, and Export CSV. Click a column's sort arrow to order the rows by it (NULL first, numbers by value); right-click a row to copy it, with or without the column names, to copy every row, or to view its full values, which the grid cuts at 500 characters. Copied rows are tab-separated, so they paste into a spreadsheet. When SQL Server or PostgreSQL reports where a statement failed, the error starts with the tab's line number and a button jumps to that line. With a row limit set (Settings), a single read-only statement stops on the server once the limit is reached; a script with several statements, a statement calling a function that is not a common built-in (it might write), or a run inside an open transaction still reads to the end and only keeps the first rows, so nothing it would write is cut short.
 
 While typing, a menu offers tables after `from` and `join`, the columns of `alias.`, and keywords; hover over a table or column to see its columns or type. The tables and columns are read once per database in the background. PostgreSQL, SQLite and Snowflake tabs also underline syntax errors.
 

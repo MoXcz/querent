@@ -1,22 +1,37 @@
 //! Fields for a saved connection: driver, server, database and the sign-in values
 //! the chosen method needs. A pasted connection string can fill them.
 
+use std::time::{Duration, Instant};
+
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::{WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Window,
-    div, prelude::FluentBuilder as _, px,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
+    Window, div, prelude::FluentBuilder as _, px,
 };
-use sql_db::{AuthMethod, Authentication, ConnectionSettings, DriverKind, Encryption};
+use sql_db::{
+    AuthMethod, Authentication, Connection, ConnectionSettings, DriverKind, Encryption, QueryError,
+};
 
 use crate::connections::SavedConnection;
+use crate::tokio_bridge;
 
 type LabelSelect = SelectState<Vec<SharedString>>;
+
+/// The outcome of the Test connection button.
+#[derive(Default)]
+enum ConnectionTest {
+    #[default]
+    NotRun,
+    Running,
+    Passed(Duration),
+    Failed(SharedString),
+}
 
 pub struct ConnectionForm {
     driver: DriverKind,
@@ -45,6 +60,9 @@ pub struct ConnectionForm {
     warehouse: Entity<InputState>,
     role: Entity<InputState>,
     schema: Entity<InputState>,
+    test: ConnectionTest,
+    /// Dropping the task, as closing the dialog does, stops the connect.
+    test_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -109,6 +127,8 @@ impl ConnectionForm {
             warehouse: text("user's default", window, cx),
             role: text("user's default", window, cx),
             schema: text("PUBLIC", window, cx),
+            test: ConnectionTest::NotRun,
+            test_task: None,
             _subscriptions: subscriptions,
         };
         if let Some(saved) = editing {
@@ -118,8 +138,106 @@ impl ConnectionForm {
         form
     }
 
+    /// Connects with the fields as they are now, without saving them, and closes again.
+    fn test_connection(&mut self, cx: &mut Context<Self>) {
+        // A pasted string that was not filled in would test the old fields.
+        let unfilled = !self.connection_string.read(cx).value().trim().is_empty();
+        let config = if unfilled {
+            Err("Press Fill from string, or clear the connection string box.".to_owned())
+        } else {
+            self.settings(cx)
+                .and_then(|settings| settings.config().map_err(|error| error.to_string()))
+        };
+        let config = match config {
+            Ok(config) => config,
+            Err(message) => {
+                self.test = ConnectionTest::Failed(message.into());
+                cx.notify();
+                return;
+            }
+        };
+        let connect = tokio_bridge::spawn(cx, async move {
+            let started = Instant::now();
+            let connection = Connection::connect(config).await?;
+            let elapsed = started.elapsed();
+            if let Err(error) = connection.close().await {
+                tracing::debug!(%error, "closing the test connection");
+            }
+            Ok::<_, QueryError>(elapsed)
+        });
+        self.test = ConnectionTest::Running;
+        self.test_task = Some(cx.spawn(async move |this, cx| {
+            let outcome = connect.await;
+            let shown = this.update(cx, |this, cx| {
+                this.test = match outcome {
+                    Ok(Ok(elapsed)) => ConnectionTest::Passed(elapsed),
+                    Ok(Err(error)) => ConnectionTest::Failed(error.to_string().into()),
+                    Err(error) => ConnectionTest::Failed(error.to_string().into()),
+                };
+                cx.notify();
+            });
+            if let Err(error) = shown {
+                tracing::debug!(%error, "connection form closed before the test finished");
+            }
+        }));
+        cx.notify();
+    }
+
+    fn render_test_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let running = matches!(self.test, ConnectionTest::Running);
+        let (text, failed) = match &self.test {
+            ConnectionTest::NotRun => (SharedString::default(), false),
+            ConnectionTest::Running => ("Connecting…".into(), false),
+            ConnectionTest::Passed(elapsed) => (
+                format!("Connected in {:.1}s.", elapsed.as_secs_f64()).into(),
+                false,
+            ),
+            ConnectionTest::Failed(message) => (message.clone(), true),
+        };
+        let color = if failed {
+            cx.theme().danger
+        } else {
+            cx.theme().muted_foreground
+        };
+        h_flex()
+            .gap_3()
+            .items_start()
+            .child(
+                Button::new("test-connection")
+                    .label("Test connection")
+                    .outline()
+                    .disabled(running)
+                    .on_click(cx.listener(|form, _, _, cx| form.test_connection(cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(color)
+                    .child(text),
+            )
+            .into_any_element()
+    }
+
     /// The name and settings, or a message saying which field is missing.
     pub fn saved_connection(&self, cx: &App) -> Result<SavedConnection, String> {
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        let name = value(&self.name);
+        if name.is_empty() {
+            return Err("Enter the connection name.".to_owned());
+        }
+        if !value(&self.connection_string).is_empty() {
+            return Err("Press Fill from string, or clear the connection string box.".to_owned());
+        }
+        Ok(SavedConnection {
+            name,
+            settings: self.settings(cx)?,
+        })
+    }
+
+    /// The fields as connection settings, or a message saying which one is missing.
+    fn settings(&self, cx: &App) -> Result<ConnectionSettings, String> {
         let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
         let required = |input: &Entity<InputState>, field: &str| {
             let text = value(input);
@@ -132,7 +250,6 @@ impl ConnectionForm {
         let optional =
             |input: &Entity<InputState>| Some(value(input)).filter(|text| !text.is_empty());
         let session_context = self.driver.has_session_context();
-        let name = required(&self.name, "connection name")?;
         let server = required(
             &self.server,
             match (self.driver.is_file(), self.driver.has_session_context()) {
@@ -141,9 +258,6 @@ impl ConnectionForm {
                 (false, false) => "server",
             },
         )?;
-        if !value(&self.connection_string).is_empty() {
-            return Err("Press Fill from string, or clear the connection string box.".to_owned());
-        }
         // Hidden fields keep their values, so a Fabric endpoint with an unusual
         // port or certificate name keeps working after an edit.
         let port = match value(&self.port) {
@@ -200,7 +314,7 @@ impl ConnectionForm {
         settings
             .config()
             .map_err(|error| format!("Server: {error}"))?;
-        Ok(SavedConnection { name, settings })
+        Ok(settings)
     }
 
     fn fill(&mut self, settings: &ConnectionSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -649,6 +763,7 @@ impl Render for ConnectionForm {
             .children(self.sign_in_rows(cx))
             .children(self.session_context_rows())
             .children(self.network_rows(cx))
+            .child(self.render_test_row(cx))
     }
 }
 

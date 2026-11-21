@@ -45,6 +45,8 @@ impl QueryTab {
         self.results.update(cx, |table, cx| {
             table.delegate_mut().set_result(shown);
             table.refresh(cx);
+            // A selection would point at a row of the result shown before.
+            table.clear_selection(cx);
             cx.notify();
         });
         cx.notify();
