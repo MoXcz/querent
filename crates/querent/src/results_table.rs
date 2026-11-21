@@ -1,6 +1,7 @@
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::{ActiveTheme as _, WindowExt as _, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, ClipboardItem, Context, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
@@ -26,7 +27,10 @@ const WIDTH_SAMPLE_ROWS: usize = 200;
 pub struct ResultsTable {
     result: Arc<ResultSet>,
     columns: Vec<Column>,
-    /// Row numbers of `result` in the order a sorted column shows them; the rows are not copied.
+    /// Rows the filter keeps, in the order the server sent them; `None` keeps every row.
+    filtered: Option<Arc<Vec<usize>>>,
+    sort: Option<(usize, ColumnSort)>,
+    /// Row numbers of `result` as the grid shows them, after the filter and the sort; the rows are not copied.
     order: Option<Arc<Vec<usize>>>,
 }
 
@@ -67,7 +71,26 @@ impl ResultsTable {
             })
             .collect();
         self.result = result;
+        self.filtered = None;
+        self.sort = None;
         self.order = None;
+    }
+
+    /// Keeps only `rows` of the result, or every row for `None`.
+    pub fn set_filtered(&mut self, rows: Option<Vec<usize>>) {
+        self.filtered = rows.map(Arc::new);
+        self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
+    }
+
+    /// The rows the grid shows, in its order; `None` when that is every row as it arrived.
+    pub fn shown_rows(&self) -> Option<Arc<Vec<usize>>> {
+        self.order.clone()
+    }
+
+    pub fn shown_count(&self) -> usize {
+        self.order
+            .as_ref()
+            .map_or(self.result.rows.len(), |order| order.len())
     }
 
     /// The row of the result set that grid row `row_index` shows.
@@ -96,7 +119,7 @@ impl TableDelegate for ResultsTable {
     }
 
     fn rows_count(&self, _: &App) -> usize {
-        self.result.rows.len()
+        self.shown_count()
     }
 
     fn column(&self, column_index: usize, _: &App) -> Column {
@@ -132,7 +155,8 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        self.order = sorted_order(&self.result, column_index, sort).map(Arc::new);
+        self.sort = Some((column_index, sort));
+        self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
         // The highlighted grid row now shows another row of the result.
         let table = cx.entity();
         cx.defer(move |cx| table.update(cx, TableState::clear_selection));
@@ -176,24 +200,43 @@ impl TableDelegate for ResultsTable {
             ));
         }
         let fields = row_fields(&self.result, source_row);
+        let result = self.result.clone();
         menu.separator().item(
             PopupMenuItem::new("View row").on_click(move |_, window, cx| {
                 let fields = fields.clone();
+                let result = result.clone();
                 window.open_dialog(cx, move |dialog, _, cx| {
                     dialog.title("Row").w(px(720.)).child(
                         div()
                             .id("row-values")
                             .max_h(px(520.))
                             .overflow_y_scroll()
-                            .child(v_flex().gap_3().children(fields.iter().map(
-                                |(name, value)| {
+                            .child(v_flex().gap_3().children(fields.iter().enumerate().map(
+                                |(index, (name, value))| {
+                                    let result = result.clone();
                                     v_flex()
                                         .gap_1()
                                         .child(
-                                            div()
+                                            h_flex()
+                                                .gap_2()
                                                 .text_xs()
                                                 .text_color(cx.theme().muted_foreground)
-                                                .child(name.clone()),
+                                                .child(name.clone())
+                                                .child(
+                                                    Button::new(("copy-value", index))
+                                                        .ghost()
+                                                        .xsmall()
+                                                        .label("Copy")
+                                                        .tooltip("Copy the whole value")
+                                                        .on_click(move |_, _, cx| {
+                                                            let text = whole_value(
+                                                                &result, source_row, index,
+                                                            );
+                                                            cx.write_to_clipboard(
+                                                                ClipboardItem::new_string(text),
+                                                            );
+                                                        }),
+                                                ),
                                         )
                                         .child(div().text_sm().child(value.clone()))
                                 },
@@ -205,15 +248,23 @@ impl TableDelegate for ResultsTable {
     }
 }
 
-/// Row numbers ordered by one column, or `None` to show the rows as they arrived.
-fn sorted_order(result: &ResultSet, column_index: usize, sort: ColumnSort) -> Option<Vec<usize>> {
-    let descending = match sort {
-        ColumnSort::Default => return None,
-        ColumnSort::Ascending => false,
-        ColumnSort::Descending => true,
+/// The row numbers the grid shows: the filtered rows, ordered by the sorted
+/// column. `None` shows every row as it arrived.
+fn shown_order(
+    result: &ResultSet,
+    filtered: Option<&Arc<Vec<usize>>>,
+    sort: Option<(usize, ColumnSort)>,
+) -> Option<Arc<Vec<usize>>> {
+    let (column_index, descending) = match sort {
+        None | Some((_, ColumnSort::Default)) => return filtered.cloned(),
+        Some((column_index, ColumnSort::Ascending)) => (column_index, false),
+        Some((column_index, ColumnSort::Descending)) => (column_index, true),
     };
     let value = |row: usize| result.rows.get(row).and_then(|row| row.get(column_index));
-    let mut order: Vec<usize> = (0..result.rows.len()).collect();
+    let mut order: Vec<usize> = match filtered {
+        Some(rows) => rows.to_vec(),
+        None => (0..result.rows.len()).collect(),
+    };
     // Stable, so rows that tie keep the order the server sent.
     order.sort_by(|left, right| {
         let ordering = match (value(*left), value(*right)) {
@@ -226,7 +277,29 @@ fn sorted_order(result: &ResultSet, column_index: usize, sort: ColumnSort) -> Op
             ordering
         }
     });
-    Some(order)
+    Some(Arc::new(order))
+}
+
+/// Rows with a value whose text contains `needle`, which must be lowercase.
+pub fn matching_rows(result: &ResultSet, needle: &str) -> Vec<usize> {
+    result
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.iter()
+                .any(|value| value.to_string().to_lowercase().contains(needle))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// A value as it is copied: all of it, and nothing for NULL.
+fn whole_value(result: &ResultSet, row: usize, column: usize) -> String {
+    match result.rows.get(row).and_then(|row| row.get(column)) {
+        None | Some(Value::Null) => String::new(),
+        Some(value) => value.to_string(),
+    }
 }
 
 /// Each column's name and the row's whole value, for the row viewer.
@@ -300,15 +373,27 @@ mod tests {
                 vec![Value::Int(3)],
             ],
         );
-        assert_eq!(sorted_order(&result, 0, ColumnSort::Default), None);
+        let order = |filtered: Option<Vec<usize>>, sort| {
+            shown_order(&result, filtered.map(Arc::new).as_ref(), Some((0, sort)))
+                .map(|order| order.to_vec())
+        };
+        assert_eq!(order(None, ColumnSort::Default), None);
+        assert_eq!(order(None, ColumnSort::Ascending), Some(vec![1, 2, 0, 3]));
+        assert_eq!(order(None, ColumnSort::Descending), Some(vec![0, 3, 2, 1]));
+        // A filter narrows the rows before they are sorted.
+        let threes = matching_rows(&result, "3");
+        assert_eq!(threes, vec![0, 3]);
+        assert_eq!(matching_rows(&result, "null"), vec![1]);
         assert_eq!(
-            sorted_order(&result, 0, ColumnSort::Ascending),
-            Some(vec![1, 2, 0, 3])
+            order(Some(vec![1, 2, 3]), ColumnSort::Descending),
+            Some(vec![3, 2, 1])
         );
         assert_eq!(
-            sorted_order(&result, 0, ColumnSort::Descending),
-            Some(vec![0, 3, 2, 1])
+            order(Some(threes.clone()), ColumnSort::Default),
+            Some(threes)
         );
+        assert_eq!(whole_value(&result, 1, 0), "");
+        assert_eq!(whole_value(&result, 2, 0), "1");
         let fields = row_fields(&result, 2);
         assert_eq!(fields.as_slice(), [("n".into(), "1".into())]);
     }

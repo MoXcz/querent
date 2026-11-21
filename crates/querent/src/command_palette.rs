@@ -12,8 +12,8 @@ use gpui_kit::{
 };
 
 use crate::query_tab::{
-    CancelQuery, ExportCsv, FormatSql, RefreshSchema, RunAll, RunQuery, SaveFile, SaveFileAs,
-    SignOut, ToggleVimMode,
+    CancelQuery, ExportCsv, ExportJson, FormatSql, RefreshSchema, RunAll, RunQuery, SaveFile,
+    SaveFileAs, SignOut, ToggleVimMode,
 };
 use crate::settings;
 use crate::themes::{self, SelectTheme};
@@ -73,6 +73,12 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
         command("Query", "Run all", &["execute", "script"], RunAll),
         command("Query", "Cancel query", &["stop"], CancelQuery),
         command("Query", "Export result as CSV", &["save", "csv"], ExportCsv),
+        command(
+            "Query",
+            "Export result as JSON",
+            &["save", "json"],
+            ExportJson,
+        ),
         command("Query", "Format SQL", &["pretty", "indent"], FormatSql),
         command("Tabs", "New tab", &["open"], NewTab),
         command("Files", "Open file", &["sql", "load"], OpenFile),

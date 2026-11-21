@@ -7,8 +7,8 @@ use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{
-    Editor, EditorState, InputEvent, MoveDown, MoveUp, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Redo, RopeExt as _, Undo,
+    Editor, EditorState, InputEvent, InputState, MoveDown, MoveUp, RangeDecoration,
+    RangeDecorationCollection, RangeDecorationStyle, Redo, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::TableState;
@@ -37,6 +37,7 @@ use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
 
 mod files;
+pub use files::{FileText, read_sql_file};
 mod language;
 mod results;
 
@@ -51,6 +52,8 @@ actions!(
         CancelQuery,
         /// Save the shown result as a CSV file.
         ExportCsv,
+        /// Save the shown result as a JSON file.
+        ExportJson,
         /// Turn vim keys in the editor on or off.
         ToggleVimMode,
         /// Format the editor's SQL with the connection's language server.
@@ -152,6 +155,10 @@ pub struct QueryTab {
     shown_index: usize,
     /// The grid shows the run's messages instead of a result set.
     show_messages: bool,
+    /// Text a row must contain to stay in the grid.
+    filter_input: Entity<InputState>,
+    /// Pending filter pass; replacing it restarts the delay.
+    filter_task: Option<Task<()>>,
     /// The next run ignores the row limit ("Run again without limit").
     without_row_limit: bool,
     /// The last run left a transaction open on this tab's connection.
@@ -218,6 +225,7 @@ impl QueryTab {
             lsp.hover_provider = Some(std::rc::Rc::new(SqlHover { target }));
         });
         let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
+        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter rows"));
         let vim_interceptor = Self::intercept_vim_keys(cx);
 
         let subscriptions = vec![
@@ -235,6 +243,11 @@ impl QueryTab {
             cx.observe_global::<SettingsStore>(Self::update_block_cursor),
             // Server diagnostics arrive on their own schedule.
             cx.observe_global::<LspServers>(Self::on_servers_changed),
+            cx.subscribe(&filter_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.schedule_filter(cx);
+                }
+            }),
             cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.schedule_syntax_check(cx);
@@ -260,6 +273,8 @@ impl QueryTab {
             shown_result: None,
             shown_index: 0,
             show_messages: false,
+            filter_input,
+            filter_task: None,
             without_row_limit: false,
             open_transaction: false,
             last_run: None,
@@ -1228,6 +1243,7 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::run_all))
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::export_csv))
+            .on_action(cx.listener(Self::export_json))
             .on_action(cx.listener(Self::format_sql))
             .on_action(cx.listener(Self::save_file))
             .on_action(cx.listener(Self::save_file_as))

@@ -2,16 +2,73 @@ use std::io::Write;
 
 use crate::{ResultSet, Value};
 
-/// Writes a header row of column names, then one row per result row.
+/// The rows of `result_set` to write: the chosen row numbers in their order, or all of them.
+fn chosen<'a>(
+    result_set: &'a ResultSet,
+    rows: Option<&'a [usize]>,
+) -> impl Iterator<Item = &'a Vec<Value>> {
+    let all = rows.is_none().then(|| result_set.rows.iter());
+    let some = rows
+        .into_iter()
+        .flatten()
+        .filter_map(|row| result_set.rows.get(*row));
+    all.into_iter().flatten().chain(some)
+}
+
+/// Writes a header row of column names, then one row per chosen row.
 /// NULL becomes an empty field so spreadsheets read it as blank.
-pub fn write_csv(result_set: &ResultSet, writer: impl Write) -> csv::Result<()> {
+pub fn write_csv(
+    result_set: &ResultSet,
+    rows: Option<&[usize]>,
+    writer: impl Write,
+) -> csv::Result<()> {
     let mut csv_writer = csv::Writer::from_writer(writer);
     csv_writer.write_record(result_set.columns.iter().map(|column| column.name.as_str()))?;
-    for row in &result_set.rows {
+    for row in chosen(result_set, rows) {
         csv_writer.write_record(row.iter().map(csv_field))?;
     }
     csv_writer.flush()?;
     Ok(())
+}
+
+/// Writes the chosen rows as a JSON array with one object per row and line.
+/// Two columns with one name keep the later value, as JSON objects do.
+pub fn write_json(
+    result_set: &ResultSet,
+    rows: Option<&[usize]>,
+    mut writer: impl Write,
+) -> std::io::Result<()> {
+    writer.write_all(b"[")?;
+    for (index, row) in chosen(result_set, rows).enumerate() {
+        writer.write_all(if index == 0 { b"\n" } else { b",\n" })?;
+        let object: serde_json::Map<String, serde_json::Value> = result_set
+            .columns
+            .iter()
+            .zip(row)
+            .map(|(column, value)| (column.name.clone(), json_value(value)))
+            .collect();
+        serde_json::to_writer(&mut writer, &object)?;
+    }
+    writer.write_all(b"\n]\n")?;
+    writer.flush()
+}
+
+/// Numbers stay numbers; decimals, dates and bytes are text, so no digit is lost.
+fn json_value(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(flag) => serde_json::Value::Bool(*flag),
+        Value::Int(number) => serde_json::Value::from(*number),
+        // JSON has no NaN or infinity; they are written as text.
+        Value::Float(number) => serde_json::Number::from_f64(*number)
+            .map_or_else(|| serde_json::Value::String(value.to_string()), Into::into),
+        Value::Decimal(_)
+        | Value::Text(_)
+        | Value::Bytes(_)
+        | Value::Date(_)
+        | Value::Time(_)
+        | Value::Timestamp(_) => serde_json::Value::String(value.to_string()),
+    }
 }
 
 /// Whether copied rows start with the column names.
@@ -77,6 +134,37 @@ mod tests {
     }
 
     #[test]
+    fn writes_chosen_rows_as_json() {
+        let result_set = ResultSet {
+            columns: vec![column("z"), column("a")],
+            rows: vec![
+                vec![Value::Int(1), Value::Text("a\"b".to_owned())],
+                vec![Value::Float(f64::NAN), Value::Null],
+                vec![Value::Decimal("1.50".to_owned()), Value::Bool(true)],
+            ],
+            ..ResultSet::default()
+        };
+        let mut all = Vec::new();
+        write_json(&result_set, None, &mut all).unwrap();
+        assert_eq!(
+            String::from_utf8(all).unwrap(),
+            "[\n{\"z\":1,\"a\":\"a\\\"b\"},\n{\"z\":\"NaN\",\"a\":null},\n{\"z\":\"1.50\",\"a\":true}\n]\n"
+        );
+        let mut some = Vec::new();
+        write_json(&result_set, Some(&[2, 7]), &mut some).unwrap();
+        assert_eq!(
+            String::from_utf8(some).unwrap(),
+            "[\n{\"z\":\"1.50\",\"a\":true}\n]\n"
+        );
+        let mut none = Vec::new();
+        write_json(&ResultSet::default(), None, &mut none).unwrap();
+        assert_eq!(String::from_utf8(none).unwrap(), "[\n]\n");
+        let mut csv = Vec::new();
+        write_csv(&result_set, Some(&[1, 0]), &mut csv).unwrap();
+        assert_eq!(String::from_utf8(csv).unwrap(), "z,a\nNaN,\n1,\"a\"\"b\"\n");
+    }
+
+    #[test]
     fn copies_chosen_rows_as_tab_separated_text() {
         let result_set = ResultSet {
             columns: vec![column("id"), column("note")],
@@ -110,7 +198,7 @@ mod tests {
             ..ResultSet::default()
         };
         let mut bytes = Vec::new();
-        write_csv(&result_set, &mut bytes).unwrap();
+        write_csv(&result_set, None, &mut bytes).unwrap();
 
         let mut reader = csv::Reader::from_reader(bytes.as_slice());
         assert_eq!(
@@ -135,7 +223,7 @@ mod tests {
             ..ResultSet::default()
         };
         let mut bytes = Vec::new();
-        write_csv(&result_set, &mut bytes).unwrap();
+        write_csv(&result_set, None, &mut bytes).unwrap();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "b,flag,day\n0x0AFF,1,2024-02-29\n"
@@ -149,7 +237,7 @@ mod tests {
             ..ResultSet::default()
         };
         let mut bytes = Vec::new();
-        write_csv(&result_set, &mut bytes).unwrap();
+        write_csv(&result_set, None, &mut bytes).unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap(), "id\n");
     }
 }

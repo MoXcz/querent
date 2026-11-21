@@ -187,6 +187,11 @@ pub fn init(cx: &mut App) {
     }
 }
 
+/// False when `connections.toml` could not be read, so it is never written over.
+pub fn are_saved(cx: &App) -> bool {
+    cx.global::<ConnectionStore>().writer.is_some()
+}
+
 pub fn all(cx: &App) -> &[SavedConnection] {
     &cx.global::<ConnectionStore>().connections
 }

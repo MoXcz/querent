@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use gpui_kit::assets::IconName as LucideIcon;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::RopeExt as _;
+use gpui_kit::component::input::{Input, RopeExt as _};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::table::DataTable;
 use gpui_kit::component::{
@@ -14,11 +14,30 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     AnyElement, AsyncApp, Context, IntoElement, ParentElement as _, Styled as _, WeakEntity,
-    Window, div, prelude::FluentBuilder as _,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use sql_db::{QueryOutput, ResultSet};
 
-use super::{CancelQuery, ExportCsv, QueryState, QueryTab};
+use super::{CancelQuery, ExportCsv, ExportJson, QueryState, QueryTab};
+use crate::results_table::matching_rows;
+
+/// Wait after the last key before the grid is filtered.
+const FILTER_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+#[derive(Clone, Copy)]
+enum ExportFormat {
+    Csv,
+    Json,
+}
+
+impl ExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+}
 
 /// Messages drawn at once; a loop of `PRINT`s can produce far more.
 const MAX_SHOWN_MESSAGES: usize = 1_000;
@@ -46,6 +65,55 @@ impl QueryTab {
             table.delegate_mut().set_result(shown);
             table.refresh(cx);
             // A selection would point at a row of the result shown before.
+            table.clear_selection(cx);
+            cx.notify();
+        });
+        // The filter text stays while results change, so it applies to this one too.
+        self.schedule_filter(cx);
+        cx.notify();
+    }
+
+    /// Narrows the grid to the rows that contain the filter text, off the UI thread.
+    pub(super) fn schedule_filter(&mut self, cx: &mut Context<Self>) {
+        let needle = self.filter_input.read(cx).value().trim().to_lowercase();
+        let Some(result) = self.shown_result.clone() else {
+            self.filter_task = None;
+            return;
+        };
+        if needle.is_empty() {
+            self.filter_task = None;
+            self.apply_filter(None, cx);
+            return;
+        }
+        self.filter_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FILTER_DELAY).await;
+            let rows = cx
+                .background_executor()
+                .spawn({
+                    let result = result.clone();
+                    async move { matching_rows(&result, &needle) }
+                })
+                .await;
+            let applied = this.update(cx, |this, cx| {
+                // Another result may be in the grid by now.
+                let current = this
+                    .shown_result
+                    .as_ref()
+                    .is_some_and(|shown| Arc::ptr_eq(shown, &result));
+                if current {
+                    this.apply_filter(Some(rows), cx);
+                }
+            });
+            if let Err(error) = applied {
+                tracing::debug!(%error, "tab closed before the rows were filtered");
+            }
+        }));
+    }
+
+    fn apply_filter(&mut self, rows: Option<Vec<usize>>, cx: &mut Context<Self>) {
+        self.results.update(cx, |table, cx| {
+            table.delegate_mut().set_filtered(rows);
+            // A selection would point at another row now.
             table.clear_selection(cx);
             cx.notify();
         });
@@ -90,6 +158,15 @@ impl QueryTab {
     }
 
     pub(super) fn export_csv(&mut self, _: &ExportCsv, _: &mut Window, cx: &mut Context<Self>) {
+        self.export(ExportFormat::Csv, cx);
+    }
+
+    pub(super) fn export_json(&mut self, _: &ExportJson, _: &mut Window, cx: &mut Context<Self>) {
+        self.export(ExportFormat::Json, cx);
+    }
+
+    /// Saves the rows the grid shows, in its order, to a file the user picks.
+    fn export(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
         let Some(result_set) = self
             .shown_result
             .clone()
@@ -100,7 +177,12 @@ impl QueryTab {
             return;
         };
         let directory = export_directory();
-        let suggested_name = export_file_name(self.number, &self.connection_fields(cx).database);
+        let shown_rows = self.results.read(cx).delegate().shown_rows();
+        let suggested_name = export_file_name(
+            self.number,
+            &self.connection_fields(cx).database,
+            format.extension(),
+        );
         let chosen_path = cx.prompt_for_new_path(&directory, Some(&suggested_name));
 
         self.export_task = Some(cx.spawn(async move |this, cx| {
@@ -118,14 +200,20 @@ impl QueryTab {
                 .spawn({
                     let path = path.clone();
                     let result_set = result_set.clone();
-                    async move { write_csv_file(&path, &result_set) }
+                    let shown_rows = shown_rows.clone();
+                    async move {
+                        let rows = shown_rows.as_deref().map(Vec::as_slice);
+                        write_export_file(&path, &result_set, rows, format)
+                    }
                 })
                 .await;
             let notice = match written {
                 Ok(()) => {
                     let mut notice = format!(
                         "Exported {} rows to {}",
-                        result_set.rows.len(),
+                        shown_rows
+                            .as_ref()
+                            .map_or(result_set.rows.len(), |rows| rows.len()),
                         path.display()
                     );
                     if result_set.truncated {
@@ -190,7 +278,12 @@ impl QueryTab {
             .shown_result
             .as_ref()
             .filter(|result| !result.columns.is_empty())?;
-        let mut summary = format!("{} rows", result.rows.len());
+        let shown = self.results.read(cx).delegate().shown_count();
+        let mut summary = if shown == result.rows.len() {
+            format!("{shown} rows")
+        } else {
+            format!("{shown} of {} rows", result.rows.len())
+        };
         let truncated = result.truncated;
         if truncated {
             summary.push_str(
@@ -206,7 +299,13 @@ impl QueryTab {
                 .border_color(cx.theme().border)
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(summary)
+                .child(
+                    h_flex().gap_3().child(summary).child(
+                        div()
+                            .w(px(220.))
+                            .child(Input::new(&self.filter_input).xsmall()),
+                    ),
+                )
                 .children(truncated.then(|| {
                     Button::new("rerun-without-limit")
                         .ghost()
@@ -327,15 +426,29 @@ impl QueryTab {
             return div().into_any_element();
         }
         let export = exportable.then(|| {
-            Button::new("export-csv")
-                .ghost()
-                .xsmall()
-                .icon(LucideIcon::Download)
-                .label("Export CSV")
-                .tooltip("Save the result as CSV (Ctrl+Shift+E)")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.export_csv(&ExportCsv, window, cx);
-                }))
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("export-csv")
+                        .ghost()
+                        .xsmall()
+                        .icon(LucideIcon::Download)
+                        .label("Export CSV")
+                        .tooltip("Save the rows shown as CSV (Ctrl+Shift+E)")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.export_csv(&ExportCsv, window, cx);
+                        })),
+                )
+                .child(
+                    Button::new("export-json")
+                        .ghost()
+                        .xsmall()
+                        .label("JSON")
+                        .tooltip("Save the rows shown as JSON")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.export_json(&ExportJson, window, cx);
+                        })),
+                )
         });
         let mut views_bar = h_flex().gap_1();
         let bar = h_flex()
@@ -410,11 +523,21 @@ fn report_export(this: &WeakEntity<QueryTab>, notice: String, cx: &mut AsyncApp)
     }
 }
 
-fn write_csv_file(path: &Path, result_set: &ResultSet) -> anyhow::Result<()> {
+fn write_export_file(
+    path: &Path,
+    result_set: &ResultSet,
+    rows: Option<&[usize]>,
+    format: ExportFormat,
+) -> anyhow::Result<()> {
     let file =
         std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    sql_db::write_csv(result_set, std::io::BufWriter::new(file))
-        .with_context(|| format!("writing {}", path.display()))
+    let writer = std::io::BufWriter::new(file);
+    match format {
+        ExportFormat::Csv => sql_db::write_csv(result_set, rows, writer)
+            .with_context(|| format!("writing {}", path.display())),
+        ExportFormat::Json => sql_db::write_json(result_set, rows, writer)
+            .with_context(|| format!("writing {}", path.display())),
+    }
 }
 
 /// Downloads, else home, else the working directory.
@@ -429,7 +552,7 @@ fn export_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn export_file_name(tab_number: usize, database: &str) -> String {
+fn export_file_name(tab_number: usize, database: &str, extension: &str) -> String {
     let stem: String = database
         .chars()
         .map(|character| {
@@ -441,9 +564,9 @@ fn export_file_name(tab_number: usize, database: &str) -> String {
         })
         .collect();
     if stem.is_empty() {
-        format!("query-{tab_number}.csv")
+        format!("query-{tab_number}.{extension}")
     } else {
-        format!("{stem}-query-{tab_number}.csv")
+        format!("{stem}-query-{tab_number}.{extension}")
     }
 }
 
@@ -453,10 +576,10 @@ mod tests {
 
     #[test]
     fn export_file_name_is_safe() {
-        assert_eq!(export_file_name(2, ""), "query-2.csv");
+        assert_eq!(export_file_name(2, "", "csv"), "query-2.csv");
         assert_eq!(
-            export_file_name(3, "dbo/sales data"),
-            "dbo_sales_data-query-3.csv"
+            export_file_name(3, "dbo/sales data", "json"),
+            "dbo_sales_data-query-3.json"
         );
     }
 }

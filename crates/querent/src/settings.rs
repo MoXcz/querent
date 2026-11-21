@@ -105,6 +105,11 @@ pub fn init(cx: &mut App) {
     });
 }
 
+/// False when `settings.toml` could not be read, so it is never written over.
+pub fn are_saved(cx: &App) -> bool {
+    cx.global::<SettingsStore>().writer.is_some()
+}
+
 fn spawn_writer(config_dir: PathBuf) -> Option<std::sync::mpsc::Sender<Settings>> {
     let (sender, jobs) = std::sync::mpsc::channel::<Settings>();
     let spawned = std::thread::Builder::new()

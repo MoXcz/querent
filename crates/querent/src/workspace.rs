@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -10,9 +10,9 @@ use gpui_kit::component::{
     v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
-    Window, actions, div, px,
+    App, AppContext as _, Context, Entity, ExternalPaths, Focusable as _, InteractiveElement as _,
+    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _,
+    Subscription, Task, Window, actions, div, px,
 };
 
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
@@ -21,7 +21,7 @@ use crate::connections::{self, SavedConnection};
 use crate::history::{self, HistoryEntry};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
-use crate::query_tab::{ConnectionFields, QueryTab};
+use crate::query_tab::{ConnectionFields, FileText, QueryTab, read_sql_file};
 use crate::session::{self, SavedTab, Session};
 use crate::tokio_bridge;
 
@@ -68,9 +68,11 @@ pub struct Workspace {
     /// Tabs closed in this run, the latest last, for `ReopenClosedTab`.
     closed_tabs: Vec<SavedTab>,
     open_file_task: Option<Task<()>>,
+    _activation: Subscription,
     /// The user agreed to close the window with transactions open.
     close_confirmed: bool,
     _sign_in_prompts: Option<Task<()>>,
+    _startup_notices: Task<()>,
 }
 
 impl Workspace {
@@ -93,8 +95,17 @@ impl Workspace {
             last_saved: None,
             closed_tabs: Vec::new(),
             open_file_task: None,
+            // Coming back from another program is when a file may have changed.
+            _activation: cx.observe_window_activation(window, |workspace, window, cx| {
+                if window.is_window_active()
+                    && let Some(tab) = workspace.active_tab().cloned()
+                {
+                    tab.update(cx, |tab, cx| tab.check_file_on_disk(window, cx));
+                }
+            }),
             close_confirmed: false,
             _sign_in_prompts: crate::sign_in::show_prompts(window, cx),
+            _startup_notices: Self::show_unsaved_config(window, cx),
         };
         // Closing the last window may drop the workspace before quit hooks run.
         let closing = cx.weak_entity();
@@ -119,6 +130,33 @@ impl Workspace {
             tab.update(cx, |tab, cx| tab.use_connection(&name, window, cx));
         }
         workspace
+    }
+
+    /// Says once which config file is not being saved, so changes are not lost unnoticed.
+    fn show_unsaved_config(window: &mut Window, cx: &mut Context<Self>) -> Task<()> {
+        let unsaved: Vec<&str> = [
+            ("settings.toml", crate::settings::are_saved(cx)),
+            ("connections.toml", connections::are_saved(cx)),
+        ]
+        .into_iter()
+        .filter_map(|(file, saved)| (!saved).then_some(file))
+        .collect();
+        // Shown from a task: the window has no notification layer until it is open.
+        cx.spawn_in(window, async move |_, cx| {
+            for file in unsaved {
+                let shown = cx.update(|window, cx| {
+                    window.push_notification(
+                        format!(
+                            "{file} could not be read or written, so changes are not saved in this session. Fix or remove the file and restart."
+                        ),
+                        cx,
+                    );
+                });
+                if shown.is_err() {
+                    return;
+                }
+            }
+        })
     }
 
     /// Reopens the saved tabs; a connection deleted since is left unset.
@@ -191,6 +229,19 @@ impl Workspace {
                     return;
                 }
             };
+            let opened = this.update_in(cx, |_, window, cx| {
+                Self::open_paths(paths, window, cx);
+            });
+            if let Err(error) = opened {
+                tracing::debug!(%error, "workspace closed before the files were chosen");
+            }
+        }));
+    }
+
+    /// Reads each file off the UI thread and shows it in a tab.
+    fn open_paths(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        // Detached: a second drop must not stop the files of the first.
+        cx.spawn_in(window, async move |this, cx| {
             for path in paths {
                 let read = cx
                     .background_executor()
@@ -200,21 +251,22 @@ impl Workspace {
                     })
                     .await;
                 let shown = this.update_in(cx, |this, window, cx| match read {
-                    Ok(text) => this.show_file(path, &text, window, cx),
+                    Ok(file) => this.show_file(path, &file, window, cx),
                     Err(message) => window.push_notification(message, cx),
                 });
                 if shown.is_err() {
                     return;
                 }
             }
-        }));
+        })
+        .detach();
     }
 
     /// Switches to the tab that has `path` open, or shows it in a blank or new tab.
     fn show_file(
         &mut self,
         path: PathBuf,
-        text: &str,
+        file: &FileText,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -237,7 +289,7 @@ impl Workspace {
             self.open_tab(fields, window, cx);
         }
         if let Some(tab) = self.active_tab().cloned() {
-            tab.update(cx, |tab, cx| tab.open_file(path, text, window, cx));
+            tab.update(cx, |tab, cx| tab.open_file(path, file, window, cx));
         }
     }
 
@@ -519,6 +571,8 @@ impl Workspace {
             return;
         };
         let editor_focus = tab.view.read(cx).editor_focus_handle(cx);
+        tab.view
+            .update(cx, |tab, cx| tab.check_file_on_disk(window, cx));
         self.active_index = index;
         // Opening, closing and switching tabs all pass through here.
         self.schedule_session_save(cx);
@@ -777,6 +831,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::reopen_closed_tab))
+            .on_drop(cx.listener(|_, dropped: &ExternalPaths, window, cx| {
+                Self::open_paths(dropped.paths().to_vec(), window, cx);
+            }))
             .on_action(cx.listener(|_, _: &AddConnection, window, cx| {
                 Self::open_connection_dialog(None, window, cx);
             }))
@@ -851,24 +908,6 @@ fn close_question(title: &str, modified: bool, open_transaction: bool) -> Option
 
 /// Closed tabs kept for reopening.
 const MAX_CLOSED_TABS: usize = 20;
-/// A larger file is not a script to edit by hand.
-const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
-
-/// The file's text, or a message for the user.
-fn read_sql_file(path: &Path) -> Result<String, String> {
-    let failed = |error: std::io::Error| format!("Could not open {}: {error}.", path.display());
-    let size = std::fs::metadata(path).map_err(failed)?.len();
-    if size > MAX_FILE_BYTES {
-        return Err(format!(
-            "{} is larger than 50 MB and was not opened.",
-            path.display()
-        ));
-    }
-    let bytes = std::fs::read(path).map_err(failed)?;
-    sql_text::decode_file(&bytes)
-        .map_err(|error| format!("Could not open {}: {error}.", path.display()))
-}
-
 /// The longest a quit waits for running queries to stop on their servers.
 const QUIT_CANCEL_WAIT: Duration = Duration::from_secs(3);
 
