@@ -489,6 +489,47 @@ mod tests {
         assert!(matches!(read_frame(&mut reader).await, Ok(Some(_))));
     }
 
+    #[test]
+    fn dispatch_routes_replies_requests_and_notifications() {
+        let pending: Pending = Arc::default();
+        let (outgoing, mut sent) = mpsc::unbounded_channel();
+        let (notifications, mut notified) = mpsc::unbounded_channel();
+        let (answer, mut answered) = oneshot::channel();
+        let (failure, mut failed) = oneshot::channel();
+        lock(&pending).insert(1, answer);
+        lock(&pending).insert(2, failure);
+        let receive = |message: Value| dispatch(&message, &pending, &outgoing, &notifications);
+
+        receive(json!({ "id": 1, "result": { "ok": true } }));
+        assert_eq!(answered.try_recv().unwrap().unwrap(), json!({ "ok": true }));
+        receive(json!({ "id": 2, "error": { "code": -32601, "message": "no such method" } }));
+        assert!(matches!(
+            failed.try_recv().unwrap(),
+            Err(LspError::Server { code: -32601, .. })
+        ));
+        // A reply nobody waits for, and one with a text id, are dropped.
+        receive(json!({ "id": 9, "result": null }));
+        receive(json!({ "id": "x", "result": null }));
+        assert!(lock(&pending).is_empty());
+
+        receive(
+            json!({ "id": 7, "method": "workspace/configuration", "params": { "items": [{}, {}] } }),
+        );
+        assert_eq!(
+            sent.try_recv().unwrap(),
+            json!({ "jsonrpc": "2.0", "id": 7, "result": [null, null] })
+        );
+        receive(json!({ "id": 8, "method": "window/workDoneProgress/create" }));
+        assert_eq!(sent.try_recv().unwrap()["result"], Value::Null);
+
+        receive(json!({ "method": "textDocument/publishDiagnostics", "params": { "uri": "u" } }));
+        let notification = notified.try_recv().unwrap();
+        assert_eq!(notification.method, "textDocument/publishDiagnostics");
+        assert_eq!(notification.params, json!({ "uri": "u" }));
+        receive(json!({}));
+        assert!(sent.try_recv().is_err() && notified.try_recv().is_err());
+    }
+
     /// A fake server: answers `initialize`, `textDocument/completion` and
     /// `shutdown`, and publishes one diagnostic after `didOpen`.
     async fn fake_server(

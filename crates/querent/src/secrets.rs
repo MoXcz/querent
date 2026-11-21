@@ -47,6 +47,10 @@ pub fn get(key: &str) -> Option<String> {
         }
     }
     let path = file_path()?;
+    get_from_file(path, key)
+}
+
+fn get_from_file(path: &Path, key: &str) -> Option<String> {
     let _guard = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     match read_file(path) {
         Ok(mut secrets) => secrets.remove(key),
@@ -124,9 +128,13 @@ fn set_in_keychain(key: &str, secret: Option<&str>) -> anyhow::Result<bool> {
 }
 
 fn update_file(key: &str, secret: Option<&str>) -> anyhow::Result<()> {
-    let Some(path) = file_path() else {
-        return Ok(());
-    };
+    match file_path() {
+        Some(path) => update_file_at(path, key, secret),
+        None => Ok(()),
+    }
+}
+
+fn update_file_at(path: &Path, key: &str, secret: Option<&str>) -> anyhow::Result<()> {
     let _guard = FILE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     // An unreadable file is left alone rather than replaced and its secrets lost.
     let mut secrets = read_file(path)?;
@@ -156,5 +164,37 @@ fn read_file(path: &Path) -> anyhow::Result<BTreeMap<String, String>> {
         Ok(text) => toml::from_str(&text).with_context(|| format!("parsing {}", path.display())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
         Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_file_store_keeps_changes_and_leaves_a_broken_file_alone() {
+        let directory =
+            std::env::temp_dir().join(format!("querent-secrets-{}", std::process::id()));
+        // A run that failed earlier under this process id may have left files.
+        drop(std::fs::remove_dir_all(&directory));
+        let path = directory.join("nested").join(SECRETS_FILE);
+        assert_eq!(get_from_file(&path, "a"), None);
+        update_file_at(&path, "a", Some("one")).unwrap();
+        update_file_at(&path, "b", Some("two")).unwrap();
+        assert_eq!(get_from_file(&path, "a").as_deref(), Some("one"));
+        update_file_at(&path, "a", None).unwrap();
+        assert_eq!(get_from_file(&path, "a"), None);
+        assert_eq!(get_from_file(&path, "b").as_deref(), Some("two"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "others can read the secrets file");
+        }
+
+        std::fs::write(&path, "not = [toml").unwrap();
+        assert!(update_file_at(&path, "c", Some("three")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not = [toml");
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
