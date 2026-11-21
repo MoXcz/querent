@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for agents writing code in this repo: a desktop SQL editor in Rust on gpui. The plan and stack choices live in `ROADMAP.md`. Rules here are traps to avoid, not architecture; when a rule only applies to one crate, put it in that crate's own `AGENTS.md`.
+Rules for agents writing code in this repo: a desktop SQL editor in Rust on gpui. The plan and stack choices live in `ROADMAP.md`, a local file that is never committed. Rules here are traps to avoid, not architecture; when a rule only applies to one crate, put it in that crate's own `AGENTS.md`.
 
 ## Commands
 
@@ -12,6 +12,25 @@ cargo fmt --all
 ```
 
 Run all four before saying a change is done.
+
+## Commits
+
+A commit message says what the change does and why it was made. Never name a version (`0.1.3`), a roadmap item, or the audit or review that prompted the change: the history must read on its own.
+
+Good:
+```text
+fix: run T-SQL `GO` batches in order
+
+The server does not know `GO`; sending the whole script as one batch
+returned one result set and dropped the rest.
+```
+
+Bad:
+```text
+fix: 0.1.3 audit row 3
+```
+
+`ROADMAP.md` is ignored by git. Do not stage it.
 
 ## Layout
 

@@ -1,6 +1,6 @@
 # sql-editor
 
-A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, PostgreSQL, SQLite and Snowflake. `ROADMAP.md` lists what comes next.
+A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, PostgreSQL, SQLite and Snowflake.
 
 ## Run
 
@@ -111,7 +111,14 @@ Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `inform
 
 ## Vim
 
-Vim keys are on by default in the SQL editor; the status bar shows the mode. Turn them off in Settings (`Ctrl+,`) or with "Vim mode" in the command palette. `ROADMAP.md` (0.0.6) lists the supported commands. App shortcuts such as `Ctrl+Enter` work in every mode.
+Vim keys are on by default in the SQL editor; the status bar shows the mode. Turn them off in Settings (`Ctrl+,`) or with "Vim mode" in the command palette. App shortcuts such as `Ctrl+Enter` work in every mode.
+
+Supported:
+
+- Modes: normal, insert, visual, visual line.
+- Motions: `h j k l w W b B e E 0 ^ $ gg G {count}G f F t T ; , { } n N ctrl-d ctrl-u`, Enter, Space, Backspace.
+- Operators `d c y` with motions, counts (`2d3w`) and text objects `iw aw iW aW i( a( ib i[ i{ iB i< i' i"` and ``i` ``; `dd cc yy`; `x X D C s S Y p P J ~ r`.
+- `i a I A o O`, `u`, `ctrl-r`, `.`, `/` search with smartcase, `*`.
 
 ## Themes
 
