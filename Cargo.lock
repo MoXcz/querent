@@ -7010,6 +7010,7 @@ version = "0.1.6"
 dependencies = [
  "serde",
  "sqlformat",
+ "thiserror 2.0.21",
  "tree-sitter",
  "tree-sitter-sequel",
 ]

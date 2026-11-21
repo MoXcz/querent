@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -10,8 +11,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, actions,
-    div, px,
+    ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _, Subscription, Task,
+    Window, actions, div, px,
 };
 
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
@@ -21,7 +22,7 @@ use crate::history::{self, HistoryEntry};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, QueryTab};
-use crate::session::{self, Session};
+use crate::session::{self, SavedTab, Session};
 use crate::tokio_bridge;
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
@@ -40,7 +41,11 @@ actions!(
         /// Open the dialog to add a connection.
         AddConnection,
         /// Show earlier runs on the current tab's connection.
-        ShowHistory
+        ShowHistory,
+        /// Open `.sql` files, each in a tab.
+        OpenFile,
+        /// Bring back the tab closed last.
+        ReopenClosedTab
     ]
 );
 
@@ -60,6 +65,9 @@ pub struct Workspace {
     /// Pending session write; tabs notify often, so writes are batched.
     session_save: Option<Task<()>>,
     last_saved: Option<Session>,
+    /// Tabs closed in this run, the latest last, for `ReopenClosedTab`.
+    closed_tabs: Vec<SavedTab>,
+    open_file_task: Option<Task<()>>,
     _sign_in_prompts: Option<Task<()>>,
 }
 
@@ -82,6 +90,8 @@ impl Workspace {
             }),
             session_save: None,
             last_saved: None,
+            closed_tabs: Vec::new(),
+            open_file_task: None,
             _sign_in_prompts: crate::sign_in::show_prompts(window, cx),
         };
         // Closing the last window may drop the workspace before quit hooks run.
@@ -114,24 +124,120 @@ impl Workspace {
     fn restore(&mut self, saved: Session, window: &mut Window, cx: &mut Context<Self>) {
         let active = saved.active;
         for tab in saved.tabs {
-            let connection = tab
-                .connection
-                .filter(|name| connections::find(cx, name).is_some())
-                .map(SharedString::from);
-            self.open_tab(
-                ConnectionFields {
-                    connection,
-                    database: tab.database,
-                },
-                window,
-                cx,
-            );
-            if let Some(view) = self.active_tab().cloned() {
-                view.update(cx, |view, cx| view.set_sql(&tab.sql, window, cx));
-            }
+            self.open_saved_tab(tab, window, cx);
         }
         self.activate(active.min(self.tabs.len().saturating_sub(1)), window, cx);
         self.last_saved = Some(self.session(cx));
+    }
+
+    /// Opens a tab as it was saved; a connection deleted since is left unset.
+    fn open_saved_tab(&mut self, tab: SavedTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Two tabs on one file would overwrite each other's saves: the text
+        // comes back, without its file.
+        let file = tab.file.filter(|file| {
+            !self
+                .tabs
+                .iter()
+                .any(|open| open.view.read(cx).file() == Some(file.as_path()))
+        });
+        let connection = tab
+            .connection
+            .filter(|name| connections::find(cx, name).is_some())
+            .map(SharedString::from);
+        self.open_tab(
+            ConnectionFields {
+                connection,
+                database: tab.database,
+            },
+            window,
+            cx,
+        );
+        if let Some(view) = self.active_tab().cloned() {
+            view.update(cx, |view, cx| {
+                view.set_sql(&tab.sql, window, cx);
+                if let Some(file) = file {
+                    view.restore_file(file, tab.modified, cx);
+                }
+            });
+        }
+    }
+
+    fn reopen_closed_tab(
+        &mut self,
+        _: &ReopenClosedTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.closed_tabs.pop() {
+            Some(tab) => self.open_saved_tab(tab, window, cx),
+            None => window.push_notification("No closed tab to reopen.", cx),
+        }
+    }
+
+    fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Open".into()),
+        });
+        self.open_file_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "open dialog failed");
+                    return;
+                }
+            };
+            for path in paths {
+                let read = cx
+                    .background_executor()
+                    .spawn({
+                        let path = path.clone();
+                        async move { read_sql_file(&path) }
+                    })
+                    .await;
+                let shown = this.update_in(cx, |this, window, cx| match read {
+                    Ok(text) => this.show_file(path, &text, window, cx),
+                    Err(message) => window.push_notification(message, cx),
+                });
+                if shown.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+
+    /// Switches to the tab that has `path` open, or shows it in a blank or new tab.
+    fn show_file(
+        &mut self,
+        path: PathBuf,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let already_open = self
+            .tabs
+            .iter()
+            .position(|tab| tab.view.read(cx).file() == Some(path.as_path()));
+        if let Some(index) = already_open {
+            self.activate(index, window, cx);
+            return;
+        }
+        let blank = self
+            .active_tab()
+            .is_some_and(|tab| tab.read(cx).is_blank(cx));
+        if !blank {
+            let fields = self
+                .active_tab()
+                .map(|tab| tab.read(cx).connection_fields(cx))
+                .unwrap_or_default();
+            self.open_tab(fields, window, cx);
+        }
+        if let Some(tab) = self.active_tab().cloned() {
+            tab.update(cx, |tab, cx| tab.open_file(path, text, window, cx));
+        }
     }
 
     /// Cancels every running query on its server and waits briefly for the
@@ -432,7 +538,55 @@ impl Workspace {
         self.close_tab_at(self.active_index, window, cx);
     }
 
+    /// Closes the tab, asking first when its file has changes that were not saved.
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        if !tab.view.read(cx).is_modified() {
+            self.close_tab_now(index, window, cx);
+            return;
+        }
+        let title = tab.view.read(cx).file().map_or_else(
+            || "the tab".to_owned(),
+            |file| {
+                file.file_name()
+                    .unwrap_or(file.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        );
+        let closing = tab.view.downgrade();
+        let workspace = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let closing = closing.clone();
+            let workspace = workspace.clone();
+            alert
+                .confirm()
+                .title(format!("Close {title} without saving?"))
+                .description("Its changes are not in the file yet.")
+                .ok_text("Close without saving")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let closed = workspace.update(cx, |workspace, cx| {
+                        // Other tabs may have opened or closed while the question showed.
+                        let index = workspace
+                            .tabs
+                            .iter()
+                            .position(|tab| tab.view.downgrade() == closing);
+                        if let Some(index) = index {
+                            workspace.close_tab_now(index, window, cx);
+                        }
+                    });
+                    if let Err(error) = closed {
+                        tracing::debug!(%error, "workspace closed while the question showed");
+                    }
+                    true
+                })
+        });
+    }
+
+    fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if index >= self.tabs.len() {
             return;
         }
@@ -441,6 +595,11 @@ impl Workspace {
             tab.stop_running_query(cx);
             tab.release_language_server(cx);
         });
+        if !closed.view.read(cx).is_blank(cx) {
+            self.closed_tabs.push(closed.view.read(cx).saved_tab(cx));
+            let excess = self.closed_tabs.len().saturating_sub(MAX_CLOSED_TABS);
+            self.closed_tabs.drain(..excess);
+        }
         if self.tabs.is_empty() {
             let fields = closed.view.read(cx).connection_fields(cx);
             self.open_tab(fields, window, cx);
@@ -574,6 +733,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::next_tab))
             .on_action(cx.listener(Self::previous_tab))
             .on_action(cx.listener(Self::show_history))
+            .on_action(cx.listener(Self::open_file))
+            .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(|_, _: &AddConnection, window, cx| {
                 Self::open_connection_dialog(None, window, cx);
             }))
@@ -618,6 +779,26 @@ impl Render for Workspace {
             )
             .child(self.render_status_bar(cx))
     }
+}
+
+/// Closed tabs kept for reopening.
+const MAX_CLOSED_TABS: usize = 20;
+/// A larger file is not a script to edit by hand.
+const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// The file's text, or a message for the user.
+fn read_sql_file(path: &Path) -> Result<String, String> {
+    let failed = |error: std::io::Error| format!("Could not open {}: {error}.", path.display());
+    let size = std::fs::metadata(path).map_err(failed)?.len();
+    if size > MAX_FILE_BYTES {
+        return Err(format!(
+            "{} is larger than 50 MB and was not opened.",
+            path.display()
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(failed)?;
+    sql_text::decode_file(&bytes)
+        .map_err(|error| format!("Could not open {}: {error}.", path.display()))
 }
 
 /// The longest a quit waits for running queries to stop on their servers.

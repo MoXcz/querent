@@ -23,6 +23,12 @@ pub struct SavedTab {
     pub database: String,
     #[serde(default)]
     pub sql: String,
+    /// The `.sql` file the tab was opened from or saved to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    /// `sql` differs from what `file` held when the tab last read or wrote it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub modified: bool,
 }
 
 fn path(cx: &App) -> Option<PathBuf> {
@@ -95,6 +101,8 @@ mod tests {
                 connection: Some("Fabric".to_owned()),
                 database: "analytics".to_owned(),
                 sql: "select 1;\n".to_owned(),
+                file: Some(PathBuf::from("/tmp/report.sql")),
+                modified: true,
             }],
             active: 0,
         };

@@ -117,6 +117,74 @@ pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
     statements
 }
 
+/// Why a file cannot be opened without changing its content on the next save.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DecodeError {
+    #[error("UTF-32 files are not supported")]
+    Utf32,
+    #[error("the file starts as UTF-16 but is not valid UTF-16")]
+    BrokenUtf16,
+    #[error("the file starts as UTF-8 but is not valid UTF-8")]
+    BrokenUtf8,
+}
+
+/// The text of a `.sql` file. A byte order mark picks UTF-8 or UTF-16 (as SQL
+/// Server Management Studio saves); without one the file is UTF-8, or Windows-1252
+/// when it is not valid UTF-8, so no character is ever replaced.
+pub fn decode_file(bytes: &[u8]) -> Result<String, DecodeError> {
+    let utf16 = |rest: &[u8], unit: fn([u8; 2]) -> u16| {
+        let (pairs, leftover) = rest.as_chunks::<2>();
+        if !leftover.is_empty() {
+            return Err(DecodeError::BrokenUtf16);
+        }
+        char::decode_utf16(pairs.iter().copied().map(unit))
+            .collect::<Result<String, _>>()
+            .map_err(|_| DecodeError::BrokenUtf16)
+    };
+    match bytes {
+        [0xFF, 0xFE, 0, 0, ..] | [0, 0, 0xFE, 0xFF, ..] => Err(DecodeError::Utf32),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => std::str::from_utf8(rest)
+            .map(str::to_owned)
+            .map_err(|_| DecodeError::BrokenUtf8),
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => {
+            Ok(std::str::from_utf8(bytes)
+                .map_or_else(|_| decode_windows_1252(bytes), str::to_owned))
+        }
+    }
+}
+
+/// Every byte is a character in Windows-1252, the "ANSI" encoding of older scripts.
+fn decode_windows_1252(bytes: &[u8]) -> String {
+    const HIGH: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
+    ];
+    bytes
+        .iter()
+        .map(|&byte| match byte {
+            0x80..=0x9F => HIGH
+                .get(usize::from(byte - 0x80))
+                .copied()
+                .unwrap_or(char::REPLACEMENT_CHARACTER),
+            _ => char::from(byte),
+        })
+        .collect()
+}
+
+/// A number that changes when the text does, however the text is cut into
+/// pieces (FNV-1a); tells whether a tab differs from its file without keeping a copy.
+#[must_use]
+pub fn fingerprint<'a>(pieces: impl IntoIterator<Item = &'a str>) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in pieces.into_iter().flat_map(str::bytes) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// The statement to run for a cursor at byte offset `cursor`.
 ///
 /// A cursor inside a statement picks it. A cursor between statements picks the
@@ -284,6 +352,33 @@ mod tests {
         assert_eq!(statement_at(text, inside), Some(0..11));
         assert_eq!(statement_at(text, text.len() + 10), None);
         assert_eq!(statement_at("", 0), None);
+    }
+
+    #[test]
+    fn decodes_files_without_replacing_characters() {
+        assert_eq!(decode_file(b"select 1").unwrap(), "select 1");
+        assert_eq!(decode_file(b"\xEF\xBB\xBFselect 1").unwrap(), "select 1");
+        assert_eq!(decode_file(b"\xFF\xFEs\0e\0\xE9\0").unwrap(), "seé");
+        assert_eq!(decode_file(b"\xFE\xFF\0s\0e").unwrap(), "se");
+        assert_eq!(decode_file(b"").unwrap(), "");
+        // Not UTF-8, so Windows-1252: `é` and the euro sign.
+        assert_eq!(decode_file(b"caf\xE9 \x80").unwrap(), "café €");
+        assert_eq!(decode_file(b"\xFF\xFEs\0e"), Err(DecodeError::BrokenUtf16));
+        assert_eq!(
+            decode_file(b"\xFF\xFE\x00\xD8"),
+            Err(DecodeError::BrokenUtf16)
+        );
+        assert_eq!(decode_file(b"\xFF\xFE\0\0s\0\0\0"), Err(DecodeError::Utf32));
+        assert_eq!(
+            decode_file(b"\xEF\xBB\xBF\xFF"),
+            Err(DecodeError::BrokenUtf8)
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_ignores_how_the_text_is_cut() {
+        assert_eq!(fingerprint(["select 1"]), fingerprint(["sel", "", "ect 1"]));
+        assert_ne!(fingerprint(["select 1"]), fingerprint(["select 2"]));
     }
 
     #[test]

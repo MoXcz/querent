@@ -10,6 +10,7 @@ path = "src/sql_text.rs"
 
 [dependencies]
 serde.workspace = true
+thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-sequel.workspace = true
 sqlformat.workspace = true

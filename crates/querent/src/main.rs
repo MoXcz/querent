@@ -26,9 +26,12 @@ use gpui_kit::{
 use tracing_subscriber::EnvFilter;
 
 use crate::command_palette::{OpenCommandPalette, OpenSettings};
-use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
+use crate::query_tab::{
+    CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
+};
 use crate::workspace::{
-    CloseTab, NewTab, NextTab, PreviousTab, ShowHistory, WORKSPACE_CONTEXT, Workspace,
+    CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
+    WORKSPACE_CONTEXT, Workspace,
 };
 
 const KEY_CONTEXT: &str = "SqlEditor";
@@ -94,6 +97,11 @@ impl AssetSource for AppAssets {
 }
 
 fn bind_keys(cx: &mut App) {
+    let (open_file, save, save_as, reopen_tab) = if cfg!(target_os = "macos") {
+        ("cmd-o", "cmd-s", "cmd-shift-s", "cmd-shift-t")
+    } else {
+        ("ctrl-o", "ctrl-s", "ctrl-shift-s", "ctrl-shift-t")
+    };
     let (palette, open_settings, history) = if cfg!(target_os = "macos") {
         ("cmd-shift-p", "cmd-,", "cmd-shift-h")
     } else {
@@ -125,6 +133,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-c", CancelQuery, Some(KEY_CONTEXT)),
         KeyBinding::new("ctrl-shift-e", ExportCsv, Some(KEY_CONTEXT)),
         KeyBinding::new(format, FormatSql, Some(KEY_CONTEXT)),
+        KeyBinding::new(save, SaveFile, Some(KEY_CONTEXT)),
+        KeyBinding::new(save_as, SaveFileAs, Some(KEY_CONTEXT)),
+        KeyBinding::new(open_file, OpenFile, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(reopen_tab, ReopenClosedTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(palette, OpenCommandPalette, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(open_settings, OpenSettings, Some(WORKSPACE_CONTEXT)),

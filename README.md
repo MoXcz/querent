@@ -82,6 +82,8 @@ pass_connection = true   # send the connection, including its password, to the s
 
 The status line shows the server's state; a server that stops restarts on next use.
 
+A tab can hold a `.sql` file: its title is the file name, with `*` while it has changes that are not saved, and closing it then asks first. Files are read as UTF-8, as UTF-16 when they start with a byte order mark (as SQL Server Management Studio writes them), or as Windows-1252 when they are not valid UTF-8. They are always saved as UTF-8.
+
 Tabs and their text come back after a restart (`~/.config/querent/session.json`), and every run is kept in `history.jsonl` next to it, except statements that look like they set a password (the tab's own text is still saved with the session); "Clear query history" in the command palette empties it. Both files are readable only by you, since queries can hold sensitive values.
 
 Without the UI:
@@ -103,6 +105,9 @@ Keys:
 | `Ctrl+,` | Settings (theme, vim mode, explorer grouping); also the gear in the status bar |
 | `Ctrl+Shift+H` | Query history for the current connection |
 | `Ctrl+N` / `Ctrl+Shift+W` | New tab / close tab |
+| `Ctrl+O` | Open `.sql` files, each in a tab |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save the tab to its file / save to a new file |
+| `Ctrl+Shift+T` | Reopen the tab closed last |
 | `Ctrl+N` / `Ctrl+P` with the completion menu, command palette or query history open | Next / previous item (`Ctrl+N` opens a tab only when no menu is open) |
 | `Ctrl+W` | Delete the word before the cursor (vim insert mode, or with vim off) |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |

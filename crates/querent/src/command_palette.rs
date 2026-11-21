@@ -11,10 +11,14 @@ use gpui_kit::{
     Window, actions, div, px,
 };
 
-use crate::query_tab::{CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, ToggleVimMode};
+use crate::query_tab::{
+    CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
+};
 use crate::settings;
 use crate::themes::{self, SelectTheme};
-use crate::workspace::{AddConnection, CloseTab, NewTab, NextTab, PreviousTab, ShowHistory};
+use crate::workspace::{
+    AddConnection, CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
+};
 use sql_text::format::KeywordCase;
 
 actions!(
@@ -70,6 +74,15 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
         command("Query", "Export result as CSV", &["save", "csv"], ExportCsv),
         command("Query", "Format SQL", &["pretty", "indent"], FormatSql),
         command("Tabs", "New tab", &["open"], NewTab),
+        command("Files", "Open file", &["sql", "load"], OpenFile),
+        command("Files", "Save", &["file", "write"], SaveFile),
+        command("Files", "Save as", &["file", "write", "copy"], SaveFileAs),
+        command(
+            "Tabs",
+            "Reopen closed tab",
+            &["undo", "restore"],
+            ReopenClosedTab,
+        ),
         command("Tabs", "Close tab", &[], CloseTab),
         command("Tabs", "Next tab", &[], NextTab),
         command("Tabs", "Previous tab", &[], PreviousTab),

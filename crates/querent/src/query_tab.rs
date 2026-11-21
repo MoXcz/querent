@@ -35,6 +35,7 @@ use crate::settings::{self, SettingsStore};
 use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
 
+mod files;
 mod language;
 mod results;
 
@@ -52,7 +53,11 @@ actions!(
         /// Turn vim keys in the editor on or off.
         ToggleVimMode,
         /// Format the editor's SQL with the connection's language server.
-        FormatSql
+        FormatSql,
+        /// Save the tab to its `.sql` file, asking for one the first time.
+        SaveFile,
+        /// Save the tab to a `.sql` file chosen now.
+        SaveFileAs
     ]
 );
 
@@ -153,6 +158,7 @@ pub struct QueryTab {
     /// The connection whose server has this tab's document open.
     server_connection: Option<SharedString>,
     format_task: Option<Task<()>>,
+    file: files::TabFile,
     /// Pending syntax check; replacing it restarts the delay.
     syntax_check: Option<Task<()>>,
     /// The server state and diagnostics the last syntax check used.
@@ -199,23 +205,7 @@ impl QueryTab {
             lsp.hover_provider = Some(std::rc::Rc::new(SqlHover { target }));
         });
         let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
-        // Interceptors run before key bindings and text input, so normal mode
-        // can claim keys the editor would otherwise insert or bind.
-        let tab = cx.weak_entity();
-        let vim_interceptor = cx.intercept_keystrokes({
-            move |event, window, cx| {
-                let Some(tab) = tab.upgrade() else {
-                    return;
-                };
-                let handled = tab.update(cx, |tab, cx| {
-                    tab.handle_menu_keystroke(&event.keystroke, window, cx)
-                        || tab.handle_vim_keystroke(&event.keystroke, window, cx)
-                });
-                if handled {
-                    cx.stop_propagation();
-                }
-            }
-        });
+        let vim_interceptor = Self::intercept_vim_keys(cx);
 
         let subscriptions = vec![
             vim_interceptor,
@@ -235,6 +225,7 @@ impl QueryTab {
             cx.subscribe(&editor, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.schedule_syntax_check(cx);
+                    this.refresh_modified(cx);
                 }
             }),
         ];
@@ -270,8 +261,29 @@ impl QueryTab {
             document,
             server_connection: None,
             format_task: None,
+            file: files::TabFile::default(),
             _subscriptions: subscriptions,
         }
+    }
+
+    fn intercept_vim_keys(cx: &mut Context<Self>) -> Subscription {
+        // Interceptors run before key bindings and text input, so normal mode
+        // can claim keys the editor would otherwise insert or bind.
+        let tab = cx.weak_entity();
+        cx.intercept_keystrokes({
+            move |event, window, cx| {
+                let Some(tab) = tab.upgrade() else {
+                    return;
+                };
+                let handled = tab.update(cx, |tab, cx| {
+                    tab.handle_menu_keystroke(&event.keystroke, window, cx)
+                        || tab.handle_vim_keystroke(&event.keystroke, window, cx)
+                });
+                if handled {
+                    cx.stop_propagation();
+                }
+            }
+        })
     }
 
     pub fn connection_fields(&self, cx: &App) -> ConnectionFields {
@@ -594,6 +606,9 @@ impl QueryTab {
     }
 
     pub fn title(&self, cx: &App) -> SharedString {
+        if let Some(title) = self.file_title() {
+            return title;
+        }
         let database = self.database(cx);
         if database.is_empty() {
             format!("Query {}", self.number).into()
@@ -917,6 +932,8 @@ impl QueryTab {
             connection: fields.connection.map(|name| name.to_string()),
             database: fields.database,
             sql: self.editor.read(cx).value().to_string(),
+            file: self.file().map(std::path::Path::to_path_buf),
+            modified: self.is_modified(),
         }
     }
 
@@ -1077,6 +1094,8 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::cancel_query))
             .on_action(cx.listener(Self::export_csv))
             .on_action(cx.listener(Self::format_sql))
+            .on_action(cx.listener(Self::save_file))
+            .on_action(cx.listener(Self::save_file_as))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
