@@ -4,7 +4,7 @@ members = ["crates/sql_db", "crates/querent", "crates/sql_lsp", "crates/sql_text
 
 [workspace.package]
 edition = "2024"
-version = "0.1.6"
+version = "0.2.0"
 license = "GPL-3.0-or-later"
 publish = false
 
