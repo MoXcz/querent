@@ -17,7 +17,9 @@ use tokio::sync::{mpsc, oneshot};
 /// How long a request waits for its response.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Larger frames are refused rather than allocated.
-const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+/// A header line longer than this is a server that never ends the line.
+const MAX_HEADER_BYTES: usize = 8 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LspError {
@@ -412,12 +414,16 @@ async fn read_frame(
     let mut length = None;
     loop {
         let mut line = String::new();
-        let read = reader
+        let read = (&mut *reader)
+            .take(MAX_HEADER_BYTES as u64)
             .read_line(&mut line)
             .await
             .map_err(|error| LspError::Protocol(error.to_string()))?;
         if read == 0 {
             return Ok(None);
+        }
+        if read == MAX_HEADER_BYTES && !line.ends_with('\n') {
+            return Err(LspError::Protocol("header line is too long".to_owned()));
         }
         let line = line.trim_end();
         if line.is_empty() {
@@ -445,9 +451,42 @@ async fn read_frame(
         .map_err(|error| LspError::Protocol(error.to_string()))
 }
 
+impl LspError {
+    /// A name for logs; the full text can quote the server's words, and those may hold SQL.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Spawn { .. } => "spawn",
+            Self::Stopped => "stopped",
+            Self::Timeout => "timeout",
+            Self::Server { .. } => "server error",
+            Self::Protocol(_) => "protocol",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refuses_endless_headers_and_huge_frames() {
+        let endless = vec![b'x'; MAX_HEADER_BYTES * 2];
+        let mut reader = tokio::io::BufReader::new(endless.as_slice());
+        assert!(matches!(
+            read_frame(&mut reader).await,
+            Err(LspError::Protocol(_))
+        ));
+        let huge = format!("Content-Length: {}\r\n\r\n", MAX_FRAME_BYTES + 1);
+        let mut reader = tokio::io::BufReader::new(huge.as_bytes());
+        assert!(matches!(
+            read_frame(&mut reader).await,
+            Err(LspError::Protocol(_))
+        ));
+        let fine = "Content-Length: 2\r\n\r\n{}";
+        let mut reader = tokio::io::BufReader::new(fine.as_bytes());
+        assert!(matches!(read_frame(&mut reader).await, Ok(Some(_))));
+    }
 
     /// A fake server: answers `initialize`, `textDocument/completion` and
     /// `shutdown`, and publishes one diagnostic after `didOpen`.

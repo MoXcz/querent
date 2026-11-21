@@ -1,4 +1,4 @@
-//! Needs a server: `QUERENT_PG_URL=postgres://user:password@host:port/db cargo test -p sql_db --test postgres -- --ignored`
+//! Needs a server (add `?sslmode=prefer` if it has no TLS): `QUERENT_PG_URL=postgres://user:password@host:port/db cargo test -p sql_db --test postgres -- --ignored`
 
 use std::time::{Duration, Instant};
 

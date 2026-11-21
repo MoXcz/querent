@@ -1,0 +1,5 @@
+[advisories]
+# rsa's timing side channel (Marvin) needs an attacker who can time many
+# private-key operations. Here rsa only signs the Snowflake key-pair sign-in
+# token, once per connect, and snowflake-connector-rs pins rsa 0.9.
+ignore = ["RUSTSEC-2023-0071"]

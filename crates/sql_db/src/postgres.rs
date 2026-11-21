@@ -57,7 +57,7 @@ impl PgConfig {
                 user: String::new(),
                 password: String::new(),
             },
-            encryption: Encryption::Optional,
+            encryption: Encryption::Mandatory,
             trust_server_certificate: false,
             max_rows: 50_000,
         }
@@ -654,6 +654,8 @@ fn connect_error(config: &PgConfig, error: &tokio_postgres::Error) -> QueryError
         .unwrap_or_default();
     let hint = if source.contains("certificate") && !config.trust_server_certificate {
         " The server's certificate is not trusted; tick \"Trust the server certificate\" if you trust this server."
+    } else if text.contains("does not support TLS") || source.contains("does not support TLS") {
+        ". Set Encryption to Prefer to connect without encryption."
     } else {
         ""
     };

@@ -181,7 +181,7 @@ pub fn sync_document(cx: &mut App, connection: &SharedString, uri: &lsp_types::U
         ),
     };
     if let Err(error) = sent {
-        tracing::debug!(%error, "document sync");
+        tracing::debug!(error = error.kind(), "document sync");
         return;
     }
     cx.update_global::<LspServers, _>(|servers, _| {
@@ -211,7 +211,7 @@ pub fn close_document(cx: &mut App, connection: &SharedString, uri: &lsp_types::
         },
     );
     if let Err(error) = closed {
-        tracing::debug!(%error, "document close");
+        tracing::debug!(error = error.kind(), "document close");
     }
 }
 
@@ -448,9 +448,13 @@ fn sqls_configuration(settings: &ConnectionSettings) -> Option<Value> {
     }))
 }
 
-/// A libpq `key=value` value, quoted when it holds spaces or quotes.
+/// A libpq `key=value` value, quoted when it holds whitespace or quotes.
 fn libpq_value(value: &str) -> String {
-    if !value.is_empty() && !value.contains([' ', '\'', '\\']) {
+    let plain = !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '\'' | '\\'));
+    if plain {
         return value.to_owned();
     }
     format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
@@ -471,6 +475,15 @@ fn percent_encode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotes_any_whitespace_in_a_libpq_value() {
+        assert_eq!(libpq_value("plain"), "plain");
+        assert_eq!(libpq_value("a\tb"), "'a\tb'");
+        assert_eq!(libpq_value("a\nhost=evil"), "'a\nhost=evil'");
+        assert_eq!(libpq_value("it's"), "'it\\'s'");
+        assert_eq!(libpq_value(""), "''");
+    }
 
     #[test]
     fn retry_delay_grows_and_caps() {

@@ -22,7 +22,7 @@ Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Serve
 
 Snowflake also takes an account identifier (`orgname-accountname` or `xy12345.us-east-1`) and an optional warehouse, role and schema.
 
-SQL Server also has encryption (Mandatory, Optional, Strict) and PostgreSQL has Prefer or Require; both have "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption. PostgreSQL may leave the database empty to use the user's default database.
+SQL Server also has encryption (Mandatory, Optional, Strict) and PostgreSQL has Require (the default) or Prefer, which connects without encryption when the server has none; both have "Trust the server certificate" for self-signed servers. Fabric always uses port 1433 and strict encryption. PostgreSQL may leave the database empty to use the user's default database.
 
 To start from a connection string, paste it in the box at the top of the form and press Fill from string. For example:
 
@@ -82,7 +82,7 @@ pass_connection = true   # send the connection, including its password, to the s
 
 The status line shows the server's state; a server that stops restarts on next use.
 
-Tabs and their text come back after a restart (`~/.config/querent/session.json`), and every run is kept in `history.jsonl` next to it. Both files are readable only by you, since queries can hold sensitive values.
+Tabs and their text come back after a restart (`~/.config/querent/session.json`), and every run is kept in `history.jsonl` next to it, except statements that look like they set a password (the tab's own text is still saved with the session); "Clear query history" in the command palette empties it. Both files are readable only by you, since queries can hold sensitive values.
 
 Without the UI:
 

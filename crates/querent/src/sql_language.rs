@@ -169,7 +169,7 @@ impl CompletionProvider for SqlCompletions {
                 Ok(Ok(Ok(Some(CompletionResponse::List(list))))) => list.items,
                 Ok(Ok(Ok(None)) | Err(_)) => Vec::new(),
                 Ok(Ok(Err(error))) => {
-                    tracing::debug!(%error, "server completion");
+                    tracing::debug!(error = error.kind(), "server completion");
                     Vec::new()
                 }
                 Err(error) => {
@@ -398,7 +398,7 @@ fn server_hover(
     cx.spawn(async move |_| match request.await {
         Ok(Ok(hover)) => Ok(hover),
         Ok(Err(error)) => {
-            tracing::debug!(%error, "server hover");
+            tracing::debug!(error = error.kind(), "server hover");
             Ok(None)
         }
         Err(error) => {

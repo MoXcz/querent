@@ -68,8 +68,35 @@ pub fn for_connection(cx: &App, connection: &str) -> Vec<HistoryEntry> {
         .collect()
 }
 
+/// Forgets every run, in memory and on disk.
+pub fn clear(cx: &mut App) {
+    cx.update_global::<QueryHistory, _>(|history, _| {
+        history.entries.clear();
+        if let Some(writer) = &history.writer
+            && writer.send(Write::Rewrite(Vec::new())).is_err()
+        {
+            tracing::warn!("query history writer stopped");
+        }
+    });
+}
+
+/// Best effort: whether the statement sets a password, as `create login ...
+/// with password = '...'` or `identified by '...'` do; such a statement is not kept.
+fn sets_a_password(sql: &str) -> bool {
+    let lower = sql.to_lowercase();
+    ["password", "identified by"].iter().any(|keyword| {
+        lower.match_indices(keyword).any(|(start, _)| {
+            let after = lower.get(start + keyword.len()..).unwrap_or_default();
+            let value = after.trim_start().trim_start_matches('=').trim_start();
+            ["'", "n'", "e'", "\"", "$"]
+                .iter()
+                .any(|quote| value.starts_with(quote))
+        })
+    })
+}
+
 pub fn record(cx: &mut App, mut entry: HistoryEntry) {
-    if entry.sql.trim().is_empty() {
+    if entry.sql.trim().is_empty() || sets_a_password(&entry.sql) {
         return;
     }
     if entry.sql.len() > MAX_SQL_BYTES {
@@ -192,6 +219,21 @@ fn rewrite_file(path: &Path, entries: &[HistoryEntry]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn statements_that_set_a_password_are_recognized() {
+        assert!(sets_a_password(
+            "create login app with password = 'S3cret!'"
+        ));
+        assert!(sets_a_password("ALTER ROLE app PASSWORD 'x'"));
+        assert!(sets_a_password("create user app identified by 'x'"));
+        assert!(sets_a_password("alter login app with password=N'x'"));
+        assert!(sets_a_password("alter role app password $$x$$"));
+        assert!(!sets_a_password("select password_hash from users"));
+        assert!(!sets_a_password(
+            "select * from users where password is null"
+        ));
+    }
 
     #[test]
     fn formats_ages() {

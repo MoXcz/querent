@@ -25,11 +25,14 @@ actions!(
         /// Open the settings panel.
         OpenSettings,
         /// Switch the object explorer between schema folders and one flat list.
-        ToggleExplorerGrouping
+        ToggleExplorerGrouping,
+        /// Forget every run in the query history.
+        ClearHistory
     ]
 );
 
 pub fn init(cx: &mut App) {
+    cx.on_action(|_: &ClearHistory, cx| crate::history::clear(cx));
     cx.on_action(|_: &ToggleExplorerGrouping, cx| {
         settings::update(cx, |settings| {
             settings.explorer_group_by_schema = !settings.explorer_group_by_schema;
@@ -81,6 +84,12 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
             "Query history",
             &["recent", "previous", "earlier"],
             ShowHistory,
+        ),
+        command(
+            "Query",
+            "Clear query history",
+            &["delete", "forget", "erase"],
+            ClearHistory,
         ),
         command(
             "Settings",

@@ -71,7 +71,12 @@ fn show(prompt: SignInPrompt, window: &mut Window, cx: &mut App) {
             .title("Entra ID sign-in")
             .id::<SignInNotice>()
             .autohide(false)
-            .on_click(move |_, _, cx| cx.open_url(&verification_uri));
+            .on_click(move |_, _, cx| {
+                // The address comes from the sign-in answer; only a web page is opened.
+                if verification_uri.starts_with("https://") {
+                    cx.open_url(&verification_uri);
+                }
+            });
             window.push_notification(note, cx);
         }
         SignInPrompt::Finished => {}

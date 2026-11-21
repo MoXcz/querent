@@ -105,6 +105,12 @@ impl SignInRequest {
     }
 }
 
+fn is_tenant(tenant: &str) -> bool {
+    tenant
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+}
+
 fn non_empty(text: &str) -> Option<&str> {
     let text = text.trim();
     (!text.is_empty()).then_some(text)
@@ -145,6 +151,12 @@ fn account(key: &str) -> Arc<tokio::sync::Mutex<Account>> {
 
 /// An access token for Azure SQL and Fabric: cached, refreshed, or from a new sign-in.
 pub async fn access_token(request: &SignInRequest) -> Result<String, QueryError> {
+    // The tenant becomes a path segment of the sign-in URL.
+    if !is_tenant(request.tenant()) {
+        return Err(QueryError::Auth(
+            "the tenant must be a tenant ID or a domain name".to_owned(),
+        ));
+    }
     let key = request.cache_key();
     let account = account(&key);
     let mut account = account.lock().await;
@@ -589,6 +601,15 @@ mod tests {
         assert!(!token(60).is_fresh(now));
         // The clock moved on while the machine slept.
         assert!(!token(3_600).is_fresh(now + Duration::from_secs(7_200)));
+    }
+
+    #[test]
+    fn a_tenant_is_an_id_or_a_domain() {
+        assert!(is_tenant(DEFAULT_TENANT));
+        assert!(is_tenant("contoso.onmicrosoft.com"));
+        assert!(is_tenant("72f988bf-86f1-41af-91ab-2d7cd011db47"));
+        assert!(!is_tenant("x/../common"));
+        assert!(!is_tenant("a?b=c"));
     }
 
     #[test]

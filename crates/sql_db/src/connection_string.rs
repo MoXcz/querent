@@ -7,8 +7,9 @@ use crate::{Authentication, Encryption, TdsConfig};
 pub enum ConnectionStringError {
     #[error("the connection string has no Server")]
     MissingServer,
-    #[error("invalid port in Server: {0}")]
-    InvalidPort(String),
+    /// The text is not echoed: a malformed URL can put part of a password there.
+    #[error("the port in Server must be a number")]
+    InvalidPort,
     #[error("the port field says {0} but the server name says {1}")]
     ConflictingPorts(u16, u16),
     #[error("unterminated quote in the value of {0}")]
@@ -223,12 +224,13 @@ fn has_url_scheme(text: &str) -> bool {
 fn url_fields(text: &str) -> Fields {
     let rest = text.get(12..).unwrap_or_default();
     let (before_query, query) = rest.split_once('?').unwrap_or((rest, ""));
-    let (authority, instance) = before_query.split_once('/').unwrap_or((before_query, ""));
-    let instance = instance.trim_end_matches('/');
-    let (user_info, host_port) = match authority.rsplit_once('@') {
-        Some((user_info, host_port)) => (Some(user_info), host_port),
-        None => (None, authority),
+    // The user info ends at the last `@`, so a `/` in a password is not read as the instance.
+    let (user_info, host_path) = match before_query.rsplit_once('@') {
+        Some((user_info, host_path)) => (Some(user_info), host_path),
+        None => (None, before_query),
     };
+    let (host_port, instance) = host_path.split_once('/').unwrap_or((host_path, ""));
+    let instance = instance.trim_end_matches('/');
     let mut fields = Fields::default();
     if let Some(user_info) = user_info {
         let (user, password) = match user_info.split_once(':') {
@@ -311,7 +313,7 @@ pub(crate) fn parse_server(server: &str) -> Result<Server, ConnectionStringError
             let port = port
                 .trim()
                 .parse()
-                .map_err(|_| ConnectionStringError::InvalidPort(port.trim().to_owned()))?;
+                .map_err(|_| ConnectionStringError::InvalidPort)?;
             (name.trim(), Some(port))
         }
         None => (server, None),
@@ -511,17 +513,28 @@ pub(crate) fn is_postgres_string(text: &str) -> bool {
 pub(crate) fn parse_postgres_string(
     text: &str,
 ) -> Result<crate::ConnectionSettings, ConnectionStringError> {
-    use tokio_postgres::config::{Host, SslMode};
+    use tokio_postgres::config::Host;
 
-    let config: tokio_postgres::Config =
-        text.trim()
-            .parse()
-            .map_err(
-                |error: tokio_postgres::Error| ConnectionStringError::InvalidValue {
-                    key: "PostgreSQL connection string",
-                    value: error.to_string(),
-                },
-            )?;
+    // Read here, not by tokio-postgres: it rejects `verify-*` and defaults to Prefer.
+    let (text, ssl_mode) = take_ssl_mode(text.trim());
+    let encryption = match ssl_mode.as_deref() {
+        // libpq falls back to no TLS when `sslmode` is absent; here that takes asking for it.
+        None | Some("require" | "verify-ca" | "verify-full") => Encryption::Mandatory,
+        // `disable` has no equivalent here; `prefer` still connects without TLS.
+        Some("disable" | "allow" | "prefer") => Encryption::Optional,
+        Some(other) => {
+            return Err(ConnectionStringError::InvalidValue {
+                key: "sslmode",
+                value: other.to_owned(),
+            });
+        }
+    };
+    let config: tokio_postgres::Config = text.parse().map_err(|error: tokio_postgres::Error| {
+        ConnectionStringError::InvalidValue {
+            key: "PostgreSQL connection string",
+            value: error.to_string(),
+        }
+    })?;
     let host = match config.get_hosts().first() {
         Some(Host::Tcp(host)) => host.clone(),
         #[cfg(unix)]
@@ -532,12 +545,6 @@ pub(crate) fn parse_postgres_string(
             });
         }
         None => return Err(ConnectionStringError::MissingServer),
-    };
-    // `disable` has no equivalent here; `prefer` still connects without TLS.
-    let encryption = if config.get_ssl_mode() == SslMode::Require {
-        Encryption::Mandatory
-    } else {
-        Encryption::Optional
     };
     Ok(crate::ConnectionSettings {
         server: host,
@@ -555,9 +562,185 @@ pub(crate) fn parse_postgres_string(
     })
 }
 
+/// `text` without its `sslmode` setting, and that setting's value in lower case.
+fn take_ssl_mode(text: &str) -> (String, Option<String>) {
+    // Lower case only, as tokio-postgres reads a URL.
+    if text.starts_with("postgres://") || text.starts_with("postgresql://") {
+        let Some((before, query)) = text.split_once('?') else {
+            return (text.to_owned(), None);
+        };
+        let mut mode = None;
+        let kept: Vec<&str> = query
+            .split('&')
+            .filter(|pair| match pair.split_once('=') {
+                Some(("sslmode", value)) => {
+                    mode = Some(value.to_ascii_lowercase());
+                    false
+                }
+                Some(_) | None => true,
+            })
+            .collect();
+        let rest = if kept.is_empty() {
+            before.to_owned()
+        } else {
+            format!("{before}?{}", kept.join("&"))
+        };
+        return (rest, mode);
+    }
+    let mut rest = String::with_capacity(text.len());
+    let mut mode = None;
+    for pair in libpq_pairs(text) {
+        match pair {
+            LibpqPair::Setting {
+                key: "sslmode",
+                value: Some(value),
+                ..
+            } => mode = Some(value.to_ascii_lowercase()),
+            LibpqPair::Setting { text, .. } | LibpqPair::Unreadable(text) => {
+                rest.push_str(text);
+                rest.push(' ');
+            }
+        }
+    }
+    (rest, mode)
+}
+
+enum LibpqPair<'a> {
+    /// `value` is `None` when the quote never closes; tokio-postgres reports that.
+    Setting {
+        key: &'a str,
+        value: Option<String>,
+        text: &'a str,
+    },
+    /// The rest of a string that stopped making sense, passed on for tokio-postgres to refuse.
+    Unreadable(&'a str),
+}
+
+/// The `key = value` settings of a libpq string, split exactly as
+/// tokio-postgres splits them: `\` escapes the next character, in quotes or not.
+fn libpq_pairs(text: &str) -> Vec<LibpqPair<'_>> {
+    let mut characters = text.char_indices().peekable();
+    let mut pairs = Vec::new();
+    loop {
+        while characters
+            .next_if(|(_, character)| character.is_whitespace())
+            .is_some()
+        {}
+        let Some(&(start, _)) = characters.peek() else {
+            break;
+        };
+        while characters
+            .next_if(|(_, character)| !character.is_whitespace() && *character != '=')
+            .is_some()
+        {}
+        let key_end = characters.peek().map_or(text.len(), |(index, _)| *index);
+        let key = text.get(start..key_end).unwrap_or_default();
+        while characters
+            .next_if(|(_, character)| character.is_whitespace())
+            .is_some()
+        {}
+        if key.is_empty()
+            || characters
+                .next_if(|(_, character)| *character == '=')
+                .is_none()
+        {
+            pairs.push(LibpqPair::Unreadable(text.get(start..).unwrap_or_default()));
+            break;
+        }
+        while characters
+            .next_if(|(_, character)| character.is_whitespace())
+            .is_some()
+        {}
+        let quoted = characters
+            .next_if(|(_, character)| *character == '\'')
+            .is_some();
+        let mut value = String::new();
+        let mut closed = !quoted;
+        while let Some(&(_, character)) = characters.peek() {
+            if quoted && character == '\'' {
+                characters.next();
+                closed = true;
+                break;
+            }
+            if !quoted && character.is_whitespace() {
+                break;
+            }
+            characters.next();
+            if character == '\\' {
+                value.extend(characters.next().map(|(_, escaped)| escaped));
+            } else {
+                value.push(character);
+            }
+        }
+        let end = characters.peek().map_or(text.len(), |(index, _)| *index);
+        pairs.push(LibpqPair::Setting {
+            key,
+            value: closed.then_some(value),
+            text: text.get(start..end).unwrap_or_default(),
+        });
+    }
+    pairs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takes_only_the_real_sslmode_setting() {
+        let mode = |text| take_ssl_mode(text).1;
+        assert_eq!(mode("host=h password=mysslmodepw dbname=x"), None);
+        assert_eq!(
+            take_ssl_mode("host=h password='x sslmode=verify-full' dbname=x").0,
+            "host=h password='x sslmode=verify-full' dbname=x "
+        );
+        assert_eq!(mode("host=h password='x sslmode=verify-full'"), None);
+        assert_eq!(
+            mode("host=h sslmode = Verify-Full user=u").as_deref(),
+            Some("verify-full")
+        );
+        assert_eq!(
+            take_ssl_mode("host=h sslmode='prefer' user='a\\'b c'"),
+            (
+                "host=h user='a\\'b c' ".to_owned(),
+                Some("prefer".to_owned())
+            )
+        );
+        assert_eq!(
+            take_ssl_mode("postgres://u:sslmode@h/db?sslmode=prefer&application_name=x"),
+            (
+                "postgres://u:sslmode@h/db?application_name=x".to_owned(),
+                Some("prefer".to_owned())
+            )
+        );
+        assert_eq!(
+            take_ssl_mode("postgres://u@h/db?sslmode=verify-ca").0,
+            "postgres://u@h/db"
+        );
+        // A backslash escapes the space, so `sslmode=disable` is part of the password.
+        assert_eq!(
+            take_ssl_mode("host=h password=a\\ sslmode=disable"),
+            ("host=h password=a\\ sslmode=disable ".to_owned(), None)
+        );
+        // What cannot be read is passed on whole, for tokio-postgres to refuse.
+        assert_eq!(
+            take_ssl_mode("host=h =x sslmode=disable"),
+            ("host=h =x sslmode=disable ".to_owned(), None)
+        );
+        assert_eq!(mode("host=h sslmode='prefer"), None);
+        assert_eq!(
+            mode("host=h\u{a0}sslmode=disable sslmode=require").as_deref(),
+            Some("require")
+        );
+    }
+
+    #[test]
+    fn a_password_with_a_slash_or_question_mark_is_not_echoed() {
+        let config = parse_connection_string("sqlserver://sa:pa/ss@host:1433").unwrap();
+        assert_eq!(config.host, "host");
+        let error = parse_connection_string("sqlserver://sa:pa?ss@host").unwrap_err();
+        assert!(!error.to_string().contains("pa"), "{error}");
+    }
 
     #[test]
     fn parses_azure_data_studio_style_strings() {
@@ -773,7 +956,7 @@ mod tests {
         );
         assert_eq!(
             parse_connection_string("Server=h,abc"),
-            Err(ConnectionStringError::InvalidPort("abc".to_owned()))
+            Err(ConnectionStringError::InvalidPort)
         );
         assert_eq!(
             parse_connection_string("Server=h;Database='open"),

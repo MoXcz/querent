@@ -83,8 +83,11 @@ impl DriverKind {
                 (Encryption::Strict, "Strict (TDS 8.0)"),
             ],
             Self::Postgres => &[
-                (Encryption::Optional, "Prefer"),
                 (Encryption::Mandatory, "Require"),
+                (
+                    Encryption::Optional,
+                    "Prefer (no encryption if the server has none)",
+                ),
             ],
             // Snowflake is always HTTPS.
             Self::Sqlite | Self::Snowflake => &[],
@@ -473,7 +476,26 @@ mod tests {
             ConnectionSettings::from_connection_string("host=localhost user=postgres dbname=x")
                 .unwrap();
         assert_eq!(settings.driver, DriverKind::Postgres);
-        assert_eq!(settings.encryption, Encryption::Optional);
+        assert_eq!(settings.encryption, Encryption::Mandatory);
+        assert_eq!(
+            ConnectionSettings::new(DriverKind::Postgres).encryption,
+            Encryption::Mandatory
+        );
+        for (mode, encryption) in [
+            ("prefer", Encryption::Optional),
+            ("disable", Encryption::Optional),
+            ("verify-full", Encryption::Mandatory),
+            ("verify-ca", Encryption::Mandatory),
+        ] {
+            let text = format!("postgres://u@h/db?sslmode={mode}");
+            let settings = ConnectionSettings::from_connection_string(&text).unwrap();
+            assert_eq!(settings.encryption, encryption, "{mode}");
+        }
+        let settings =
+            ConnectionSettings::from_connection_string("host=h user=u password=mysslmodepw")
+                .unwrap();
+        assert_eq!(settings.encryption, Encryption::Mandatory);
+        assert!(ConnectionSettings::from_connection_string("host=h sslmode=nonsense").is_err());
         assert!(crate::connection_string::is_postgres_string(
             "host=h password=a;b dbname=x"
         ));
