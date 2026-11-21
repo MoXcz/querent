@@ -12,9 +12,30 @@ use crate::{secrets, settings};
 
 const CONNECTIONS_FILE: &str = "connections.toml";
 
+/// How careful to be on a connection; tabs on a production one say so.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Environment {
+    #[default]
+    Normal,
+    Production,
+}
+
+impl Environment {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if passes a reference"
+    )]
+    fn is_normal(&self) -> bool {
+        *self == Self::Normal
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Environment::is_normal")]
+    pub environment: Environment,
     pub settings: ConnectionSettings,
 }
 
@@ -39,6 +60,8 @@ struct ConnectionsFile {
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredConnection {
     name: String,
+    #[serde(default, skip_serializing_if = "Environment::is_normal")]
+    environment: Environment,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     connection_string: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +88,7 @@ impl StoredConnection {
         };
         Ok(SavedConnection {
             name: self.name,
+            environment: self.environment,
             settings,
         })
     }
@@ -74,6 +98,7 @@ impl From<SavedConnection> for StoredConnection {
     fn from(saved: SavedConnection) -> Self {
         Self {
             name: saved.name,
+            environment: saved.environment,
             connection_string: None,
             settings: Some(saved.settings),
         }
@@ -401,6 +426,7 @@ mod tests {
     fn file_round_trips() {
         let saved = SavedConnection {
             name: "BI warehouse".to_owned(),
+            environment: Environment::Production,
             settings: ConnectionSettings {
                 server: "h".to_owned(),
                 database: "a;b".to_owned(),
@@ -416,6 +442,7 @@ mod tests {
         };
         let text = toml::to_string_pretty(&file).unwrap();
         assert!(text.contains("[[connection]]"));
+        assert!(text.contains("environment = \"production\""));
         let parsed: ConnectionsFile = toml::from_str(&text).unwrap();
         let (loaded, unreadable) = split(parsed.connections);
         assert_eq!(loaded, vec![saved]);
@@ -432,6 +459,7 @@ connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analyt
         let parsed: ConnectionsFile = toml::from_str(text).unwrap();
         let (saved, _) = split(parsed.connections);
         assert_eq!(saved[0].settings.driver, DriverKind::Fabric);
+        assert_eq!(saved[0].environment, Environment::Normal);
         assert_eq!(saved[0].settings.database, "analytics");
     }
 

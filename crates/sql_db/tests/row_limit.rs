@@ -89,6 +89,33 @@ async fn check_partial_output(variable: &str) {
     assert_eq!(next.result_sets.len(), 1);
 }
 
+/// A run reports whether it left a transaction open.
+#[expect(clippy::unwrap_used, reason = "a test helper")]
+async fn check_open_transaction(variable: &str, begin: &str) {
+    let text = std::env::var(variable).unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    for (sql, open) in [("select 1", false), (begin, true), ("rollback", false)] {
+        let output = connection.execute(sql, &CancelHandle::new()).await.unwrap();
+        assert_eq!(output.open_transaction, Some(open), "{sql}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
+async fn sql_server_reports_an_open_transaction() {
+    check_open_transaction("QUERENT_SQLSERVER", "begin transaction; select 1").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
+async fn postgres_reports_an_open_transaction() {
+    check_open_transaction("QUERENT_PG_URL", "begin; select 1").await;
+}
+
 /// The error names the line of the sent text, counted from its first line.
 #[expect(clippy::unwrap_used, reason = "a test helper")]
 async fn check_error_line(variable: &str, sql: &str, line: usize) {

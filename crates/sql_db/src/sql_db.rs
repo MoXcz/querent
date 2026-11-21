@@ -254,6 +254,8 @@ pub struct QueryOutput {
     pub result_sets: Vec<Arc<ResultSet>>,
     pub rows_affected: Option<u64>,
     pub messages: Vec<String>,
+    /// Whether the run left a transaction open on its connection; `None` when the driver cannot tell.
+    pub open_transaction: Option<bool>,
 }
 
 /// Cancels a running query on the server. Cheap to clone and safe to call

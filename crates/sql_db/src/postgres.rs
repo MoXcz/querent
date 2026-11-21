@@ -13,6 +13,7 @@ use futures_util::{StreamExt as _, pin_mut};
 use postgres_native_tls::MakeTlsConnector;
 use tokio::sync::mpsc;
 use tokio_postgres::config::SslMode;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::types::Type;
 use tokio_postgres::{AsyncMessage, CancelToken, Client, SimpleQueryMessage};
 use tokio_util::sync::CancellationToken;
@@ -26,6 +27,7 @@ use crate::{
 pub const DEFAULT_PORT: u16 = 5432;
 const APPLICATION_NAME: &str = "querent";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const TRANSACTION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const QUERY_CANCELED: &str = "57014";
 const CANCEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const AUTH_ERRORS: [&str; 2] = ["28P01", "28000"];
@@ -165,6 +167,7 @@ impl PgConnection {
             }
         };
         output.messages.extend(drain(&mut session.notices));
+        output.open_transaction = transaction_state(&session.client).await;
         match result {
             Ok(()) => Ok(()),
             Err(error)
@@ -468,6 +471,21 @@ async fn in_transaction_block(client: &Client) -> bool {
         ),
         // Unknown: assume a block, which only means draining instead of stopping.
         Err(_) => true,
+    }
+}
+
+/// Whether a transaction block is open after a run; `None` when the server did not say in time.
+async fn transaction_state(client: &Client) -> Option<bool> {
+    // Past the run's cancel, so a dead connection must not hold the tab here.
+    let probe = client.simple_query("select now() <> statement_timestamp()");
+    match tokio::time::timeout(TRANSACTION_PROBE_TIMEOUT, probe).await {
+        Ok(Ok(messages)) => Some(messages.iter().any(
+            |message| matches!(message, SimpleQueryMessage::Row(row) if row.get(0) == Some("t")),
+        )),
+        // An aborted block refuses every statement and still needs a rollback.
+        Ok(Err(error)) if error.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Some(true),
+        // A late cancel can hit the probe; that says nothing about a transaction.
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 

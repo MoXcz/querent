@@ -295,7 +295,9 @@ impl TdsConnection {
         output: &mut QueryOutput,
     ) -> Result<(), QueryError> {
         let max_rows = self.config.max_rows;
-        self.run_batches(sql, cancel, max_rows, output).await
+        let result = self.run_batches(sql, cancel, max_rows, output).await;
+        output.open_transaction = Some(self.client.has_active_transaction());
+        result
     }
 
     /// `execute` with its own row cap (catalog reads pass `usize::MAX`); `GO` lines split the text into batches.

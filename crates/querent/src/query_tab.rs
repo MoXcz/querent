@@ -152,6 +152,8 @@ pub struct QueryTab {
     show_messages: bool,
     /// The next run ignores the row limit ("Run again without limit").
     without_row_limit: bool,
+    /// The last run left a transaction open on this tab's connection.
+    open_transaction: bool,
     last_run: Option<RunRecord>,
     /// Outcome of the last export, shown in the status line until the next run.
     export_notice: Option<SharedString>,
@@ -257,6 +259,7 @@ impl QueryTab {
             shown_index: 0,
             show_messages: false,
             without_row_limit: false,
+            open_transaction: false,
             last_run: None,
             export_notice: None,
             export_task: None,
@@ -402,6 +405,8 @@ impl QueryTab {
         if let ComboboxEvent::Confirm(_) = event {
             let current = self.database(cx);
             self.fill_database_choices(&current, window, cx);
+            // The next run opens another connection; the mark was about the old one.
+            self.open_transaction = false;
         }
         cx.notify();
     }
@@ -436,6 +441,7 @@ impl QueryTab {
             return;
         };
         self.fill_default_database(name, window, cx);
+        self.open_transaction = false;
         // The new connection may be a dialect that is checked, or one that is not.
         self.schedule_syntax_check(cx);
     }
@@ -842,6 +848,7 @@ impl QueryTab {
             | QueryState::Cancelled { .. } => (Duration::ZERO, None, false),
         };
         self.running_query = None;
+        self.open_transaction = left_transaction_open(&outcome);
         self.state = match outcome {
             Ok(Ok((connection, mut output, Ok(())))) => {
                 self.connection = Some(connection);
@@ -987,6 +994,7 @@ impl QueryTab {
         // A running query keeps its connection and token; the next run opens a new one.
         if !self.is_running() {
             self.connection = None;
+            self.open_transaction = false;
         }
         tokio_bridge::spawn(cx, async move { sql_db::entra::sign_out(&request).await }).detach();
         window.push_notification(
@@ -1016,6 +1024,15 @@ impl QueryTab {
             .is_some_and(|saved| saved.settings.driver.is_file())
     }
 
+    /// The tab's connection is marked as production in its saved settings.
+    fn is_production(&self, cx: &App) -> bool {
+        self.connection_select
+            .read(cx)
+            .selected_value()
+            .and_then(|name| connections::find(cx, name))
+            .is_some_and(|saved| saved.environment == connections::Environment::Production)
+    }
+
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let running = matches!(self.state, QueryState::Running { .. });
         h_flex()
@@ -1032,6 +1049,15 @@ impl QueryTab {
                             .placeholder("Connection"),
                     ),
             )
+            .children(self.is_production(cx).then(|| {
+                div()
+                    .px_2()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(cx.theme().danger_foreground)
+                    .bg(cx.theme().danger)
+                    .child("PRODUCTION")
+            }))
             .children((!self.connection_is_file(cx)).then(|| {
                 div()
                     .w(px(220.))
@@ -1074,6 +1100,11 @@ impl QueryTab {
 
     pub fn status_text(&self) -> String {
         let status = self.query_status_text();
+        let status = if self.open_transaction {
+            format!("Open transaction · {status}")
+        } else {
+            status
+        };
         match &self.export_notice {
             Some(notice) => format!("{status} · {notice}"),
             None => status,
@@ -1171,6 +1202,17 @@ impl Render for QueryTab {
                         .child(resizable_panel().child(self.render_results(cx))),
                 ),
             )
+    }
+}
+
+/// Only a run that kept its connection can have left a transaction on it.
+fn left_transaction_open(outcome: &QueryOutcome) -> bool {
+    match outcome {
+        Ok(Ok((_, output, result))) => {
+            output.open_transaction == Some(true)
+                && !matches!(result, Err(QueryError::ConnectionLost(_)))
+        }
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 

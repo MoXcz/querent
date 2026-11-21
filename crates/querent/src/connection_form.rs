@@ -18,7 +18,7 @@ use sql_db::{
     AuthMethod, Authentication, Connection, ConnectionSettings, DriverKind, Encryption, QueryError,
 };
 
-use crate::connections::SavedConnection;
+use crate::connections::{Environment, SavedConnection};
 use crate::tokio_bridge;
 
 type LabelSelect = SelectState<Vec<SharedString>>;
@@ -38,6 +38,7 @@ pub struct ConnectionForm {
     auth_method: AuthMethod,
     encryption: Encryption,
     trust_server_certificate: bool,
+    environment: Environment,
     /// Entra sign-in with a code typed on another device.
     device_code: bool,
     /// No input field; copied from the loaded settings or a filled string.
@@ -103,6 +104,7 @@ impl ConnectionForm {
             auth_method: AuthMethod::from(&settings.authentication),
             encryption: settings.encryption,
             trust_server_certificate: settings.trust_server_certificate,
+            environment: editing.map_or(Environment::Normal, |saved| saved.environment),
             device_code: false,
             host_name_in_certificate: None,
             driver_select,
@@ -232,6 +234,7 @@ impl ConnectionForm {
         }
         Ok(SavedConnection {
             name,
+            environment: self.environment,
             settings: self.settings(cx)?,
         })
     }
@@ -763,6 +766,20 @@ impl Render for ConnectionForm {
             .children(self.sign_in_rows(cx))
             .children(self.session_context_rows())
             .children(self.network_rows(cx))
+            .child(row(
+                "",
+                Checkbox::new("production")
+                    .label("Production: mark tabs that use this connection")
+                    .checked(self.environment == Environment::Production)
+                    .on_click(cx.listener(|form, checked: &bool, _, cx| {
+                        form.environment = if *checked {
+                            Environment::Production
+                        } else {
+                            Environment::Normal
+                        };
+                        cx.notify();
+                    })),
+            ))
             .child(self.render_test_row(cx))
     }
 }

@@ -96,6 +96,7 @@ impl SqliteConnection {
         let work = self.with_connection(move |connection| {
             let mut output = QueryOutput::default();
             let result = fill_batch(connection, &sql, max_rows, &token, &mut output);
+            output.open_transaction = Some(!connection.is_autocommit());
             Ok((output, result.map_err(|error| map_error(&error))))
         });
         tokio::pin!(work);
