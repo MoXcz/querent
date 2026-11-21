@@ -1,6 +1,6 @@
 # Notice
 
-sql-editor is licensed under GPL-3.0-or-later (`LICENSE`).
+Querent is licensed under GPL-3.0-or-later (`LICENSE`).
 
 ## Copied or adapted code
 
@@ -8,7 +8,7 @@ Each file adapted from another project names the source and is listed here with 
 
 | File | Source | License |
 | --- | --- | --- |
-| `crates/sql_editor/themes/solitude.json` | Colors from [solitude.nvim](https://github.com/MoXcz/solitude.nvim) (`lua/solitude/palette.lua`, `lua/solitude/highlights.lua`), Copyright (c) 2026 Oscar Marquez | MIT |
+| `crates/querent/themes/solitude.json` | Colors from [solitude.nvim](https://github.com/MoXcz/solitude.nvim) (`lua/solitude/palette.lua`, `lua/solitude/highlights.lua`), Copyright (c) 2026 Oscar Marquez | MIT |
 
 ## Main dependencies
 

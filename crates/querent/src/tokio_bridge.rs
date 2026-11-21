@@ -12,7 +12,7 @@ impl TokioRuntime {
     pub fn new() -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("sql-editor-tokio")
+            .thread_name("querent-tokio")
             .enable_all()
             .build()?;
         Ok(Self(runtime))

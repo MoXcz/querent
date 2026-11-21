@@ -86,7 +86,7 @@ pub fn format_sql(text: &str, dialect: FormatDialect, style: &FormatStyle) -> Op
 /// formatter leaves them alone; their language may care about whitespace.
 /// The placeholder prefix is one the text does not already contain.
 fn protect_dollar_bodies(text: &str) -> (String, Vec<String>, String) {
-    let mut prefix = "sql_editor_body".to_owned();
+    let mut prefix = "querent_body".to_owned();
     while text.contains(&prefix) {
         prefix.push('_');
     }
@@ -271,9 +271,9 @@ mod tests {
 
     #[test]
     fn placeholder_names_in_user_text_are_left_alone() {
-        let text = "select 'sql_editor_body_0_' as x; create function f() returns int as $$ select 1 $$ language sql;";
+        let text = "select 'querent_body_0_' as x; create function f() returns int as $$ select 1 $$ language sql;";
         let formatted = upper(text, FormatDialect::Postgres);
-        assert!(formatted.contains("'sql_editor_body_0_'"), "{formatted}");
+        assert!(formatted.contains("'querent_body_0_'"), "{formatted}");
         assert!(formatted.contains("$$ select 1 $$"), "{formatted}");
     }
 

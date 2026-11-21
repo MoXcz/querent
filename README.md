@@ -1,4 +1,4 @@
-# sql-editor
+# Querent
 
 A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs queries against SQL Server, Microsoft Fabric Warehouse and Lakehouse SQL endpoints, PostgreSQL, SQLite and Snowflake.
 
@@ -62,7 +62,7 @@ A bare server name also works; then pick the database in the tab's database pick
 
 Browser sign-in opens your browser on the first connect and shows a notification until you finish; later connections, and later starts, reuse the sign-in until Entra asks again. With a device code, the code is copied to the clipboard and the notification links to the page where you enter it. `Ctrl+Shift+C` stops a sign-in that a tab is waiting on.
 
-Connections are saved as fields in `~/.config/sql-editor/connections.toml`. Passwords, client secrets, key passphrases and Entra sign-ins go to the OS keychain (Keychain on macOS, Credential Manager on Windows, a Secret Service such as GNOME Keyring or KeePassXC on Linux). Without a keychain they go to `~/.config/sql-editor/secrets.toml`, readable only by you. Secrets that older versions wrote into `connections.toml` move out on the first start.
+Connections are saved as fields in `~/.config/querent/connections.toml`. Passwords, client secrets, key passphrases and Entra sign-ins go to the OS keychain (Keychain on macOS, Credential Manager on Windows, a Secret Service such as GNOME Keyring or KeePassXC on Linux). Without a keychain they go to `~/.config/querent/secrets.toml`, readable only by you. Secrets that older versions wrote into `connections.toml` move out on the first start. Config from before the rename, in `~/.config/sql-editor`, moves to `~/.config/querent` on the first start; a file that exists in both stays in the old folder for you to merge by hand.
 
 Click a connection to use it in the current tab and expand its databases (warehouses and lakehouses on Fabric), write SQL, and press `Ctrl+Enter`. The tab's database picker lists the same databases; type to filter it, or type a name that is not listed and pick "Use …". Expand a database to browse its tables, views, procedures and functions; right-click for Select Top 1000 Rows, Script as SELECT or CREATE, and Copy name; double-click to insert a name at the cursor.
 
@@ -72,7 +72,7 @@ While typing, a menu offers tables after `from` and `join`, the columns of `alia
 
 ### Language servers
 
-A language server adds its completions, hover and diagnostics to the built-in ones, and can format SQL instead of the built-in formatter ("Use the language server" in Settings). Choose one per database kind (`sql_server`, `fabric`, `postgres`, `sqlite`, `snowflake`) in `~/.config/sql-editor/settings.toml`:
+A language server adds its completions, hover and diagnostics to the built-in ones, and can format SQL instead of the built-in formatter ("Use the language server" in Settings). Choose one per database kind (`sql_server`, `fabric`, `postgres`, `sqlite`, `snowflake`) in `~/.config/querent/settings.toml`:
 
 ```toml
 [language_servers.postgres]
@@ -82,7 +82,7 @@ pass_connection = true   # send the connection, including its password, to the s
 
 The status line shows the server's state; a server that stops restarts on next use.
 
-Tabs and their text come back after a restart (`~/.config/sql-editor/session.json`), and every run is kept in `history.jsonl` next to it. Both files are readable only by you, since queries can hold sensitive values.
+Tabs and their text come back after a restart (`~/.config/querent/session.json`), and every run is kept in `history.jsonl` next to it. Both files are readable only by you, since queries can hold sensitive values.
 
 Without the UI:
 
@@ -122,7 +122,7 @@ Supported:
 
 ## Themes
 
-Solitude is built in and is the default. Pick a theme in Settings (`Ctrl+,`) or type "Theme" in the command palette (`Ctrl+Shift+P`); the choice is saved in `~/.config/sql-editor/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/sql-editor/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
+Solitude is built in and is the default. Pick a theme in Settings (`Ctrl+,`) or type "Theme" in the command palette (`Ctrl+Shift+P`); the choice is saved in `~/.config/querent/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
 
 ## Linux build dependencies
 

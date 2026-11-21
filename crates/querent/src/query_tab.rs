@@ -45,7 +45,7 @@ use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
 
 actions!(
-    sql_editor,
+    querent,
     [
         /// Run the selected SQL, or the statement under the cursor.
         RunQuery,
@@ -1749,7 +1749,7 @@ fn line_span(text: &str, range: &Range<usize>) -> SharedString {
 
 /// The URI a language server knows this tab's text by.
 fn tab_document(number: usize) -> Option<lsp_types::Uri> {
-    format!("file:///sql-editor/tab-{number}.sql").parse().ok()
+    format!("file:///querent/tab-{number}.sql").parse().ok()
 }
 
 /// `text` with LSP edits applied; edits are applied from the end so earlier offsets stay valid.

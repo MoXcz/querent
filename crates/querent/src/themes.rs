@@ -22,7 +22,7 @@ const RELOAD_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Apply the named theme and remember it.
 #[derive(Action, Clone, PartialEq)]
-#[action(namespace = sql_editor, no_json)]
+#[action(namespace = querent, no_json)]
 pub struct SelectTheme(pub SharedString);
 
 struct ThemeCatalog {
@@ -187,8 +187,7 @@ mod tests {
 
     #[test]
     fn user_theme_overrides_built_in_with_same_name() {
-        let directory =
-            std::env::temp_dir().join(format!("sql-editor-themes-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("querent-themes-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let custom = r##"{"name":"x","themes":[{"name":"Solitude","mode":"light","colors":{"background":"#ffffff"}}]}"##;
         std::fs::write(directory.join("custom.json"), custom).unwrap();

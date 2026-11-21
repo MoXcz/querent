@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn lists_every_column_in_one_call() {
-        let path = std::env::temp_dir().join(format!("sql-editor-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("querent-test-{}.db", std::process::id()));
         {
             let connection = rusqlite::Connection::open(&path).unwrap();
             connection

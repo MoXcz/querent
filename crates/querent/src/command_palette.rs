@@ -18,7 +18,7 @@ use crate::workspace::{AddConnection, CloseTab, NewTab, NextTab, PreviousTab, Sh
 use sql_text::format::KeywordCase;
 
 actions!(
-    sql_editor,
+    querent,
     [
         /// Search and run any command.
         OpenCommandPalette,
@@ -255,7 +255,7 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                             }),
                         )
                         .description(
-                            "Built-in Solitude, or a theme from ~/.config/sql-editor/themes.",
+                            "Built-in Solitude, or a theme from ~/.config/querent/themes.",
                         ),
                     ),
                 )

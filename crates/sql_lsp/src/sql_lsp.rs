@@ -272,7 +272,7 @@ fn initialize_params(initialization_options: Option<Value>) -> lsp_types::Initia
             ..ClientCapabilities::default()
         },
         client_info: Some(lsp_types::ClientInfo {
-            name: "sql-editor".to_owned(),
+            name: "querent".to_owned(),
             version: None,
         }),
         ..lsp_types::InitializeParams::default()
@@ -563,7 +563,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_command_is_a_spawn_error() {
         let (sender, _) = mpsc::unbounded_channel();
-        let result = LspClient::spawn("sql-editor-no-such-server", &[], None, sender).await;
+        let result = LspClient::spawn("querent-no-such-server", &[], None, sender).await;
         assert!(matches!(result, Err(LspError::Spawn { .. })));
     }
 }

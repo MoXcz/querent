@@ -37,7 +37,7 @@ fix: 0.1.3 audit row 3
 ```text
 Cargo.toml                 # workspace: shared deps, [workspace.lints]
 crates/
-  sql_editor/              # binary: gpui app, views, actions, keymap
+  querent/                 # binary: gpui app, views, actions, keymap
   sql_db/                  # Driver trait, Value, one module per database
   sql_text/                # pure logic: statement under cursor, vim state machine
   sql_lsp/                 # language server client over stdio, no UI
@@ -62,7 +62,7 @@ Each rule shows the preferred form first. Sources are linked once per section.
 
 Sources: [Zed AGENTS.md](https://github.com/zed-industries/zed/blob/main/AGENTS.md), [Effective Rust: errors](https://www.effective-rust.com/errors.html), [thiserror](https://github.com/dtolnay/thiserror).
 
-**`thiserror` in `sql_db` and `sql_text`, `anyhow` in `sql_editor`.** Library callers need to match on variants; the app only needs context and a message.
+**`thiserror` in `sql_db` and `sql_text`, `anyhow` in `querent`.** Library callers need to match on variants; the app only needs context and a message.
 
 Good:
 ```rust
@@ -418,7 +418,7 @@ Bad:
 
 Sources: [tokio Mutex](https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html), [tokio select!](https://docs.rs/tokio/latest/tokio/macro.select.html), [Zed gpui_tokio](https://github.com/zed-industries/zed/blob/main/crates/gpui_tokio/src/gpui_tokio.rs).
 
-gpui's executors are not tokio. The database drivers need tokio, so `sql_editor` owns one tokio runtime stored as a gpui `Global`, and a helper spawns onto it and returns a gpui `Task` that aborts the tokio task when dropped.
+gpui's executors are not tokio. The database drivers need tokio, so `querent` owns one tokio runtime stored as a gpui `Global`, and a helper spawns onto it and returns a gpui `Task` that aborts the tokio task when dropped.
 
 **Never block an executor.** Blocking the foreground executor freezes the window.
 
@@ -530,7 +530,7 @@ fn set_result(&mut self, result: ResultSet) { self.result = Some(result); } // v
 
 Good:
 ```rust
-actions!(sql_editor, [RunStatement, NewTab, CloseTab, ExportCsv]);
+actions!(querent, [RunStatement, NewTab, CloseTab, ExportCsv]);
 cx.bind_keys([KeyBinding::new("ctrl-enter", RunStatement, Some("SqlEditor"))]);
 div().key_context("SqlEditor").on_action(cx.listener(Self::run_statement))
 ```

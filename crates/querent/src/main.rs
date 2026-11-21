@@ -152,7 +152,7 @@ fn open_main_window(cx: &mut App) {
         ..WindowOptions::default()
     };
     let opened = gpui_kit::open_window(options, cx, |window, cx| {
-        window.set_window_title("SQL Editor");
+        window.set_window_title("Querent");
         cx.new(|cx| Workspace::new(window, cx))
     });
     if let Err(error) = opened {

@@ -1,6 +1,6 @@
 //! A lone read stops on the server at the row limit instead of streaming every row.
 //!
-//! Needs servers: `SQL_EDITOR_SQLSERVER=<connection string> SQL_EDITOR_PG_URL=postgres://... cargo test -p sql_db --test row_limit -- --ignored`
+//! Needs servers: `QUERENT_SQLSERVER=<connection string> QUERENT_PG_URL=postgres://... cargo test -p sql_db --test row_limit -- --ignored`
 
 use std::time::{Duration, Instant};
 
@@ -34,19 +34,19 @@ async fn check(variable: &str, big_query: &str) {
 }
 
 #[tokio::test]
-#[ignore = "needs a SQL Server; set SQL_EDITOR_SQLSERVER"]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
 async fn sql_server_stops_at_the_limit() {
     check(
-        "SQL_EDITOR_SQLSERVER",
+        "QUERENT_SQLSERVER",
         "select top 30000000 a.object_id, b.name from sys.all_columns a cross join sys.all_columns b",
     )
     .await;
 }
 
 #[tokio::test]
-#[ignore = "needs a SQL Server; set SQL_EDITOR_SQLSERVER"]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
 async fn sql_server_runs_go_batches_and_unseparated_statements() {
-    let text = std::env::var("SQL_EDITOR_SQLSERVER").unwrap();
+    let text = std::env::var("QUERENT_SQLSERVER").unwrap();
     let config = ConnectionSettings::from_connection_string(&text)
         .unwrap()
         .config()
@@ -90,22 +90,22 @@ async fn check_partial_output(variable: &str) {
 }
 
 #[tokio::test]
-#[ignore = "needs a SQL Server; set SQL_EDITOR_SQLSERVER"]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
 async fn sql_server_keeps_results_from_before_an_error() {
-    check_partial_output("SQL_EDITOR_SQLSERVER").await;
+    check_partial_output("QUERENT_SQLSERVER").await;
 }
 
 #[tokio::test]
-#[ignore = "needs a PostgreSQL server; set SQL_EDITOR_PG_URL"]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
 async fn postgres_keeps_results_from_before_an_error() {
-    check_partial_output("SQL_EDITOR_PG_URL").await;
+    check_partial_output("QUERENT_PG_URL").await;
 }
 
 #[tokio::test]
-#[ignore = "needs a PostgreSQL server; set SQL_EDITOR_PG_URL"]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
 async fn postgres_stops_at_the_limit() {
     check(
-        "SQL_EDITOR_PG_URL",
+        "QUERENT_PG_URL",
         "select g, md5(g::text) from generate_series(1, 20000000) g",
     )
     .await;

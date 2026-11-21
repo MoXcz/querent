@@ -23,7 +23,7 @@ use crate::{
 };
 
 pub const DEFAULT_PORT: u16 = 5432;
-const APPLICATION_NAME: &str = "sql-editor";
+const APPLICATION_NAME: &str = "querent";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const QUERY_CANCELED: &str = "57014";
 const CANCEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);

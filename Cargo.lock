@@ -5579,6 +5579,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "querent"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "directories",
+ "gpui-kit",
+ "keyring",
+ "lsp-types",
+ "notify",
+ "serde",
+ "serde_json",
+ "sql_db",
+ "sql_lsp",
+ "sql_text",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6969,27 +6990,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
-]
-
-[[package]]
-name = "sql_editor"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "directories",
- "gpui-kit",
- "keyring",
- "lsp-types",
- "notify",
- "serde",
- "serde_json",
- "sql_db",
- "sql_lsp",
- "sql_text",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

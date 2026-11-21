@@ -27,7 +27,7 @@ use crate::tokio_bridge;
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
 
 actions!(
-    sql_editor,
+    querent,
     [
         /// Open a new query tab with the current tab's connection.
         NewTab,

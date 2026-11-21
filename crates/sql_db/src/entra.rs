@@ -425,12 +425,9 @@ async fn wait_for_code(listener: &LoopbackListener, state: &str) -> Result<Strin
         let (status, page) = match &outcome {
             Some(Ok(_)) => (
                 "200 OK",
-                "Signed in. You can close this tab and return to SQL Editor.",
+                "Signed in. You can close this tab and return to Querent.",
             ),
-            Some(Err(_)) => (
-                "200 OK",
-                "Sign-in failed. Return to SQL Editor for details.",
-            ),
+            Some(Err(_)) => ("200 OK", "Sign-in failed. Return to Querent for details."),
             None => ("404 Not Found", "Not found."),
         };
         let response = format!(

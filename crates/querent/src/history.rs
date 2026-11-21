@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn skips_cut_lines() {
         let path =
-            std::env::temp_dir().join(format!("sql-editor-history-{}.jsonl", std::process::id()));
+            std::env::temp_dir().join(format!("querent-history-{}.jsonl", std::process::id()));
         let entry = HistoryEntry {
             at: 1,
             connection: "c".to_owned(),
@@ -229,10 +229,8 @@ mod tests {
 
     #[test]
     fn an_overgrown_file_is_reported_for_trimming() {
-        let path = std::env::temp_dir().join(format!(
-            "sql-editor-history-long-{}.jsonl",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("querent-history-long-{}.jsonl", std::process::id()));
         let entries: Vec<HistoryEntry> = (0..MAX_ENTRIES as u64 + 500)
             .map(|at| HistoryEntry {
                 at,

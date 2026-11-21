@@ -18,7 +18,7 @@ use mssql_tds::error::Error as TdsError;
 use crate::{CancelHandle, Column, QueryError, QueryOutput, ResultSet, Value};
 
 const SQL_SCOPE: &str = "https://database.windows.net/.default";
-const APPLICATION_NAME: &str = "sql-editor";
+const APPLICATION_NAME: &str = "querent";
 pub(crate) const DEFAULT_PORT: u16 = 1433;
 /// Fabric reports these when it moves or drops a session; one reconnect usually fixes them.
 const TRANSIENT_ERRORS: [u32; 3] = [24804, 6005, 6008];

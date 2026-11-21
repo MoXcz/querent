@@ -8,7 +8,9 @@ use anyhow::Context as _;
 
 use crate::connections::replace_owner_only;
 
-const SERVICE: &str = "sql-editor";
+const SERVICE: &str = "querent";
+/// The keychain service before the app became Querent; entries move on first read.
+const LEGACY_SERVICE: &str = "sql-editor";
 const SECRETS_FILE: &str = "secrets.toml";
 
 static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -36,7 +38,11 @@ pub fn get(key: &str) -> Option<String> {
     if keychain_available() {
         match keyring::Entry::new(SERVICE, key).and_then(|entry| entry.get_password()) {
             Ok(secret) => return Some(secret),
-            Err(keyring::Error::NoEntry) => {}
+            Err(keyring::Error::NoEntry) => {
+                if let Some(secret) = take_legacy(key) {
+                    return Some(secret);
+                }
+            }
             Err(error) => tracing::warn!(%error, "could not read a secret from the keychain"),
         }
     }
@@ -51,6 +57,31 @@ pub fn get(key: &str) -> Option<String> {
     }
 }
 
+/// A secret saved under the old service name, copied to the new one; the old
+/// entry is deleted only once the copy is stored.
+fn take_legacy(key: &str) -> Option<String> {
+    let legacy = keyring::Entry::new(LEGACY_SERVICE, key).ok()?;
+    let secret = legacy.get_password().ok()?;
+    let stored = keyring::Entry::new(SERVICE, key).and_then(|entry| entry.set_password(&secret));
+    match stored {
+        Ok(()) => {
+            if let Err(error) = legacy.delete_credential() {
+                tracing::debug!(%error, "could not delete an old keychain secret");
+            }
+        }
+        Err(error) => tracing::warn!(%error, "could not move a secret to the new keychain name"),
+    }
+    Some(secret)
+}
+
+fn delete_legacy(key: &str) -> anyhow::Result<()> {
+    let entry = keyring::Entry::new(LEGACY_SERVICE, key).context("opening the keychain entry")?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(error).context("deleting an old keychain secret"),
+    }
+}
+
 /// Stores `secret`, or deletes it for `None` or an empty value.
 pub fn set(key: &str, secret: Option<&str>) -> anyhow::Result<()> {
     let secret = secret.filter(|secret| !secret.is_empty());
@@ -59,10 +90,20 @@ pub fn set(key: &str, secret: Option<&str>) -> anyhow::Result<()> {
         // The secret is safe in the keychain; a stale file copy is only logged.
         Err(error) if in_keychain => {
             tracing::warn!(%error, "could not remove a secret from secrets.toml");
-            Ok(())
         }
-        result => result,
+        result => result?,
     }
+    // An entry left under the old name would come back through `take_legacy`.
+    // That only matters when clearing; a saved secret is already stored.
+    if keychain_available()
+        && let Err(error) = delete_legacy(key)
+    {
+        if secret.is_none() {
+            return Err(error);
+        }
+        tracing::warn!(%error, "could not delete an old keychain secret");
+    }
+    Ok(())
 }
 
 /// Whether the keychain holds `secret`; if not, an older entry is deleted, since [`get`] prefers it.

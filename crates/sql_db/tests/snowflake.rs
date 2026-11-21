@@ -1,4 +1,4 @@
-//! Needs an account: `SQL_EDITOR_SNOWFLAKE="snowflake://user:password@account/DB/SCHEMA?warehouse=WH" cargo test -p sql_db --test snowflake -- --ignored`
+//! Needs an account: `QUERENT_SNOWFLAKE="snowflake://user:password@account/DB/SCHEMA?warehouse=WH" cargo test -p sql_db --test snowflake -- --ignored`
 
 use std::time::{Duration, Instant};
 
@@ -7,7 +7,7 @@ use sql_db::{CancelHandle, Connection, ConnectionSettings, QueryError, Value};
 #[tokio::test]
 #[ignore = "needs a Snowflake account"]
 async fn runs_a_batch_and_cancels_a_running_query() {
-    let text = std::env::var("SQL_EDITOR_SNOWFLAKE").expect("set SQL_EDITOR_SNOWFLAKE");
+    let text = std::env::var("QUERENT_SNOWFLAKE").expect("set QUERENT_SNOWFLAKE");
     let config = ConnectionSettings::from_connection_string(&text)
         .unwrap()
         .config()

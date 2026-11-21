@@ -438,7 +438,7 @@ connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analyt
     #[test]
     fn a_file_that_does_not_parse_is_set_aside_not_overwritten() {
         let directory =
-            std::env::temp_dir().join(format!("sql-editor-connections-{}", std::process::id()));
+            std::env::temp_dir().join(format!("querent-connections-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(CONNECTIONS_FILE);
         std::fs::write(&path, "[[connection]]\nname = \"Fabric\"\n[").unwrap();

@@ -88,8 +88,9 @@ pub struct SettingsStore {
 impl Global for SettingsStore {}
 
 pub fn init(cx: &mut App) {
-    let config_dir = directories::ProjectDirs::from("", "", "sql-editor")
-        .map(|directories| directories.config_dir().to_path_buf());
+    let config_dir = directories::ProjectDirs::from("", "", APP_DIRECTORY)
+        .map(|directories| directories.config_dir().to_path_buf())
+        .map(|directory| move_legacy_config(&directory));
     let (settings, may_save) = config_dir
         .as_deref()
         .map_or_else(|| (Settings::default(), false), Settings::load);
@@ -128,7 +129,63 @@ pub fn get(cx: &App) -> &Settings {
     &cx.global::<SettingsStore>().settings
 }
 
-/// `~/.config/sql-editor` on Linux; `None` when the OS reports no home directory.
+const APP_DIRECTORY: &str = "querent";
+/// The app's name before it became Querent.
+const LEGACY_DIRECTORY: &str = "sql-editor";
+
+/// Moves the config written under the old name, once, so connections,
+/// settings, session and history carry over.
+fn move_legacy_config(directory: &Path) -> PathBuf {
+    match directories::ProjectDirs::from("", "", LEGACY_DIRECTORY) {
+        Some(legacy) => move_config(legacy.config_dir(), directory),
+        None => directory.to_path_buf(),
+    }
+}
+
+/// Moves `legacy` to `directory`. When both exist, moves each entry the new
+/// folder lacks and never overwrites one. Returns the folder to use: the old
+/// one if the move failed, so nothing is lost.
+fn move_config(legacy: &Path, directory: &Path) -> PathBuf {
+    if !legacy.exists() {
+        return directory.to_path_buf();
+    }
+    if !directory.exists() {
+        return match std::fs::rename(legacy, directory) {
+            Ok(()) => {
+                tracing::info!(from = %legacy.display(), to = %directory.display(), "moved the config folder");
+                directory.to_path_buf()
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not move the old config folder; still using it");
+                legacy.to_path_buf()
+            }
+        };
+    }
+    let entries = match std::fs::read_dir(legacy) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, "cannot read the old config folder");
+            return directory.to_path_buf();
+        }
+    };
+    for entry in entries.flatten() {
+        let target = directory.join(entry.file_name());
+        if target.exists() {
+            tracing::warn!(path = %entry.path().display(), "kept an old config file; the new folder has its own");
+            continue;
+        }
+        if let Err(error) = std::fs::rename(entry.path(), &target) {
+            tracing::warn!(%error, path = %entry.path().display(), "could not move an old config file");
+        }
+    }
+    // Only succeeds once nothing is left in it.
+    if std::fs::remove_dir(legacy).is_ok() {
+        tracing::info!(from = %legacy.display(), "moved the old config files");
+    }
+    directory.to_path_buf()
+}
+
+/// `~/.config/querent` on Linux; `None` when the OS reports no home directory.
 pub fn config_dir(cx: &App) -> Option<&Path> {
     cx.global::<SettingsStore>().config_dir.as_deref()
 }
@@ -179,7 +236,7 @@ mod tests {
     #[test]
     fn a_file_that_does_not_parse_is_set_aside() {
         let directory =
-            std::env::temp_dir().join(format!("sql-editor-settings-{}", std::process::id()));
+            std::env::temp_dir().join(format!("querent-settings-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join(SETTINGS_FILE), "row_limit = 7\n[").unwrap();
         let (settings, may_save) = Settings::load(&directory);
@@ -196,5 +253,38 @@ mod tests {
         let settings = toml::from_str::<Settings>(r#"theme = "Solitude""#).unwrap();
         assert!(settings.vim_mode);
         assert_eq!(toml::from_str::<Settings>("").unwrap(), Settings::default());
+    }
+
+    #[test]
+    fn moves_the_old_config_folder() {
+        let root = std::env::temp_dir().join(format!("querent-move-{}", std::process::id()));
+        let (legacy, directory) = (root.join("old"), root.join("new"));
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("connections.toml"), "a").unwrap();
+        assert_eq!(move_config(&legacy, &directory), directory);
+        assert!(!legacy.exists());
+        assert_eq!(
+            std::fs::read_to_string(directory.join("connections.toml")).unwrap(),
+            "a"
+        );
+
+        // Both exist: missing files move, existing ones are kept.
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("connections.toml"), "old").unwrap();
+        std::fs::write(legacy.join("history.jsonl"), "h").unwrap();
+        assert_eq!(move_config(&legacy, &directory), directory);
+        assert_eq!(
+            std::fs::read_to_string(directory.join("connections.toml")).unwrap(),
+            "a"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("history.jsonl")).unwrap(),
+            "h"
+        );
+        assert_eq!(
+            std::fs::read_to_string(legacy.join("connections.toml")).unwrap(),
+            "old"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
