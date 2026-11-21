@@ -236,17 +236,7 @@ impl QueryTab {
                 .p_3()
                 .gap_2()
                 .child(div().text_color(cx.theme().danger).child(message.clone()))
-                .children(line.map(|line| {
-                    h_flex().child(
-                        Button::new("go-to-error-line")
-                            .ghost()
-                            .xsmall()
-                            .label(format!("Go to line {line}"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.go_to_line(line, window, cx);
-                            })),
-                    )
-                }))
+                .children(line.map(|line| go_to_line_button(line, cx)))
                 .into_any_element(),
             QueryState::Done { output, failed, .. } if output.result_sets.is_empty() && !failed => {
                 div()
@@ -259,7 +249,12 @@ impl QueryTab {
                     })
                     .into_any_element()
             }
-            QueryState::Done { output, failed, .. } if self.show_messages => v_flex()
+            QueryState::Done {
+                output,
+                failed,
+                error_line,
+                ..
+            } if self.show_messages => v_flex()
                 .size_full()
                 .child(self.render_result_switcher(output, cx))
                 .child(
@@ -286,7 +281,8 @@ impl QueryTab {
                                         .when(is_error, |line| line.text_color(cx.theme().danger))
                                         .child(message.clone())
                                 }),
-                        ),
+                        )
+                        .children(error_line.map(|line| go_to_line_button(line, cx))),
                 )
                 .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
@@ -383,6 +379,18 @@ impl QueryTab {
             .children(export)
             .into_any_element()
     }
+}
+
+fn go_to_line_button(line: usize, cx: &mut Context<QueryTab>) -> impl IntoElement {
+    h_flex().child(
+        Button::new("go-to-error-line")
+            .ghost()
+            .xsmall()
+            .label(format!("Go to line {line}"))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.go_to_line(line, window, cx);
+            })),
+    )
 }
 
 /// How many of `count` messages are left out, the oldest first.

@@ -68,6 +68,8 @@ pub struct Workspace {
     /// Tabs closed in this run, the latest last, for `ReopenClosedTab`.
     closed_tabs: Vec<SavedTab>,
     open_file_task: Option<Task<()>>,
+    /// The user agreed to close the window with transactions open.
+    close_confirmed: bool,
     _sign_in_prompts: Option<Task<()>>,
 }
 
@@ -84,25 +86,24 @@ impl Workspace {
             // The status line shows the active tab's language server.
             _servers_observation: cx.observe_global::<LspServers>(|_, cx| cx.notify()),
             _quit_subscription: cx.on_app_quit(|workspace, cx| {
-                session::save_now(&workspace.session(cx), cx);
-                workspace.stop_queries_for_quit(cx);
+                workspace.prepare_to_close(cx);
                 async {}
             }),
             session_save: None,
             last_saved: None,
             closed_tabs: Vec::new(),
             open_file_task: None,
+            close_confirmed: false,
             _sign_in_prompts: crate::sign_in::show_prompts(window, cx),
         };
         // Closing the last window may drop the workspace before quit hooks run.
         let closing = cx.weak_entity();
-        window.on_window_should_close(cx, move |_, cx| {
-            if let Some(workspace) = closing.upgrade() {
-                let workspace = workspace.read(cx);
-                session::save_now(&workspace.session(cx), cx);
-                workspace.stop_queries_for_quit(cx);
-            }
-            true
+        window.on_window_should_close(cx, move |window, cx| {
+            closing.upgrade().is_none_or(|workspace| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.confirm_window_close(window, cx)
+                })
+            })
         });
         if let Some(saved) = session::load(cx) {
             workspace.restore(saved, window, cx);
@@ -538,24 +539,20 @@ impl Workspace {
         self.close_tab_at(self.active_index, window, cx);
     }
 
-    /// Closes the tab, asking first when its file has changes that were not saved.
+    /// Closes the tab, asking first when that would lose unsaved changes or an open transaction.
     fn close_tab_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
-        if !tab.view.read(cx).is_modified() {
+        let view = tab.view.read(cx);
+        let Some(question) = close_question(
+            &view.title(cx),
+            view.is_modified(),
+            view.has_open_transaction(),
+        ) else {
             self.close_tab_now(index, window, cx);
             return;
-        }
-        let title = tab.view.read(cx).file().map_or_else(
-            || "the tab".to_owned(),
-            |file| {
-                file.file_name()
-                    .unwrap_or(file.as_os_str())
-                    .to_string_lossy()
-                    .into_owned()
-            },
-        );
+        };
         let closing = tab.view.downgrade();
         let workspace = cx.weak_entity();
         window.open_alert_dialog(cx, move |alert, _, _| {
@@ -563,9 +560,9 @@ impl Workspace {
             let workspace = workspace.clone();
             alert
                 .confirm()
-                .title(format!("Close {title} without saving?"))
-                .description("Its changes are not in the file yet.")
-                .ok_text("Close without saving")
+                .title(question.title.clone())
+                .description(question.description)
+                .ok_text("Close")
                 .ok_variant(ButtonVariant::Danger)
                 .on_ok(move |_, window, cx| {
                     let closed = workspace.update(cx, |workspace, cx| {
@@ -584,6 +581,51 @@ impl Workspace {
                     true
                 })
         });
+    }
+
+    /// Whether the window may close now. With a transaction open in some tab
+    /// it asks first, and closes the window itself on a yes.
+    fn confirm_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let open_transactions = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.view.read(cx).has_open_transaction())
+            .count();
+        if open_transactions == 0 || self.close_confirmed {
+            self.prepare_to_close(cx);
+            return true;
+        }
+        let workspace = cx.weak_entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let workspace = workspace.clone();
+            alert
+                .confirm()
+                .title(if open_transactions == 1 {
+                    "Quit with a transaction open?".to_owned()
+                } else {
+                    format!("Quit with {open_transactions} transactions open?")
+                })
+                .description("The server rolls back what they changed.")
+                .ok_text("Quit")
+                .ok_variant(ButtonVariant::Danger)
+                .on_ok(move |_, window, cx| {
+                    let prepared = workspace.update(cx, |workspace, cx| {
+                        workspace.close_confirmed = true;
+                        workspace.prepare_to_close(cx);
+                    });
+                    if let Err(error) = prepared {
+                        tracing::debug!(%error, "workspace closed while the question showed");
+                    }
+                    window.remove_window();
+                    true
+                })
+        });
+        false
+    }
+
+    fn prepare_to_close(&self, cx: &App) {
+        session::save_now(&self.session(cx), cx);
+        self.stop_queries_for_quit(cx);
     }
 
     fn close_tab_now(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -781,6 +823,32 @@ impl Render for Workspace {
     }
 }
 
+struct CloseQuestion {
+    title: String,
+    description: &'static str,
+}
+
+/// What to ask before closing a tab, or `None` when closing it loses nothing.
+fn close_question(title: &str, modified: bool, open_transaction: bool) -> Option<CloseQuestion> {
+    let title = title.trim_end_matches('*');
+    let (title, description) = match (modified, open_transaction) {
+        (false, false) => return None,
+        (true, false) => (
+            format!("Close {title} without saving?"),
+            "Its changes are not in the file yet.",
+        ),
+        (false, true) => (
+            format!("Close {title} with a transaction open?"),
+            "The server rolls back what the transaction changed.",
+        ),
+        (true, true) => (
+            format!("Close {title} without saving, with a transaction open?"),
+            "Its changes are not in the file yet, and the server rolls back what the transaction changed.",
+        ),
+    };
+    Some(CloseQuestion { title, description })
+}
+
 /// Closed tabs kept for reopening.
 const MAX_CLOSED_TABS: usize = 20;
 /// A larger file is not a script to edit by hand.
@@ -846,4 +914,22 @@ fn history_item(entry: &HistoryEntry, now: u64) -> CommandItem {
                         .child(detail.clone()),
                 )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closing_asks_only_when_something_is_lost() {
+        assert!(close_question("Query 1", false, false).is_none());
+        let unsaved = close_question("report.sql*", true, false).unwrap();
+        assert_eq!(unsaved.title, "Close report.sql without saving?");
+        let transaction = close_question("2 · sales", false, true).unwrap();
+        assert_eq!(
+            transaction.title,
+            "Close 2 · sales with a transaction open?"
+        );
+        assert!(close_question("a.sql*", true, true).is_some());
+    }
 }

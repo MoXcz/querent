@@ -31,11 +31,32 @@ impl Environment {
     }
 }
 
+/// Whether tabs on a connection may send statements that change data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    #[default]
+    ReadWrite,
+    ReadOnly,
+}
+
+impl Access {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if passes a reference"
+    )]
+    fn is_read_write(&self) -> bool {
+        *self == Self::ReadWrite
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedConnection {
     pub name: String,
     #[serde(default, skip_serializing_if = "Environment::is_normal")]
     pub environment: Environment,
+    #[serde(default, skip_serializing_if = "Access::is_read_write")]
+    pub access: Access,
     pub settings: ConnectionSettings,
 }
 
@@ -62,6 +83,8 @@ struct StoredConnection {
     name: String,
     #[serde(default, skip_serializing_if = "Environment::is_normal")]
     environment: Environment,
+    #[serde(default, skip_serializing_if = "Access::is_read_write")]
+    access: Access,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     connection_string: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -89,6 +112,7 @@ impl StoredConnection {
         Ok(SavedConnection {
             name: self.name,
             environment: self.environment,
+            access: self.access,
             settings,
         })
     }
@@ -99,6 +123,7 @@ impl From<SavedConnection> for StoredConnection {
         Self {
             name: saved.name,
             environment: saved.environment,
+            access: saved.access,
             connection_string: None,
             settings: Some(saved.settings),
         }
@@ -427,6 +452,7 @@ mod tests {
         let saved = SavedConnection {
             name: "BI warehouse".to_owned(),
             environment: Environment::Production,
+            access: Access::ReadOnly,
             settings: ConnectionSettings {
                 server: "h".to_owned(),
                 database: "a;b".to_owned(),
@@ -443,6 +469,7 @@ mod tests {
         let text = toml::to_string_pretty(&file).unwrap();
         assert!(text.contains("[[connection]]"));
         assert!(text.contains("environment = \"production\""));
+        assert!(text.contains("access = \"read_only\""));
         let parsed: ConnectionsFile = toml::from_str(&text).unwrap();
         let (loaded, unreadable) = split(parsed.connections);
         assert_eq!(loaded, vec![saved]);
@@ -460,6 +487,7 @@ connection_string = "Server=x.datawarehouse.fabric.microsoft.com;Database=analyt
         let (saved, _) = split(parsed.connections);
         assert_eq!(saved[0].settings.driver, DriverKind::Fabric);
         assert_eq!(saved[0].environment, Environment::Normal);
+        assert_eq!(saved[0].access, Access::ReadWrite);
         assert_eq!(saved[0].settings.database, "analytics");
     }
 

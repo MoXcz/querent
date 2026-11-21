@@ -27,6 +27,30 @@ pub fn is_read_only_query(text: &str) -> bool {
     reads && !unknown_call && !has_second_select(&tokens)
 }
 
+/// The first word of `text` that changes data or runs code that could, with
+/// its byte offset, for a connection that must only read. Words in strings,
+/// comments and quoted names do not count. A guard against slips, not a
+/// permission: a function a `select` calls can still write.
+#[must_use]
+pub fn first_write(text: &str) -> Option<(usize, &str)> {
+    let tokens = tokenize(text, 0);
+    tokens.iter().enumerate().find_map(|(index, token)| {
+        let word = text.get(token.range.clone())?;
+        let quoted = word.starts_with(['"', '[', '`']);
+        // `t.update` is a column, and `replace(` a function.
+        let after_dot = index
+            .checked_sub(1)
+            .and_then(|previous| tokens.get(previous))
+            .is_some_and(|previous| previous.kind == Kind::Dot);
+        let called = tokens
+            .get(index + 1)
+            .is_some_and(|next| next.kind == Kind::Open);
+        let writes = is_one_of(word, WRITES) || (!called && is_one_of(word, WRITES_UNLESS_CALLED));
+        (!quoted && !after_dot && token.word().is_some() && writes)
+            .then_some((token.range.start, word))
+    })
+}
+
 fn is_one_of(word: &str, list: &[&str]) -> bool {
     list.iter().any(|item| word.eq_ignore_ascii_case(item))
 }
@@ -107,6 +131,51 @@ const NOT_READS: &[&str] = &[
     "pragma",
     "reindex",
 ];
+
+/// Words that change data or the schema, or run code that might.
+const WRITES: &[&str] = &[
+    "insert",
+    "update",
+    "delete",
+    "merge",
+    "upsert",
+    "into",
+    "exec",
+    "execute",
+    "call",
+    "do",
+    "create",
+    "alter",
+    "drop",
+    "undrop",
+    "truncate",
+    "grant",
+    "revoke",
+    "deny",
+    "kill",
+    "dbcc",
+    "backup",
+    "restore",
+    "shutdown",
+    "reconfigure",
+    "copy",
+    "put",
+    "vacuum",
+    "refresh",
+    "reindex",
+    "attach",
+    "detach",
+    "rename",
+    "lock",
+    "load",
+    "import",
+    "unload",
+    "remove",
+    "rm",
+];
+
+/// Statements that share their name with a function.
+const WRITES_UNLESS_CALLED: &[&str] = &["replace"];
 
 /// Words a `(` can follow without being a function call.
 const NOT_CALLS: &[&str] = &[
@@ -266,6 +335,31 @@ mod tests {
         assert!(is_read_only_query(
             "select count(*), cast(a as int) from t where b in (select 1) and exists (select 2)"
         ));
+    }
+
+    #[test]
+    fn finds_the_first_word_that_writes() {
+        assert_eq!(
+            first_write("select [update], 'drop' from t -- delete"),
+            None
+        );
+        assert_eq!(
+            first_write("declare @n int = 1\nset nocount on\nselect @n; begin tran; commit"),
+            None
+        );
+        let script = "select 1;\nUPDATE t set a = 1";
+        assert_eq!(first_write(script), Some((10, "UPDATE")));
+        assert_eq!(first_write("select * into #t from t"), Some((9, "into")));
+        assert_eq!(first_write("exec sp_who"), Some((0, "exec")));
+        assert_eq!(first_write("select updated_at from t"), None);
+        assert_eq!(
+            first_write("select t.update, replace(a, 'x', 'y') from t"),
+            None
+        );
+        assert_eq!(
+            first_write("replace into t values (1)"),
+            Some((0, "replace"))
+        );
     }
 
     #[test]

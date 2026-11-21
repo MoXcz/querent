@@ -18,7 +18,7 @@ use sql_db::{
     AuthMethod, Authentication, Connection, ConnectionSettings, DriverKind, Encryption, QueryError,
 };
 
-use crate::connections::{Environment, SavedConnection};
+use crate::connections::{Access, Environment, SavedConnection};
 use crate::tokio_bridge;
 
 type LabelSelect = SelectState<Vec<SharedString>>;
@@ -39,6 +39,7 @@ pub struct ConnectionForm {
     encryption: Encryption,
     trust_server_certificate: bool,
     environment: Environment,
+    access: Access,
     /// Entra sign-in with a code typed on another device.
     device_code: bool,
     /// No input field; copied from the loaded settings or a filled string.
@@ -105,6 +106,7 @@ impl ConnectionForm {
             encryption: settings.encryption,
             trust_server_certificate: settings.trust_server_certificate,
             environment: editing.map_or(Environment::Normal, |saved| saved.environment),
+            access: editing.map_or(Access::ReadWrite, |saved| saved.access),
             device_code: false,
             host_name_in_certificate: None,
             driver_select,
@@ -235,6 +237,7 @@ impl ConnectionForm {
         Ok(SavedConnection {
             name,
             environment: self.environment,
+            access: self.access,
             settings: self.settings(cx)?,
         })
     }
@@ -776,6 +779,20 @@ impl Render for ConnectionForm {
                             Environment::Production
                         } else {
                             Environment::Normal
+                        };
+                        cx.notify();
+                    })),
+            ))
+            .child(row(
+                "",
+                Checkbox::new("read-only")
+                    .label("Read-only: refuse statements that change data")
+                    .checked(self.access == Access::ReadOnly)
+                    .on_click(cx.listener(|form, checked: &bool, _, cx| {
+                        form.access = if *checked {
+                            Access::ReadOnly
+                        } else {
+                            Access::ReadWrite
                         };
                         cx.notify();
                     })),

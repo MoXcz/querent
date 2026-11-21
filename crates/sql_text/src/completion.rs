@@ -163,7 +163,7 @@ pub(crate) enum Kind {
 #[derive(Debug, Clone)]
 pub(crate) struct Token {
     pub(crate) kind: Kind,
-    range: Range<usize>,
+    pub(crate) range: Range<usize>,
 }
 
 impl Token {

@@ -97,6 +97,8 @@ enum QueryState {
         elapsed: Duration,
         /// The run failed after returning `output`; the error is its last message.
         failed: bool,
+        /// The line of the tab that error blames, 1-based.
+        error_line: Option<usize>,
     },
     Failed {
         message: SharedString,
@@ -748,6 +750,25 @@ impl QueryTab {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Checked first: a refused run must not stop the one that is running.
+        if self.is_read_only(cx)
+            && let Some((offset, word)) = sql_text::read_only::first_write(&sql)
+        {
+            let line = lines_before + line_of(&sql, offset);
+            let message = format!(
+                "Line {line}: this connection is read-only and `{word}` can change data. Nothing was sent."
+            );
+            if self.is_running() {
+                window.push_notification(message, cx);
+                return;
+            }
+            self.state = QueryState::Failed {
+                message: message.into(),
+                line: Some(line),
+            };
+            cx.notify();
+            return;
+        }
         self.stop_running_query(cx);
         self.export_notice = None;
         let limit = self.row_limit(cx);
@@ -865,6 +886,7 @@ impl QueryTab {
                     output,
                     elapsed,
                     failed: false,
+                    error_line: None,
                 }
             }
             Ok(Ok((connection, _, Err(QueryError::Cancelled)))) => {
@@ -903,6 +925,7 @@ impl QueryTab {
                         output,
                         elapsed,
                         failed: true,
+                        error_line: line,
                     }
                 }
             }
@@ -1024,13 +1047,25 @@ impl QueryTab {
             .is_some_and(|saved| saved.settings.driver.is_file())
     }
 
+    fn saved_connection<'a>(&self, cx: &'a App) -> Option<&'a connections::SavedConnection> {
+        let name = self.connection_select.read(cx).selected_value()?;
+        connections::find(cx, name)
+    }
+
     /// The tab's connection is marked as production in its saved settings.
     fn is_production(&self, cx: &App) -> bool {
-        self.connection_select
-            .read(cx)
-            .selected_value()
-            .and_then(|name| connections::find(cx, name))
+        self.saved_connection(cx)
             .is_some_and(|saved| saved.environment == connections::Environment::Production)
+    }
+
+    fn is_read_only(&self, cx: &App) -> bool {
+        self.saved_connection(cx)
+            .is_some_and(|saved| saved.access == connections::Access::ReadOnly)
+    }
+
+    /// The last run left a transaction open, which closing the tab rolls back.
+    pub fn has_open_transaction(&self) -> bool {
+        self.open_transaction
     }
 
     fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1057,6 +1092,16 @@ impl QueryTab {
                     .text_color(cx.theme().danger_foreground)
                     .bg(cx.theme().danger)
                     .child("PRODUCTION")
+            }))
+            .children(self.is_read_only(cx).then(|| {
+                div()
+                    .px_2()
+                    .rounded_sm()
+                    .text_xs()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("READ-ONLY")
             }))
             .children((!self.connection_is_file(cx)).then(|| {
                 div()
@@ -1135,6 +1180,7 @@ impl QueryTab {
                 output,
                 elapsed,
                 failed,
+                error_line: _,
             } => {
                 let mut parts = Vec::new();
                 if *failed {
@@ -1291,15 +1337,17 @@ fn vim_key(keystroke: &Keystroke) -> Option<Key> {
     }
 }
 
+/// The 1-based line of `text` that byte `offset` is on.
+fn line_of(text: &str, offset: usize) -> usize {
+    text.get(..offset)
+        .map_or(0, |before| before.matches('\n').count())
+        + 1
+}
+
 /// "line 3" or "lines 3–5", 1-based, for the byte range that ran.
 fn line_span(text: &str, range: &Range<usize>) -> SharedString {
-    let line_of = |offset: usize| {
-        text.get(..offset)
-            .map_or(0, |before| before.matches('\n').count())
-            + 1
-    };
-    let first = line_of(range.start);
-    let last = line_of(range.end);
+    let first = line_of(text, range.start);
+    let last = line_of(text, range.end);
     if first == last {
         format!("line {first}").into()
     } else {
