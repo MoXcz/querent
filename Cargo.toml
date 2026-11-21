@@ -61,3 +61,9 @@ print_stdout = "deny"
 redundant_clone = "deny"
 wildcard_enum_match_arm = "warn"
 mod_module_files = "deny"
+
+[profile.release]
+# One codegen unit and thin LTO cut the binary by a third; symbols are stripped.
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
