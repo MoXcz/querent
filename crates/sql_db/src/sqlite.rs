@@ -97,7 +97,7 @@ impl SqliteConnection {
             let mut output = QueryOutput::default();
             let result = fill_batch(connection, &sql, max_rows, &token, &mut output);
             output.open_transaction = Some(!connection.is_autocommit());
-            Ok((output, result.map_err(|error| map_error(&error))))
+            Ok((output, result.map_err(|error| map_error(&error, &sql))))
         });
         tokio::pin!(work);
         let (collected, result) = tokio::select! {
@@ -254,7 +254,7 @@ impl SqliteConnection {
         blocking(move || {
             // A panic in an earlier batch cannot leave SQLite's own state inconsistent.
             let connection = connection.lock().unwrap_or_else(PoisonError::into_inner);
-            work(&connection).map_err(|error| map_error(&error))
+            work(&connection).map_err(|error| map_error(&error, ""))
         })
         .await
     }
@@ -347,11 +347,29 @@ fn to_value(value: ValueRef<'_>) -> Value {
     }
 }
 
-fn map_error(error: &rusqlite::Error) -> QueryError {
-    match error.sqlite_error_code() {
-        Some(ErrorCode::OperationInterrupted) => QueryError::Cancelled,
-        Some(_) | None => QueryError::Server(error.to_string()),
+/// `sql` is the text that ran, to turn the offset of a syntax error into a line.
+fn map_error(error: &rusqlite::Error, sql: &str) -> QueryError {
+    if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) {
+        return QueryError::Cancelled;
     }
+    // A batch prepares the text left after the statements it has run, and
+    // the offset counts from there.
+    if let rusqlite::Error::SqlInputError {
+        msg,
+        sql: rest,
+        offset,
+        ..
+    } = error
+        && let Some(done) = sql.len().checked_sub(rest.len())
+        && sql.ends_with(rest.as_str())
+        && let Ok(offset) = usize::try_from(*offset)
+    {
+        return QueryError::ServerAt {
+            message: msg.clone(),
+            line: crate::lines_before(sql, done + offset) + 1,
+        };
+    }
+    QueryError::Server(error.to_string())
 }
 
 #[cfg(test)]
@@ -462,6 +480,28 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
         interrupt.interrupt();
         let error = worker.join().unwrap().unwrap_err();
-        assert!(matches!(map_error(&error), QueryError::Cancelled));
+        assert!(matches!(map_error(&error, ""), QueryError::Cancelled));
+    }
+
+    #[test]
+    fn a_syntax_error_names_its_line_in_the_batch() {
+        let connection = memory();
+        let sql = "select 1;\n\nselect 2\n  frm t;";
+        let error = run_batch(&connection, sql, 10, &CancellationToken::new()).unwrap_err();
+        let mapped = map_error(&error, sql);
+        assert_eq!(mapped.line(), Some(4));
+        assert!(!mapped.to_string().contains("select 2"));
+        let missing = run_batch(
+            &connection,
+            "select * from nope",
+            10,
+            &CancellationToken::new(),
+        )
+        .unwrap_err();
+        assert!(
+            map_error(&missing, "select * from nope")
+                .to_string()
+                .contains("nope")
+        );
     }
 }

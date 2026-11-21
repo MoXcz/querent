@@ -111,7 +111,7 @@ impl SnowflakeConnection {
         output: &mut QueryOutput,
     ) -> Result<(), QueryError> {
         for range in sql_text::split(sql, sql_text::Delimiters::Semicolon) {
-            let Some(statement) = sql.get(range) else {
+            let Some(statement) = sql.get(range.clone()) else {
                 continue;
             };
             if cancel.token.is_cancelled() {
@@ -119,7 +119,8 @@ impl SnowflakeConnection {
             }
             let result_set = self
                 .run_statement(statement, cancel, self.config.max_rows)
-                .await?;
+                .await
+                .map_err(|error| error.after_lines(crate::lines_before(sql, range.start)))?;
             output.result_sets.push(Arc::new(result_set));
         }
         Ok(())
@@ -473,12 +474,32 @@ fn map_error(error: &snowflake_connector_rs::Error) -> QueryError {
         ErrorKind::SessionExpired | ErrorKind::Network => {
             QueryError::ConnectionLost(error.to_string())
         }
-        _ => QueryError::Server(
-            error
+        _ => {
+            let message = error
                 .snowflake_message()
-                .map_or_else(|| error.to_string(), ToOwned::to_owned),
-        ),
+                .map_or_else(|| error.to_string(), ToOwned::to_owned);
+            match blamed_line(&message) {
+                Some(line) => QueryError::ServerAt { message, line },
+                None => QueryError::Server(message),
+            }
+        }
     }
+}
+
+/// The line in "syntax error line 3 at position 7 ...", as compilation errors word it.
+fn blamed_line(message: &str) -> Option<usize> {
+    // A procedure's own error can name a line of its body in the same words.
+    if !message.starts_with("SQL compilation error") {
+        return None;
+    }
+    message.match_indices("line ").find_map(|(start, marker)| {
+        let rest = message.get(start + marker.len()..)?;
+        let digits = rest.find(|character: char| !character.is_ascii_digit())?;
+        let line = rest.get(..digits)?.parse().ok().filter(|line| *line > 0)?;
+        rest.get(digits..)?
+            .starts_with(" at position")
+            .then_some(line)
+    })
 }
 
 fn connect_error(config: &SnowflakeConfig, error: &snowflake_connector_rs::Error) -> QueryError {
@@ -497,6 +518,26 @@ mod tests {
     #[test]
     fn quotes_literals_for_snowflake() {
         assert_eq!(quote_literal(r"it's a\b"), r"'it\'s a\\b'");
+    }
+
+    #[test]
+    fn reads_the_line_of_a_compilation_error() {
+        assert_eq!(
+            blamed_line(
+                "SQL compilation error:\nsyntax error line 3 at position 7 unexpected 'frm'."
+            ),
+            Some(3)
+        );
+        assert_eq!(
+            blamed_line(
+                "SQL compilation error: error line 12 at position 0\ninvalid identifier 'X'"
+            ),
+            Some(12)
+        );
+        assert_eq!(
+            blamed_line("Object 'T' does not exist, check line items"),
+            None
+        );
     }
 
     #[test]
