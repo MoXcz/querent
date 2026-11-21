@@ -952,3 +952,21 @@ fn matches_filter(object: &CatalogObject, filter: &str) -> bool {
             .to_lowercase()
             .contains(filter)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_by_name_or_schema_and_name() {
+        let object = CatalogObject {
+            schema: "Sales".to_owned(),
+            name: "OrderLines".to_owned(),
+            kind: ObjectKind::Table,
+        };
+        assert!(matches_filter(&object, ""));
+        assert!(matches_filter(&object, "orderl"));
+        assert!(matches_filter(&object, "sales.order"));
+        assert!(!matches_filter(&object, "dbo.order"));
+    }
+}

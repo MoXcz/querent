@@ -141,6 +141,7 @@ pub struct QueryOutput {
 
 /// Cancels a running query on the server. Cheap to clone and safe to call
 /// from any thread.
+#[must_use = "a handle nobody keeps cannot cancel the query"]
 #[derive(Debug, Clone, Default)]
 pub struct CancelHandle {
     inner: Arc<mssql_tds::core::CancelHandle>,
@@ -149,7 +150,6 @@ pub struct CancelHandle {
 }
 
 impl CancelHandle {
-    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

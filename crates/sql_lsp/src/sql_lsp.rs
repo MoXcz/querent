@@ -228,8 +228,9 @@ impl LspClient {
         self.outgoing.send(message).map_err(|_| LspError::Stopped)
     }
 
-    /// `shutdown` then `exit`; the process is killed on drop either way.
-    pub async fn shutdown(self) {
+    /// `shutdown` then `exit`. The app drops a client instead, which kills the process.
+    #[cfg(test)]
+    async fn shutdown(self) {
         if let Err(error) = self.request::<lsp_types::request::Shutdown>(()).await {
             tracing::debug!(%error, "language server shutdown");
         }

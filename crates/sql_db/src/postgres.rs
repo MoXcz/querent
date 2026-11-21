@@ -143,7 +143,7 @@ impl PgConnection {
         // Cancelling inside a transaction block would abort it, so only a lone
         // read in autocommit is stopped at the limit instead of drained.
         let stop_at_limit = config.max_rows != usize::MAX
-            && sql_text::completion::is_read_only_query(sql)
+            && sql_text::read_only::is_read_only_query(sql)
             && !in_transaction_block(&session.client).await;
         let stop = CancellationToken::new();
         let result = {

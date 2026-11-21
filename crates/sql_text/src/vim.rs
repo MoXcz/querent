@@ -625,10 +625,10 @@ impl Vim {
             }
             Motion::FirstLine | Motion::LastLine => {
                 let last = line_count(text) - 1;
-                let line = match (motion, self.count_given(count)) {
-                    (_, Some(number)) => number.saturating_sub(1).min(last),
-                    (Motion::FirstLine, None) => 0,
-                    _ => last,
+                let line = match self.count_given(count) {
+                    Some(number) => number.saturating_sub(1).min(last),
+                    None if motion == Motion::FirstLine => 0,
+                    None => last,
                 };
                 let start = offset_of_line(text, line);
                 return Some((first_non_blank(text, start), kind));

@@ -540,6 +540,21 @@ mod tests {
     }
 
     #[test]
+    fn merges_server_items_after_built_in_ones() {
+        let item = |label: &str| CompletionItem {
+            label: label.to_owned(),
+            ..CompletionItem::default()
+        };
+        let merged = merge(
+            vec![item("customers"), item("orders")],
+            vec![item("Orders"), item("payments")],
+        );
+        let labels: Vec<&str> = merged.iter().map(|item| item.label.as_str()).collect();
+        assert_eq!(labels, vec!["customers", "orders", "payments"]);
+        assert_eq!(merged[2].sort_text.as_deref(), Some("0003"));
+    }
+
+    #[test]
     fn matches_prefixes_without_case() {
         assert!(has_prefix("Customers", "cust"));
         assert!(has_prefix("ÉTAT", "ét"));

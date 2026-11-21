@@ -236,22 +236,18 @@ impl TdsConnection {
     #[tracing::instrument(skip_all, fields(server = %config.server_label(), database = %config.database))]
     pub async fn connect(config: TdsConfig) -> Result<Self, QueryError> {
         let login = login(&config.authentication).await?;
-        let mut last_error = None;
-        for attempt in 1..=CONNECT_ATTEMPTS {
+        let mut attempt = 1;
+        loop {
             match open_client(&config, &login).await {
                 Ok(client) => return Ok(Self { client, config }),
                 Err(error) if is_transient(&error) && attempt < CONNECT_ATTEMPTS => {
                     tracing::warn!(attempt, "transient connect error, retrying");
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    last_error = Some(error);
+                    attempt += 1;
                 }
                 Err(error) => return Err(connect_error(&config, &error)),
             }
         }
-        Err(QueryError::Connect(last_error.map_or_else(
-            || "no attempts made".to_owned(),
-            |error| error.to_string(),
-        )))
     }
 
     #[must_use]
@@ -333,7 +329,7 @@ impl TdsConnection {
             StopAtLimit::LoneRead => {
                 max_rows != usize::MAX
                     && !self.client.has_active_transaction()
-                    && sql_text::completion::is_read_only_query(sql)
+                    && sql_text::read_only::is_read_only_query(sql)
             }
         };
         let mut limit = Limit {
@@ -746,6 +742,23 @@ fn format_money(ten_thousandths: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_scalar_values() {
+        assert_eq!(to_value(ColumnValues::Null), Value::Null);
+        assert_eq!(to_value(ColumnValues::Bit(true)), Value::Bool(true));
+        assert_eq!(to_value(ColumnValues::TinyInt(255)), Value::Int(255));
+        assert_eq!(to_value(ColumnValues::SmallInt(-2)), Value::Int(-2));
+        assert_eq!(
+            to_value(ColumnValues::BigInt(i64::MIN)),
+            Value::Int(i64::MIN)
+        );
+        assert_eq!(to_value(ColumnValues::Float(1.5)), Value::Float(1.5));
+        assert_eq!(
+            to_value(ColumnValues::Bytes(vec![0, 255])).to_string(),
+            "0x00FF"
+        );
+    }
 
     #[test]
     fn formats_dates_from_year_one() {

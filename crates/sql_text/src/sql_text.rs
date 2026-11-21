@@ -2,6 +2,7 @@
 
 pub mod completion;
 pub mod format;
+pub mod read_only;
 pub mod syntax;
 pub mod vim;
 
@@ -60,12 +61,12 @@ pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
     while let Some(&byte) = bytes.get(index) {
         match byte {
             b'\'' | b'"' => {
-                index = skip_quoted(bytes, index, byte);
+                index = skip_quoted(bytes, index, byte).0;
                 segment.has_code = true;
                 continue;
             }
             b'[' => {
-                index = skip_quoted(bytes, index, b']');
+                index = skip_quoted(bytes, index, b']').0;
                 segment.has_code = true;
                 continue;
             }
@@ -178,7 +179,7 @@ pub(crate) fn dollar_quoted_ranges(text: &str) -> Vec<Range<usize>> {
     let mut index = 0;
     while let Some(&byte) = bytes.get(index) {
         index = match byte {
-            b'\'' | b'"' => skip_quoted(bytes, index, byte),
+            b'\'' | b'"' => skip_quoted(bytes, index, byte).0,
             b'-' if bytes.get(index + 1) == Some(&b'-') => skip_line_comment(bytes, index),
             b'/' if bytes.get(index + 1) == Some(&b'*') => skip_block_comment(bytes, index),
             b'$' => match skip_dollar_quoted(bytes, index) {
@@ -225,8 +226,8 @@ fn skip_dollar_quoted(bytes: &[u8], open_index: usize) -> Option<usize> {
     Some(close.map_or(bytes.len(), |offset| body_start + offset + delimiter.len()))
 }
 
-/// Returns the index after the closing quote; a doubled closing quote is an escape.
-fn skip_quoted(bytes: &[u8], open_index: usize, close: u8) -> usize {
+/// The index after the closing quote and whether it was found; a doubled closing quote is an escape.
+pub(crate) fn skip_quoted(bytes: &[u8], open_index: usize, close: u8) -> (usize, bool) {
     let mut index = open_index + 1;
     while let Some(&byte) = bytes.get(index) {
         if byte == close {
@@ -234,15 +235,15 @@ fn skip_quoted(bytes: &[u8], open_index: usize, close: u8) -> usize {
                 index += 2;
                 continue;
             }
-            return index + 1;
+            return (index + 1, true);
         }
         index += 1;
     }
-    bytes.len()
+    (bytes.len(), false)
 }
 
 /// Returns the index of the newline that ends the comment, so line tracking sees it.
-fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
     bytes
         .get(start..)
         .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
@@ -250,7 +251,7 @@ fn skip_line_comment(bytes: &[u8], start: usize) -> usize {
 }
 
 /// SQL Server and PostgreSQL both allow nested block comments.
-fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
     let mut depth = 0_usize;
     let mut index = start;
     while index < bytes.len() {
@@ -275,6 +276,15 @@ fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cursor_inside_a_multibyte_character_or_past_the_end_is_safe() {
+        let text = "select 'é';\r\nselect 2";
+        let inside = text.find('é').unwrap() + 1;
+        assert_eq!(statement_at(text, inside), Some(0..11));
+        assert_eq!(statement_at(text, text.len() + 10), None);
+        assert_eq!(statement_at("", 0), None);
+    }
 
     #[test]
     fn splits_by_the_chosen_delimiters() {
