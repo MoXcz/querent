@@ -216,6 +216,33 @@ impl TdsConnection {
             .collect())
     }
 
+    /// The table's primary key columns, in key order; empty when it has none.
+    pub async fn primary_key(
+        &mut self,
+        database: &str,
+        object: &CatalogObject,
+    ) -> Result<Vec<String>, QueryError> {
+        let quoted_database = quote_identifier(database);
+        let full_name = format!("{quoted_database}.{}", object.qualified_name(Dialect::TSql));
+        let sql = format!(
+            "select c.name from {quoted_database}.sys.indexes i \
+             join {quoted_database}.sys.index_columns ic \
+               on ic.object_id = i.object_id and ic.index_id = i.index_id \
+             join {quoted_database}.sys.columns c \
+               on c.object_id = ic.object_id and c.column_id = ic.column_id \
+             where i.is_primary_key = 1 and ic.key_ordinal > 0 \
+               and i.object_id = object_id({}) \
+             order by ic.key_ordinal",
+            quote_literal(&full_name)
+        );
+        let result = self.query_one(&sql).await?;
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| row.first().map(text))
+            .collect())
+    }
+
     /// Source of a view, procedure or function; `None` for tables or encrypted modules.
     pub async fn object_definition(
         &mut self,
@@ -381,8 +408,9 @@ pub fn create_table_script(
     dialect: Dialect,
     object: &CatalogObject,
     columns: &[ColumnInfo],
+    primary_key: &[String],
 ) -> String {
-    let lines: Vec<String> = columns
+    let mut lines: Vec<String> = columns
         .iter()
         .map(|column| {
             let null = if column.nullable { "null" } else { "not null" };
@@ -393,6 +421,13 @@ pub fn create_table_script(
             )
         })
         .collect();
+    if !primary_key.is_empty() {
+        let key: Vec<String> = primary_key
+            .iter()
+            .map(|column| dialect.quote_identifier(column))
+            .collect();
+        lines.push(format!("    primary key ({})", key.join(", ")));
+    }
     format!(
         "create table {} (\n{}\n);\n",
         object.qualified_name(dialect),
@@ -475,8 +510,17 @@ mod tests {
             "select\n    *\nfrom [dbo].[odd]]name];\n"
         );
         assert_eq!(
-            create_table_script(Dialect::TSql, &table(), &columns()),
+            create_table_script(Dialect::TSql, &table(), &columns(), &[]),
             "create table [dbo].[odd]]name] (\n    [id] int not null,\n    [label] nvarchar(100) null\n);\n"
+        );
+        assert_eq!(
+            create_table_script(
+                Dialect::Postgres,
+                &table(),
+                &columns(),
+                &["id".to_owned(), "label".to_owned()]
+            ),
+            "create table \"dbo\".\"odd]name\" (\n    \"id\" int not null,\n    \"label\" nvarchar(100) null,\n    primary key (\"id\", \"label\")\n);\n"
         );
         assert_eq!(
             select_script(Dialect::Postgres, &table(), Some(&columns()), Some(10)),

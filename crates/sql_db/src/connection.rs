@@ -210,6 +210,20 @@ impl Connection {
         }
     }
 
+    /// A table's primary key columns. SQLite and Snowflake script a table from
+    /// the server's own DDL, which already names the key, so they report none.
+    pub async fn primary_key(
+        &mut self,
+        database: &str,
+        object: &CatalogObject,
+    ) -> Result<Vec<String>, QueryError> {
+        match self {
+            Self::Tds(connection) => connection.primary_key(database, object).await,
+            Self::Postgres(connection) => connection.primary_key(database, object).await,
+            Self::Sqlite(_) | Self::Snowflake(_) => Ok(Vec::new()),
+        }
+    }
+
     pub async fn list_all_columns(
         &mut self,
         database: &str,

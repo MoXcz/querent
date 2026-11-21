@@ -416,8 +416,20 @@ impl ObjectExplorer {
                         && !matches!(dialect, Dialect::Sqlite | Dialect::Snowflake)
                     {
                         let columns = connection.list_columns(&database, &object).await?;
+                        // A key that cannot be read (a Fabric lakehouse has no index catalog) is left out.
+                        let primary_key = match connection.primary_key(&database, &object).await {
+                            Ok(key) => key,
+                            // A lost connection must be reported, so it is opened again next time.
+                            Err(error @ sql_db::QueryError::ConnectionLost(_)) => {
+                                return Err(error);
+                            }
+                            Err(_) => Vec::new(),
+                        };
                         return Ok(Some(sql_db::create_table_script(
-                            dialect, &object, &columns,
+                            dialect,
+                            &object,
+                            &columns,
+                            &primary_key,
                         )));
                     }
                     connection.object_definition(&database, &object).await

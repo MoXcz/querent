@@ -251,6 +251,30 @@ impl PgConnection {
         Ok(objects)
     }
 
+    /// The table's primary key columns, in key order; empty when it has none.
+    pub async fn primary_key(
+        &mut self,
+        database: &str,
+        object: &CatalogObject,
+    ) -> Result<Vec<String>, QueryError> {
+        let name = object.qualified_name(Dialect::Postgres);
+        let client = &self.catalog_session(database).await?.client;
+        let rows = client
+            .query(
+                // Columns past `indnkeyatts` are INCLUDE columns, not part of the key.
+                "select a.attname::text from pg_index i \
+                 join lateral unnest(i.indkey::int2[]) with ordinality k(attnum, ord) \
+                   on k.ord <= i.indnkeyatts \
+                 join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum \
+                 where i.indisprimary and i.indrelid = to_regclass($1) \
+                 order by k.ord",
+                &[&name],
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     pub async fn list_columns(
         &mut self,
         database: &str,

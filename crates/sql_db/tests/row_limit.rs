@@ -4,7 +4,9 @@
 
 use std::time::{Duration, Instant};
 
-use sql_db::{CancelHandle, Connection, ConnectionSettings, QueryOutput};
+use sql_db::{
+    CancelHandle, CatalogObject, Connection, ConnectionSettings, ObjectKind, QueryOutput,
+};
 
 #[expect(clippy::unwrap_used, reason = "a test helper")]
 async fn check(variable: &str, big_query: &str) {
@@ -87,6 +89,75 @@ async fn check_partial_output(variable: &str) {
         .await
         .unwrap();
     assert_eq!(next.result_sets.len(), 1);
+}
+
+/// A table's primary key comes back in key order, not column order.
+#[expect(clippy::unwrap_used, reason = "a test helper")]
+async fn check_primary_key(variable: &str, database: &str, schema: &str) {
+    let text = std::env::var(variable).unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    for sql in [
+        "drop table if exists querent_pk_test",
+        "create table querent_pk_test (a int not null, b int not null, c int, primary key (b, a))",
+    ] {
+        connection.execute(sql, &CancelHandle::new()).await.unwrap();
+    }
+    let table = CatalogObject {
+        schema: schema.to_owned(),
+        name: "querent_pk_test".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    let key = connection.primary_key(database, &table).await;
+    connection
+        .execute("drop table querent_pk_test", &CancelHandle::new())
+        .await
+        .unwrap();
+    assert_eq!(key.unwrap(), vec!["b".to_owned(), "a".to_owned()]);
+}
+
+#[tokio::test]
+#[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
+async fn sql_server_reads_a_primary_key() {
+    check_primary_key("QUERENT_SQLSERVER", "master", "dbo").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
+async fn postgres_reads_a_primary_key() {
+    check_primary_key("QUERENT_PG_URL", "postgres", "public").await;
+}
+
+/// INCLUDE columns are stored with the key but are not part of it.
+#[tokio::test]
+#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
+async fn postgres_leaves_included_columns_out_of_the_key() {
+    let text = std::env::var("QUERENT_PG_URL").unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    for sql in [
+        "drop table if exists querent_pk_include_test",
+        "create table querent_pk_include_test (a int, b int, c int, primary key (b) include (c))",
+    ] {
+        connection.execute(sql, &CancelHandle::new()).await.unwrap();
+    }
+    let table = CatalogObject {
+        schema: "public".to_owned(),
+        name: "querent_pk_include_test".to_owned(),
+        kind: ObjectKind::Table,
+    };
+    let key = connection.primary_key("postgres", &table).await;
+    connection
+        .execute("drop table querent_pk_include_test", &CancelHandle::new())
+        .await
+        .unwrap();
+    assert_eq!(key.unwrap(), vec!["b".to_owned()]);
 }
 
 /// A run reports whether it left a transaction open.
