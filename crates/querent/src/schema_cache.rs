@@ -88,7 +88,9 @@ enum Entry {
     Failed(Instant),
 }
 
-type CatalogConnection = Arc<Mutex<Option<Connection>>>;
+/// A connection for catalog reads, opened on first use; the explorer keeps its
+/// own, so browsing never waits behind a schema load.
+pub(crate) type CatalogConnection = Arc<Mutex<Option<Connection>>>;
 
 enum DatabaseList {
     Loading(u64),
@@ -221,11 +223,11 @@ fn catalog_connection(cache: &mut SchemaCache, connection: &SharedString) -> Cat
         .clone()
 }
 
-type CatalogWork<'a, T> =
+pub(crate) type CatalogWork<'a, T> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, sql_db::QueryError>> + Send + 'a>>;
 
 /// Runs `work` on the cache's own connection, opening it first, and drops it when lost.
-async fn with_catalog<T>(
+pub(crate) async fn with_catalog<T>(
     catalog: &CatalogConnection,
     config: sql_db::ConnectionConfig,
     work: impl for<'a> FnOnce(&'a mut Connection) -> CatalogWork<'a, T>,

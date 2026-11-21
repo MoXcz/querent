@@ -2,9 +2,7 @@
 //! columns, loaded lazily on expand, like SSMS's Object Explorer.
 
 use std::collections::{HashMap, HashSet};
-use std::future::Future;
 use std::ops::Range;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -17,13 +15,11 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use sql_db::{
-    CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind, QueryError,
-};
+use sql_db::{CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind};
 use tokio::sync::Mutex;
 
 use crate::connections::{self, ConnectionStore, SavedConnection};
-use crate::schema_cache;
+use crate::schema_cache::{self, CatalogConnection, CatalogWork};
 use crate::settings;
 use crate::tokio_bridge;
 
@@ -101,12 +97,6 @@ struct Row {
 }
 
 type MenuAction = Box<dyn Fn(&mut ObjectExplorer, &mut Context<ObjectExplorer>)>;
-
-type CatalogFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, QueryError>> + Send + 'a>>;
-
-/// One catalog connection per saved connection, connected on first use and
-/// separate from the tabs' connections so browsing never waits on a query.
-type CatalogConnection = Arc<Mutex<Option<Connection>>>;
 
 pub struct ObjectExplorer {
     filter_input: Entity<InputState>,
@@ -232,7 +222,7 @@ impl ObjectExplorer {
         done: impl FnOnce(&mut Self, Result<T, SharedString>, &mut Context<Self>) + 'static,
     ) where
         T: Send + 'static,
-        F: for<'a> FnOnce(&'a mut Connection) -> CatalogFuture<'a, T> + Send + 'static,
+        F: for<'a> FnOnce(&'a mut Connection) -> CatalogWork<'a, T> + Send + 'static,
     {
         let config = match Self::config_for(connection, cx) {
             Ok(config) => config,
@@ -243,28 +233,9 @@ impl ObjectExplorer {
             }
         };
         let catalog = self.catalog_connection(connection);
-        let connection_name = connection.clone();
         let generation = self.generation;
         let task = tokio_bridge::spawn(cx, async move {
-            let started = std::time::Instant::now();
-            tracing::debug!(connection = %connection_name, "catalog query queued");
-            let mut guard = catalog.lock().await;
-            tracing::debug!(connection = %connection_name, waited_ms = started.elapsed().as_millis(), "catalog lock acquired");
-            if guard.is_none() {
-                *guard = Some(Connection::connect(config).await?);
-                tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), "catalog connected");
-            }
-            let Some(tds) = guard.as_mut() else {
-                return Err(QueryError::ConnectionLost(
-                    "catalog connection missing".to_owned(),
-                ));
-            };
-            let result = work(tds).await;
-            tracing::debug!(connection = %connection_name, elapsed_ms = started.elapsed().as_millis(), ok = result.is_ok(), "catalog query finished");
-            if matches!(result, Err(QueryError::ConnectionLost(_))) {
-                *guard = None;
-            }
-            result
+            schema_cache::with_catalog(&catalog, config, work).await
         });
         cx.spawn(async move |this, cx| {
             let result = match task.await {

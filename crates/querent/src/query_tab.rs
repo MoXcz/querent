@@ -1,35 +1,26 @@
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::Context as _;
 use gpui_kit::assets::IconName as LucideIcon;
-use gpui_kit::base::input::{Diagnostic, DiagnosticSeverity};
 use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{
     Editor, EditorState, InputEvent, MoveDown, MoveUp, RangeDecoration, RangeDecorationCollection,
-    RangeDecorationStyle, Redo, Rope, RopeExt as _, Undo,
+    RangeDecorationStyle, Redo, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
-use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::table::{DataTable, TableState};
+use gpui_kit::component::table::TableState;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, resizable_panel,
-    v_flex, v_resizable,
+    ActiveTheme as _, Disableable as _, Sizable as _, h_flex, resizable_panel, v_flex, v_resizable,
 };
 use gpui_kit::{
-    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
-    Styled as _, Subscription, Task, WeakEntity, Window, actions, div, prelude::FluentBuilder as _,
-    px,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, Keystroke, ParentElement as _, Render, SharedString, Styled as _, Subscription,
+    Task, Window, actions, div, px,
 };
-use sql_db::{
-    CancelHandle, Connection, ConnectionConfig, Dialect, QueryError, QueryOutput, ResultSet,
-};
-use sql_text::format::FormatDialect;
+use sql_db::{CancelHandle, Connection, ConnectionConfig, QueryError, QueryOutput, ResultSet};
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
 use tokio::sync::Mutex;
 
@@ -37,12 +28,15 @@ use crate::KEY_CONTEXT;
 use crate::connections::{self, ConnectionStore};
 use crate::database_picker::{DatabaseChoices, DatabaseSelect};
 use crate::history;
-use crate::lsp_servers::{self, LspServers};
+use crate::lsp_servers::LspServers;
 use crate::results_table::ResultsTable;
 use crate::schema_cache::{self, SchemaCache};
 use crate::settings::{self, SettingsStore};
 use crate::sql_language::{SqlCompletions, SqlHover, TabTarget};
 use crate::tokio_bridge;
+
+mod language;
+mod results;
 
 actions!(
     querent,
@@ -67,9 +61,6 @@ type SharedConnection = Arc<Mutex<Connection>>;
 const BLOCK_CURSOR_OPACITY: f32 = 0.45;
 const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
 const RUNNING_TICK: Duration = Duration::from_millis(100);
-/// Pause after typing before the syntax is checked again.
-const SYNTAX_CHECK_DELAY: Duration = Duration::from_millis(400);
-const SYNTAX_CHECK_MAX_BYTES: usize = 256 * 1024;
 /// Outer error: the task died. Middle: connecting failed. Inner: the query
 /// failed, with what the server returned before the error in the output.
 type QueryOutcome =
@@ -120,9 +111,6 @@ pub struct ConnectionFields {
 type ConnectionSelect = SelectState<Vec<SharedString>>;
 
 type ServerView = (bool, Vec<lsp_types::Diagnostic>);
-
-/// Messages drawn at once; a loop of `PRINT`s can produce far more.
-const MAX_SHOWN_MESSAGES: usize = 1_000;
 
 pub struct QueryTab {
     number: usize,
@@ -197,7 +185,7 @@ impl QueryTab {
                 .soft_wrap(false)
                 .placeholder("select top 100 * from ...")
         });
-        let document = tab_document(number);
+        let document = language::tab_document(number);
         let target = TabTarget {
             connection: connection_select.downgrade(),
             database: database_select.downgrade(),
@@ -532,234 +520,6 @@ impl QueryTab {
             cx.notify();
         }
         outcome.handled
-    }
-
-    /// The SQL dialect of the tab's connection, if it has one.
-    fn dialect(&self, cx: &App) -> Option<Dialect> {
-        let connection = self.connection_fields(cx).connection?;
-        connections::find(cx, &connection).map(connections::SavedConnection::dialect)
-    }
-
-    fn schedule_syntax_check(&mut self, cx: &mut Context<Self>) {
-        self.syntax_check = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SYNTAX_CHECK_DELAY).await;
-            if let Err(error) = this.update(cx, Self::check_syntax) {
-                tracing::debug!(%error, "tab closed before the syntax check");
-            }
-        }));
-    }
-
-    /// Whether this tab's language server runs, and its diagnostics for the tab.
-    fn server_view(&self, cx: &App) -> ServerView {
-        let (Some(connection), Some(document)) =
-            (self.connection_fields(cx).connection, &self.document)
-        else {
-            return ServerView::default();
-        };
-        let running = matches!(
-            lsp_servers::status(cx, &connection),
-            Some((_, lsp_servers::ServerStatus::Running))
-        );
-        (
-            running,
-            lsp_servers::diagnostics(cx, &connection, document.as_str()),
-        )
-    }
-
-    /// Every tab hears every server change; only one that concerns this tab rechecks.
-    fn on_servers_changed(&mut self, cx: &mut Context<Self>) {
-        if self.server_view(cx) != self.seen_server {
-            self.check_syntax(cx);
-        }
-    }
-
-    /// Marks syntax errors in the editor. T-SQL is skipped: the grammar does
-    /// not know `TOP`, `[names]`, `GO` or `DECLARE` and would flag valid code.
-    fn check_syntax(&mut self, cx: &mut Context<Self>) {
-        let text = self.editor.read(cx).value().to_string();
-        // Parsing runs on this thread, fast for an editor-sized buffer; a
-        // huge pasted script is not checked rather than stalling typing.
-        let checked = !matches!(self.dialect(cx), None | Some(Dialect::TSql))
-            && text.len() <= SYNTAX_CHECK_MAX_BYTES;
-        let errors = if checked {
-            sql_text::syntax::syntax_errors(&text)
-        } else {
-            Vec::new()
-        };
-        let connection = self.connection_fields(cx).connection;
-        if self.server_connection != connection {
-            self.release_language_server(cx);
-            self.server_connection.clone_from(&connection);
-        }
-        let server_diagnostics = match (&connection, &self.document) {
-            (Some(connection), Some(document)) => {
-                lsp_servers::sync_document(cx, connection, document, &text);
-                lsp_servers::diagnostics(cx, connection, document.as_str())
-            }
-            _ => Vec::new(),
-        };
-        self.seen_server = self.server_view(cx);
-        let rope = Rope::from(text.as_str());
-        self.editor.update(cx, |editor, cx| {
-            let Some(diagnostics) = editor.diagnostics_mut() else {
-                return;
-            };
-            diagnostics.reset(&rope);
-            for diagnostic in server_diagnostics {
-                diagnostics.push(Diagnostic::from(diagnostic));
-            }
-            for error in errors {
-                let range = rope.offset_to_position(error.range.start)
-                    ..rope.offset_to_position(error.range.end);
-                diagnostics.push(
-                    Diagnostic::new(range, error.message)
-                        .with_severity(DiagnosticSeverity::Error)
-                        .with_source("sql"),
-                );
-            }
-            cx.notify();
-        });
-    }
-
-    /// Closes this tab's document on the language server it was sent to.
-    pub fn release_language_server(&mut self, cx: &mut Context<Self>) {
-        if let (Some(connection), Some(document)) = (self.server_connection.take(), &self.document)
-        {
-            lsp_servers::close_document(cx, &connection, document);
-        }
-    }
-
-    /// The built-in formatter, or the language server when settings ask for it.
-    fn format_sql(&mut self, _: &FormatSql, window: &mut Window, cx: &mut Context<Self>) {
-        if settings::get(cx).format_with_language_server {
-            self.format_with_server(window, cx);
-        } else {
-            self.format_built_in(window, cx);
-        }
-    }
-
-    /// Formats the selection, or the whole buffer, as one undoable edit.
-    fn format_built_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dialect = match self.dialect(cx) {
-            Some(Dialect::TSql) => FormatDialect::SqlServer,
-            Some(Dialect::Postgres) => FormatDialect::Postgres,
-            Some(Dialect::Sqlite | Dialect::Snowflake) | None => FormatDialect::Generic,
-        };
-        let style = settings::get(cx).formatter.clone();
-        let (text, selection, cursor) = {
-            let editor = self.editor.read(cx);
-            (
-                editor.value().to_string(),
-                editor.selected_range(),
-                editor.cursor(),
-            )
-        };
-        let whole = selection.is_empty();
-        let range = if whole { 0..text.len() } else { selection };
-        let Some(source) = text.get(range.clone()) else {
-            return;
-        };
-        let Some(formatted) = sql_text::format::format_sql(source, dialect, &style) else {
-            window.push_notification(
-                "Left unchanged: the formatter could not read this SQL without changing it.",
-                cx,
-            );
-            return;
-        };
-        if formatted == source {
-            return;
-        }
-        self.editor.update(cx, |editor, cx| {
-            editor.set_selected_range(range, cx);
-            editor.replace(formatted, window, cx);
-            // A whole-tab format should not throw the cursor to the end.
-            if whole {
-                let length = editor.value().len();
-                let mut offset = cursor.min(length);
-                let value = editor.value();
-                while offset > 0 && !value.is_char_boundary(offset) {
-                    offset -= 1;
-                }
-                editor.set_selected_range(offset..offset, cx);
-            }
-        });
-    }
-
-    /// Replaces the editor's text with the server's formatting, as one undoable edit.
-    fn format_with_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(connection) = self.connection_fields(cx).connection else {
-            window.push_notification("Pick a connection first.", cx);
-            return;
-        };
-        let client = lsp_servers::client(cx, &connection);
-        let status = lsp_servers::status(cx, &connection);
-        let (Some(client), Some(document)) = (client, self.document.clone()) else {
-            let message = match status {
-                Some((command, lsp_servers::ServerStatus::Starting)) => {
-                    format!("{command} is starting; try again in a moment.")
-                }
-                Some((command, lsp_servers::ServerStatus::Failed { message, .. })) => {
-                    format!("{command}: {message}")
-                }
-                Some((_, lsp_servers::ServerStatus::Running)) | None => "Format SQL needs a language server for this connection's database (see language_servers in settings.toml).".to_owned(),
-            };
-            window.push_notification(message, cx);
-            return;
-        };
-        if !lsp_servers::can_format(client.capabilities()) {
-            window.push_notification("This language server does not format SQL.", cx);
-            return;
-        }
-        let text = self.editor.read(cx).value().to_string();
-        lsp_servers::sync_document(cx, &connection, &document, &text);
-        let params = lsp_types::DocumentFormattingParams {
-            text_document: lsp_types::TextDocumentIdentifier::new(document),
-            options: lsp_types::FormattingOptions {
-                tab_size: 4,
-                insert_spaces: true,
-                ..lsp_types::FormattingOptions::default()
-            },
-            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
-        };
-        let request = tokio_bridge::spawn(cx, async move {
-            client
-                .request::<lsp_types::request::Formatting>(params)
-                .await
-        });
-        self.format_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let failure = match request.await {
-                Ok(Ok(edits)) => Ok(edits.unwrap_or_default()),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(error) => Err(error.to_string()),
-            };
-            let edits = match failure {
-                Ok(edits) => edits,
-                Err(error) => {
-                    let shown = this.update_in(cx, |_, window, cx| {
-                        window.push_notification(format!("Format SQL failed: {error}."), cx);
-                    });
-                    if let Err(error) = shown {
-                        tracing::debug!(%error, "tab closed before formatting failed");
-                    }
-                    return;
-                }
-            };
-            let applied = this.update_in(cx, |this, window, cx| {
-                let current = this.editor.read(cx).value().to_string();
-                // The user kept typing; these edits are for older text.
-                if current != text || edits.is_empty() {
-                    return;
-                }
-                let formatted = apply_text_edits(&current, &edits);
-                this.editor.update(cx, |editor, cx| {
-                    editor.set_selected_range(0..current.len(), cx);
-                    editor.replace(formatted, window, cx);
-                });
-            });
-            if let Err(error) = applied {
-                tracing::debug!(%error, "tab closed before formatting finished");
-            }
-        }));
     }
 
     fn update_block_cursor(&mut self, cx: &mut Context<Self>) {
@@ -1150,50 +910,6 @@ impl QueryTab {
         );
     }
 
-    fn show_result_set(&mut self, output: &QueryOutput, index: usize, cx: &mut Context<Self>) {
-        let shown = output.result_sets.get(index).cloned().unwrap_or_default();
-        self.show_result(index, shown, cx);
-    }
-
-    fn show_result(&mut self, index: usize, shown: Arc<ResultSet>, cx: &mut Context<Self>) {
-        self.shown_index = index;
-        self.shown_result = Some(shown.clone());
-        self.results.update(cx, |table, cx| {
-            table.delegate_mut().set_result(shown);
-            table.refresh(cx);
-            cx.notify();
-        });
-        cx.notify();
-    }
-
-    fn select_result_set(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.show_messages = false;
-        let QueryState::Done { output, .. } = &self.state else {
-            return;
-        };
-        let Some(shown) = output.result_sets.get(index).cloned() else {
-            return;
-        };
-        self.show_result(index, shown, cx);
-    }
-
-    /// Runs the last statement again without the row limit, after a truncated result.
-    fn rerun_without_limit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(run) = self.last_run.clone() else {
-            return;
-        };
-        let fields = self.connection_fields(cx);
-        if fields.connection.as_ref() != Some(&run.connection) || fields.database != run.database {
-            window.push_notification(
-                "The tab's connection or database changed since that run; run it again yourself.",
-                cx,
-            );
-            return;
-        }
-        self.without_row_limit = true;
-        self.start_query(run.sql, window, cx);
-    }
-
     /// The tab as saved in the session file.
     pub fn saved_tab(&self, cx: &App) -> crate::session::SavedTab {
         let fields = self.connection_fields(cx);
@@ -1214,56 +930,6 @@ impl QueryTab {
             *cancelling = true;
             cx.notify();
         }
-    }
-
-    fn export_csv(&mut self, _: &ExportCsv, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(result_set) = self
-            .shown_result
-            .clone()
-            .filter(|result| !result.columns.is_empty())
-        else {
-            self.export_notice = Some("Nothing to export: run a query that returns rows.".into());
-            cx.notify();
-            return;
-        };
-        let directory = export_directory();
-        let suggested_name = export_file_name(self.number, &self.connection_fields(cx).database);
-        let chosen_path = cx.prompt_for_new_path(&directory, Some(&suggested_name));
-
-        self.export_task = Some(cx.spawn(async move |this, cx| {
-            let path = match chosen_path.await {
-                Ok(Ok(Some(path))) => path,
-                Ok(Ok(None)) | Err(_) => return,
-                Ok(Err(error)) => {
-                    let notice = format!("Export failed: no save dialog ({error}).");
-                    report_export(&this, notice, cx);
-                    return;
-                }
-            };
-            let written = cx
-                .background_executor()
-                .spawn({
-                    let path = path.clone();
-                    let result_set = result_set.clone();
-                    async move { write_csv_file(&path, &result_set) }
-                })
-                .await;
-            let notice = match written {
-                Ok(()) => {
-                    let mut notice = format!(
-                        "Exported {} rows to {}",
-                        result_set.rows.len(),
-                        path.display()
-                    );
-                    if result_set.truncated {
-                        notice.push_str(" (only the rows shown; the result was truncated)");
-                    }
-                    notice
-                }
-                Err(error) => format!("Export failed: {error:#}"),
-            };
-            report_export(&this, notice, cx);
-        }));
     }
 
     /// SQLite opens one file and has no databases to pick.
@@ -1329,236 +995,6 @@ impl QueryTab {
                         this.cancel_query(&CancelQuery, window, cx);
                     })),
             )
-    }
-
-    /// A spinner, the elapsed time and Cancel above the grid while a query runs.
-    fn render_running_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let QueryState::Running {
-            started,
-            cancelling,
-            ..
-        } = &self.state
-        else {
-            return None;
-        };
-        let cancelling = *cancelling;
-        Some(
-            h_flex()
-                .gap_2()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().border)
-                .bg(cx.theme().accent)
-                .text_sm()
-                .child(Spinner::new().small())
-                .child(format!(
-                    "{} {:.1}s",
-                    if cancelling {
-                        "Cancelling…"
-                    } else {
-                        "Running…"
-                    },
-                    started.elapsed().as_secs_f64()
-                ))
-                .child(div().flex_1())
-                .child(
-                    Button::new("cancel-running")
-                        .xsmall()
-                        .icon(LucideIcon::CircleStop)
-                        .label("Cancel")
-                        .disabled(cancelling)
-                        .tooltip("Stop the query on the server (Ctrl+Shift+C)")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.cancel_query(&CancelQuery, window, cx);
-                        })),
-                ),
-        )
-    }
-
-    /// Row count and the no-limit rerun under the grid, shown while it holds a result.
-    fn render_results_footer(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let result = self
-            .shown_result
-            .as_ref()
-            .filter(|result| !result.columns.is_empty())?;
-        let mut summary = format!("{} rows", result.rows.len());
-        let truncated = result.truncated;
-        if truncated {
-            summary.push_str(
-                " (first rows only: the row limit or the 1 GB result budget was reached)",
-            );
-        }
-        Some(
-            h_flex()
-                .justify_between()
-                .px_2()
-                .py_1()
-                .border_t_1()
-                .border_color(cx.theme().border)
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(summary)
-                .children(truncated.then(|| {
-                    Button::new("rerun-without-limit")
-                        .ghost()
-                        .xsmall()
-                        .label("Run again without limit")
-                        .tooltip("Runs the same SQL again without the row limit")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.rerun_without_limit(window, cx);
-                        }))
-                })),
-        )
-    }
-
-    fn render_results(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        match &self.state {
-            QueryState::Cancelled { elapsed } => div()
-                .size_full()
-                .p_3()
-                .text_color(cx.theme().muted_foreground)
-                .child(format!(
-                    "Query cancelled after {:.1}s.",
-                    elapsed.as_secs_f64()
-                ))
-                .into_any_element(),
-            QueryState::Failed { message } => div()
-                .size_full()
-                .p_3()
-                .text_color(cx.theme().danger)
-                .child(message.clone())
-                .into_any_element(),
-            QueryState::Done { output, failed, .. } if output.result_sets.is_empty() && !failed => {
-                div()
-                    .size_full()
-                    .p_3()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(match output.rows_affected {
-                        Some(count) => format!("{count} rows affected."),
-                        None => "Statement completed.".to_owned(),
-                    })
-                    .into_any_element()
-            }
-            QueryState::Done { output, failed, .. } if self.show_messages => v_flex()
-                .size_full()
-                .child(self.render_result_switcher(output, cx))
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_h_0()
-                        .p_3()
-                        .gap_1()
-                        .text_sm()
-                        .children(hidden_messages(output.messages.len()).map(|hidden| {
-                            div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("{hidden} earlier messages are not shown."))
-                        }))
-                        .children(
-                            output
-                                .messages
-                                .iter()
-                                .enumerate()
-                                .skip(hidden_messages(output.messages.len()).unwrap_or(0))
-                                .map(|(index, message)| {
-                                    let is_error = *failed && index + 1 == output.messages.len();
-                                    div()
-                                        .when(is_error, |line| line.text_color(cx.theme().danger))
-                                        .child(message.clone())
-                                }),
-                        ),
-                )
-                .into_any_element(),
-            QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
-                .size_full()
-                .children(self.render_running_banner(cx))
-                .children(match &self.state {
-                    QueryState::Done { output, .. } => {
-                        Some(self.render_result_switcher(output, cx))
-                    }
-                    QueryState::Idle
-                    | QueryState::Running { .. }
-                    | QueryState::Failed { .. }
-                    | QueryState::Cancelled { .. } => None,
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_h_0()
-                        // The rows on screen are the previous run's until this one ends.
-                        .when(self.is_running(), |grid| grid.opacity(0.35))
-                        .child(DataTable::new(&self.results).stripe(true).bordered(false)),
-                )
-                .children(self.render_results_footer(cx))
-                .into_any_element(),
-        }
-    }
-
-    /// Above the grid: one button per result set and one for messages when there
-    /// is more than one view, and Export CSV while a result with columns shows.
-    fn render_result_switcher(&self, output: &QueryOutput, cx: &mut Context<Self>) -> AnyElement {
-        let views = output.result_sets.len() + usize::from(!output.messages.is_empty());
-        let exportable = !self.show_messages
-            && self
-                .shown_result
-                .as_ref()
-                .is_some_and(|result| !result.columns.is_empty());
-        if views < 2 && !exportable {
-            return div().into_any_element();
-        }
-        let export = exportable.then(|| {
-            Button::new("export-csv")
-                .ghost()
-                .xsmall()
-                .icon(LucideIcon::Download)
-                .label("Export CSV")
-                .tooltip("Save the result as CSV (Ctrl+Shift+E)")
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.export_csv(&ExportCsv, window, cx);
-                }))
-        });
-        let mut views_bar = h_flex().gap_1();
-        let bar = h_flex()
-            .justify_between()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(cx.theme().border);
-        for (index, result) in output.result_sets.iter().enumerate() {
-            let selected = !self.show_messages && index == self.shown_index;
-            let label = format!("Result {} · {} rows", index + 1, result.rows.len());
-            let mut button = Button::new(("result-set", index))
-                .xsmall()
-                .label(label)
-                .on_click(cx.listener(move |this, _, _, cx| this.select_result_set(index, cx)));
-            button = if selected {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            views_bar = views_bar.child(button);
-        }
-        if !output.messages.is_empty() {
-            let label = format!("Messages · {}", output.messages.len());
-            let mut button = Button::new("messages")
-                .xsmall()
-                .label(label)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_messages = true;
-                    cx.notify();
-                }));
-            button = if self.show_messages {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            views_bar = views_bar.child(button);
-        }
-        // A single view needs no switcher, only the export button.
-        bar.child(if views < 2 { h_flex() } else { views_bar })
-            .children(export)
-            .into_any_element()
     }
 
     pub fn status_text(&self) -> String {
@@ -1734,60 +1170,6 @@ fn vim_key(keystroke: &Keystroke) -> Option<Key> {
     }
 }
 
-/// How many of `count` messages are left out, the oldest first.
-fn hidden_messages(count: usize) -> Option<usize> {
-    count
-        .checked_sub(MAX_SHOWN_MESSAGES)
-        .filter(|hidden| *hidden > 0)
-}
-
-fn report_export(this: &WeakEntity<QueryTab>, notice: String, cx: &mut AsyncApp) {
-    let updated = this.update(cx, |tab, cx| {
-        tab.export_notice = Some(notice.into());
-        cx.notify();
-    });
-    if let Err(error) = updated {
-        tracing::debug!(%error, "tab closed before the export finished");
-    }
-}
-
-fn write_csv_file(path: &Path, result_set: &ResultSet) -> anyhow::Result<()> {
-    let file =
-        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    sql_db::write_csv(result_set, std::io::BufWriter::new(file))
-        .with_context(|| format!("writing {}", path.display()))
-}
-
-/// Downloads, else home, else the working directory.
-fn export_directory() -> PathBuf {
-    directories::UserDirs::new()
-        .and_then(|directories| {
-            directories
-                .download_dir()
-                .map(Path::to_path_buf)
-                .or_else(|| Some(directories.home_dir().to_path_buf()))
-        })
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn export_file_name(tab_number: usize, database: &str) -> String {
-    let stem: String = database
-        .chars()
-        .map(|character| {
-            if character.is_alphanumeric() || character == '_' || character == '-' {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if stem.is_empty() {
-        format!("query-{tab_number}.csv")
-    } else {
-        format!("{stem}-query-{tab_number}.csv")
-    }
-}
-
 /// "line 3" or "lines 3–5", 1-based, for the byte range that ran.
 fn line_span(text: &str, range: &Range<usize>) -> SharedString {
     let line_of = |offset: usize| {
@@ -1804,75 +1186,14 @@ fn line_span(text: &str, range: &Range<usize>) -> SharedString {
     }
 }
 
-/// The URI a language server knows this tab's text by.
-fn tab_document(number: usize) -> Option<lsp_types::Uri> {
-    format!("file:///querent/tab-{number}.sql").parse().ok()
-}
-
-/// `text` with LSP edits applied; edits are applied from the end so earlier offsets stay valid.
-fn apply_text_edits(text: &str, edits: &[lsp_types::TextEdit]) -> String {
-    let rope = Rope::from(text);
-    let mut ranges: Vec<(usize, Range<usize>, &str)> = edits
-        .iter()
-        .enumerate()
-        .map(|(index, edit)| {
-            (
-                index,
-                rope.position_to_offset(&edit.range.start)
-                    ..rope.position_to_offset(&edit.range.end),
-                edit.new_text.as_str(),
-            )
-        })
-        .collect();
-    // From the end; inserts at one position go in reverse so they read in array order.
-    ranges.sort_by_key(|(index, range, _)| std::cmp::Reverse((range.start, *index)));
-    let mut result = text.to_owned();
-    for (_, range, new_text) in ranges {
-        if result.is_char_boundary(range.start)
-            && result.is_char_boundary(range.end)
-            && range.start <= range.end
-        {
-            result.replace_range(range, new_text);
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn export_file_name_is_safe() {
-        assert_eq!(export_file_name(2, ""), "query-2.csv");
-        assert_eq!(
-            export_file_name(3, "dbo/sales data"),
-            "dbo_sales_data-query-3.csv"
-        );
-    }
 
     #[test]
     fn describes_line_span() {
         let text = "select 1;\nselect\n  2;";
         assert_eq!(line_span(text, &(0..8)), "line 1");
         assert_eq!(line_span(text, &(10..20)), "lines 2–3");
-    }
-
-    #[test]
-    fn applies_text_edits_from_the_end() {
-        let edit = |line, start, end, text: &str| lsp_types::TextEdit {
-            range: lsp_types::Range::new(
-                lsp_types::Position::new(line, start),
-                lsp_types::Position::new(line, end),
-            ),
-            new_text: text.to_owned(),
-        };
-        let edits = [edit(0, 0, 6, "SELECT"), edit(1, 0, 4, "FROM")];
-        assert_eq!(
-            apply_text_edits("select 1\nfrom t", &edits),
-            "SELECT 1\nFROM t"
-        );
-        let inserts = [edit(0, 0, 0, "a"), edit(0, 0, 0, "b")];
-        assert_eq!(apply_text_edits("x", &inserts), "abx");
     }
 }
