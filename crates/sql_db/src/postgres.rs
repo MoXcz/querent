@@ -127,11 +127,12 @@ impl PgConnection {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn execute(
+    pub async fn execute_into(
         &mut self,
         sql: &str,
         cancel: &CancelHandle,
-    ) -> Result<QueryOutput, QueryError> {
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         let Self {
             session,
             tls,
@@ -144,13 +145,12 @@ impl PgConnection {
             && sql_text::completion::is_read_only_query(sql)
             && !in_transaction_block(&session.client).await;
         let stop = CancellationToken::new();
-        let mut output = QueryOutput::default();
         let result = {
             let limit = Limit {
                 max_rows: config.max_rows,
                 stop: stop_at_limit.then_some(&stop),
             };
-            let work = run_batch(&session.client, sql, &limit, cancel, &mut output);
+            let work = run_batch(&session.client, sql, &limit, cancel, output);
             pin_mut!(work);
             tokio::select! {
                 result = &mut work => result,
@@ -163,17 +163,13 @@ impl PgConnection {
                 }
             }
         };
-        let notices = drain(&mut session.notices);
+        output.messages.extend(drain(&mut session.notices));
         match result {
-            Ok(()) => {
-                output.messages.extend(notices);
-                Ok(output)
-            }
+            Ok(()) => Ok(()),
             Err(error)
                 if stop.is_cancelled() && !cancel.token.is_cancelled() && is_cancel(&error) =>
             {
-                output.messages.extend(notices);
-                Ok(output)
+                Ok(())
             }
             // `statement_timeout` also raises 57014; only a user cancel reads as cancelled.
             Err(error) => {

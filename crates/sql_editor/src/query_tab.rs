@@ -70,9 +70,10 @@ const RUNNING_TICK: Duration = Duration::from_millis(100);
 /// Pause after typing before the syntax is checked again.
 const SYNTAX_CHECK_DELAY: Duration = Duration::from_millis(400);
 const SYNTAX_CHECK_MAX_BYTES: usize = 256 * 1024;
-/// Outer error: the task died. Middle: connecting failed. Inner: the query failed.
+/// Outer error: the task died. Middle: connecting failed. Inner: the query
+/// failed, with what the server returned before the error in the output.
 type QueryOutcome =
-    anyhow::Result<Result<(SharedConnection, Result<QueryOutput, QueryError>), QueryError>>;
+    anyhow::Result<Result<(SharedConnection, QueryOutput, Result<(), QueryError>), QueryError>>;
 
 enum QueryState {
     Idle,
@@ -93,6 +94,8 @@ enum QueryState {
     Done {
         output: QueryOutput,
         elapsed: Duration,
+        /// The run failed after returning `output`; the error is its last message.
+        failed: bool,
     },
     Failed {
         message: SharedString,
@@ -687,14 +690,20 @@ impl QueryTab {
                 .await
         });
         self.format_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let edits = match request.await {
-                Ok(Ok(edits)) => edits.unwrap_or_default(),
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "format request");
-                    return;
-                }
+            let failure = match request.await {
+                Ok(Ok(edits)) => Ok(edits.unwrap_or_default()),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let edits = match failure {
+                Ok(edits) => edits,
                 Err(error) => {
-                    tracing::debug!(%error, "format task");
+                    let shown = this.update_in(cx, |_, window, cx| {
+                        window.push_notification(format!("Format SQL failed: {error}."), cx);
+                    });
+                    if let Err(error) = shown {
+                        tracing::debug!(%error, "tab closed before formatting failed");
+                    }
                     return;
                 }
             };
@@ -940,12 +949,13 @@ impl QueryTab {
                         () = cancel.cancelled() => return Err(QueryError::Cancelled),
                     }
                 };
-                let output = {
+                let mut output = QueryOutput::default();
+                let result = {
                     let mut connection = connection.lock().await;
                     connection.set_max_rows(limit);
-                    connection.execute(&sql, &cancel).await
+                    connection.execute_into(&sql, &cancel, &mut output).await
                 };
-                Ok::<_, QueryError>((connection, output))
+                Ok::<_, QueryError>((connection, output, result))
             }
         });
 
@@ -999,7 +1009,7 @@ impl QueryTab {
         };
         self.running_query = None;
         self.state = match outcome {
-            Ok(Ok((connection, Ok(mut output)))) => {
+            Ok(Ok((connection, mut output, Ok(())))) => {
                 self.connection = Some(connection);
                 if cancelling {
                     output
@@ -1010,9 +1020,13 @@ impl QueryTab {
                 let last = output.result_sets.len().saturating_sub(1);
                 self.show_messages = false;
                 self.show_result_set(&output, last, cx);
-                QueryState::Done { output, elapsed }
+                QueryState::Done {
+                    output,
+                    elapsed,
+                    failed: false,
+                }
             }
-            Ok(Ok((connection, Err(QueryError::Cancelled)))) => {
+            Ok(Ok((connection, _, Err(QueryError::Cancelled)))) => {
                 self.connection = Some(connection);
                 QueryState::Cancelled { elapsed }
             }
@@ -1021,12 +1035,25 @@ impl QueryTab {
                 self.connection = None;
                 QueryState::Cancelled { elapsed }
             }
-            Ok(Ok((connection, Err(error)))) => {
+            Ok(Ok((connection, mut output, Err(error)))) => {
                 // A lost connection is not reused; any other error leaves it usable.
                 self.connection =
                     (!matches!(error, QueryError::ConnectionLost(_))).then_some(connection);
-                QueryState::Failed {
-                    message: error.to_string().into(),
+                if output.result_sets.is_empty() && output.messages.is_empty() {
+                    QueryState::Failed {
+                        message: error.to_string().into(),
+                    }
+                } else {
+                    // Earlier statements answered: keep their results next to the error.
+                    output.messages.push(error.to_string());
+                    let last = output.result_sets.len().saturating_sub(1);
+                    self.show_result_set(&output, last, cx);
+                    self.show_messages = true;
+                    QueryState::Done {
+                        output,
+                        elapsed,
+                        failed: true,
+                    }
                 }
             }
             Ok(Err(error)) => {
@@ -1043,28 +1070,7 @@ impl QueryTab {
             }
         };
         if let Some(run) = run {
-            let (succeeded, rows) = match &self.state {
-                QueryState::Done { output, .. } => (
-                    true,
-                    output.result_sets.last().map(|result| result.rows.len()),
-                ),
-                QueryState::Idle
-                | QueryState::Running { .. }
-                | QueryState::Failed { .. }
-                | QueryState::Cancelled { .. } => (false, None),
-            };
-            history::record(
-                cx,
-                history::HistoryEntry {
-                    at: history::now(),
-                    connection: run.connection.to_string(),
-                    database: run.database,
-                    sql: run.sql,
-                    elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                    rows,
-                    succeeded,
-                },
-            );
+            self.record_run(run, elapsed, cx);
         }
         // The rows on screen are the previous run's, not this one's.
         if matches!(
@@ -1079,6 +1085,32 @@ impl QueryTab {
             });
         }
         cx.notify();
+    }
+
+    /// Adds the run that just ended to the query history.
+    fn record_run(&self, run: RunRecord, elapsed: Duration, cx: &mut Context<Self>) {
+        let (succeeded, rows) = match &self.state {
+            QueryState::Done { output, failed, .. } => (
+                !failed,
+                output.result_sets.last().map(|result| result.rows.len()),
+            ),
+            QueryState::Idle
+            | QueryState::Running { .. }
+            | QueryState::Failed { .. }
+            | QueryState::Cancelled { .. } => (false, None),
+        };
+        history::record(
+            cx,
+            history::HistoryEntry {
+                at: history::now(),
+                connection: run.connection.to_string(),
+                database: run.database,
+                sql: run.sql,
+                elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                rows,
+                succeeded,
+            },
+        );
     }
 
     fn show_result_set(&mut self, output: &QueryOutput, index: usize, cx: &mut Context<Self>) {
@@ -1359,16 +1391,18 @@ impl QueryTab {
                 .text_color(cx.theme().danger)
                 .child(message.clone())
                 .into_any_element(),
-            QueryState::Done { output, .. } if output.result_sets.is_empty() => div()
-                .size_full()
-                .p_3()
-                .text_color(cx.theme().muted_foreground)
-                .child(match output.rows_affected {
-                    Some(count) => format!("{count} rows affected."),
-                    None => "Statement completed.".to_owned(),
-                })
-                .into_any_element(),
-            QueryState::Done { output, .. } if self.show_messages => v_flex()
+            QueryState::Done { output, failed, .. } if output.result_sets.is_empty() && !failed => {
+                div()
+                    .size_full()
+                    .p_3()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(match output.rows_affected {
+                        Some(count) => format!("{count} rows affected."),
+                        None => "Statement completed.".to_owned(),
+                    })
+                    .into_any_element()
+            }
+            QueryState::Done { output, failed, .. } if self.show_messages => v_flex()
                 .size_full()
                 .child(self.render_result_switcher(output, cx))
                 .child(
@@ -1378,12 +1412,12 @@ impl QueryTab {
                         .p_3()
                         .gap_1()
                         .text_sm()
-                        .children(
-                            output
-                                .messages
-                                .iter()
-                                .map(|message| div().child(message.clone())),
-                        ),
+                        .children(output.messages.iter().enumerate().map(|(index, message)| {
+                            let is_error = *failed && index + 1 == output.messages.len();
+                            div()
+                                .when(is_error, |line| line.text_color(cx.theme().danger))
+                                .child(message.clone())
+                        })),
                 )
                 .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
@@ -1505,8 +1539,15 @@ impl QueryTab {
                 format!("Cancelled · {:.2}s", elapsed.as_secs_f64())
             }
             QueryState::Failed { .. } => "Failed".to_owned(),
-            QueryState::Done { output, elapsed } => {
+            QueryState::Done {
+                output,
+                elapsed,
+                failed,
+            } => {
                 let mut parts = Vec::new();
+                if *failed {
+                    parts.push("Failed".to_owned());
+                }
                 if let Some(ran_lines) = &self.ran_lines {
                     parts.push(ran_lines.to_string());
                 }
@@ -1523,7 +1564,8 @@ impl QueryTab {
                     parts.push(format!("{count} rows affected"));
                 }
                 parts.push(format!("{:.2}s", elapsed.as_secs_f64()));
-                if let Some(message) = output.messages.last() {
+                // A failed run's last message is the error, too long for one line.
+                if let Some(message) = output.messages.last().filter(|_| !failed) {
                     parts.push(message.clone());
                 }
                 parts.join(" · ")

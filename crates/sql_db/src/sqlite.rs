@@ -84,24 +84,30 @@ impl SqliteConnection {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn execute(
+    pub async fn execute_into(
         &mut self,
         sql: &str,
         cancel: &CancelHandle,
-    ) -> Result<QueryOutput, QueryError> {
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         let sql = sql.to_owned();
         let max_rows = self.config.max_rows;
         let token = cancel.token.clone();
-        let work =
-            self.with_connection(move |connection| run_batch(connection, &sql, max_rows, &token));
+        let work = self.with_connection(move |connection| {
+            let mut output = QueryOutput::default();
+            let result = fill_batch(connection, &sql, max_rows, &token, &mut output);
+            Ok((output, result.map_err(|error| map_error(&error))))
+        });
         tokio::pin!(work);
-        tokio::select! {
+        let (collected, result) = tokio::select! {
             result = &mut work => result,
             () = cancel.token.cancelled() => {
                 self.interrupt.interrupt();
                 work.await
             }
-        }
+        }?;
+        *output = collected;
+        result
     }
 
     pub fn close(self) {
@@ -261,6 +267,7 @@ async fn blocking<T: Send + 'static>(
         .map_err(|error| QueryError::ConnectionLost(format!("SQLite task failed: {error}")))?
 }
 
+#[cfg(test)]
 fn run_batch(
     connection: &rusqlite::Connection,
     sql: &str,
@@ -268,6 +275,18 @@ fn run_batch(
     cancel: &CancellationToken,
 ) -> Result<QueryOutput, rusqlite::Error> {
     let mut output = QueryOutput::default();
+    fill_batch(connection, sql, max_rows, cancel, &mut output)?;
+    Ok(output)
+}
+
+/// Fills `output` statement by statement, so an error keeps the earlier results.
+fn fill_batch(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    max_rows: usize,
+    cancel: &CancellationToken,
+    output: &mut QueryOutput,
+) -> Result<(), rusqlite::Error> {
     let mut batch = Batch::new(connection, sql);
     while let Some(mut statement) = batch.next()? {
         // An interrupt only stops a running statement; one that has not started checks here.
@@ -314,7 +333,7 @@ fn run_batch(
         }
         output.result_sets.push(result_set);
     }
-    Ok(output)
+    Ok(())
 }
 
 fn to_value(value: ValueRef<'_>) -> Value {

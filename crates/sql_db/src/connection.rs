@@ -141,11 +141,23 @@ impl Connection {
         sql: &str,
         cancel: &CancelHandle,
     ) -> Result<QueryOutput, QueryError> {
+        let mut output = QueryOutput::default();
+        self.execute_into(sql, cancel, &mut output).await?;
+        Ok(output)
+    }
+
+    /// `execute` into `output`, which keeps the result sets and messages that arrived before an error.
+    pub async fn execute_into(
+        &mut self,
+        sql: &str,
+        cancel: &CancelHandle,
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         match self {
-            Self::Tds(connection) => connection.execute(sql, cancel).await,
-            Self::Postgres(connection) => connection.execute(sql, cancel).await,
-            Self::Sqlite(connection) => connection.execute(sql, cancel).await,
-            Self::Snowflake(connection) => connection.execute(sql, cancel).await,
+            Self::Tds(connection) => connection.execute_into(sql, cancel, output).await,
+            Self::Postgres(connection) => connection.execute_into(sql, cancel, output).await,
+            Self::Sqlite(connection) => connection.execute_into(sql, cancel, output).await,
+            Self::Snowflake(connection) => connection.execute_into(sql, cancel, output).await,
         }
     }
 

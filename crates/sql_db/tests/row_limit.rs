@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use sql_db::{CancelHandle, Connection, ConnectionSettings};
+use sql_db::{CancelHandle, Connection, ConnectionSettings, QueryOutput};
 
 #[expect(clippy::unwrap_used, reason = "a test helper")]
 async fn check(variable: &str, big_query: &str) {
@@ -64,6 +64,41 @@ async fn sql_server_runs_go_batches_and_unseparated_statements() {
     let output = connection.execute(two, &CancelHandle::new()).await.unwrap();
     assert_eq!(output.result_sets.len(), 2);
     assert!(output.result_sets[0].truncated);
+}
+
+/// What arrived before a failing statement stays in the output.
+#[expect(clippy::unwrap_used, reason = "a test helper")]
+async fn check_partial_output(variable: &str) {
+    let text = std::env::var(variable).unwrap();
+    let config = ConnectionSettings::from_connection_string(&text)
+        .unwrap()
+        .config()
+        .unwrap();
+    let mut connection = Connection::connect(config).await.unwrap();
+    let mut output = QueryOutput::default();
+    let result = connection
+        .execute_into("select 7; select 1/0;", &CancelHandle::new(), &mut output)
+        .await;
+    assert!(result.is_err());
+    assert_eq!(output.result_sets.len(), 1);
+    assert_eq!(output.result_sets[0].rows.len(), 1);
+    let next = connection
+        .execute("select 1", &CancelHandle::new())
+        .await
+        .unwrap();
+    assert_eq!(next.result_sets.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "needs a SQL Server; set SQL_EDITOR_SQLSERVER"]
+async fn sql_server_keeps_results_from_before_an_error() {
+    check_partial_output("SQL_EDITOR_SQLSERVER").await;
+}
+
+#[tokio::test]
+#[ignore = "needs a PostgreSQL server; set SQL_EDITOR_PG_URL"]
+async fn postgres_keeps_results_from_before_an_error() {
+    check_partial_output("SQL_EDITOR_PG_URL").await;
 }
 
 #[tokio::test]

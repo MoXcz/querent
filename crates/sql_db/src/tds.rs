@@ -266,13 +266,14 @@ impl TdsConnection {
 
     /// Runs a batch and collects every result set in it.
     #[tracing::instrument(skip_all)]
-    pub async fn execute(
+    pub async fn execute_into(
         &mut self,
         sql: &str,
         cancel: &CancelHandle,
-    ) -> Result<QueryOutput, QueryError> {
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         let max_rows = self.config.max_rows;
-        self.execute_with_limit(sql, cancel, max_rows).await
+        self.run_batches(sql, cancel, max_rows, output).await
     }
 
     /// `execute` with its own row cap (catalog reads pass `usize::MAX`); `GO` lines split the text into batches.
@@ -282,8 +283,19 @@ impl TdsConnection {
         cancel: &CancelHandle,
         max_rows: usize,
     ) -> Result<QueryOutput, QueryError> {
-        let batches = sql_text::split(sql, sql_text::Delimiters::GoLine);
         let mut output = QueryOutput::default();
+        self.run_batches(sql, cancel, max_rows, &mut output).await?;
+        Ok(output)
+    }
+
+    async fn run_batches(
+        &mut self,
+        sql: &str,
+        cancel: &CancelHandle,
+        max_rows: usize,
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
+        let batches = sql_text::split(sql, sql_text::Delimiters::GoLine);
         let [batch] = batches.as_slice() else {
             for batch in batches {
                 if cancel.token.is_cancelled() {
@@ -294,15 +306,14 @@ impl TdsConnection {
                 };
                 // The stop at the limit cancels through the run's own handle, which
                 // would then stop the batches after this one too: scripts read to the end.
-                self.run_batch(batch, cancel, max_rows, StopAtLimit::Never, &mut output)
+                self.run_batch(batch, cancel, max_rows, StopAtLimit::Never, output)
                     .await?;
             }
-            return Ok(output);
+            return Ok(());
         };
         let batch = sql.get(batch.clone()).unwrap_or(sql);
-        self.run_batch(batch, cancel, max_rows, StopAtLimit::LoneRead, &mut output)
-            .await?;
-        Ok(output)
+        self.run_batch(batch, cancel, max_rows, StopAtLimit::LoneRead, output)
+            .await
     }
 
     /// Runs one batch and adds its result sets, row count and messages to `output`.

@@ -103,12 +103,12 @@ impl SnowflakeConnection {
     }
 
     #[tracing::instrument(skip_all)]
-    pub async fn execute(
+    pub async fn execute_into(
         &mut self,
         sql: &str,
         cancel: &CancelHandle,
-    ) -> Result<QueryOutput, QueryError> {
-        let mut output = QueryOutput::default();
+        output: &mut QueryOutput,
+    ) -> Result<(), QueryError> {
         for range in sql_text::split(sql, sql_text::Delimiters::Semicolon) {
             let Some(statement) = sql.get(range) else {
                 continue;
@@ -121,7 +121,7 @@ impl SnowflakeConnection {
                 .await?;
             output.result_sets.push(result_set);
         }
-        Ok(output)
+        Ok(())
     }
 
     pub fn close(self) {
@@ -345,11 +345,17 @@ impl SnowflakeConnection {
         let result = tokio::select! {
             result = &mut work => result,
             () = cancel.token.cancelled() => {
-                abort(&canceller).await;
+                let sent = abort(&canceller).await;
                 // Never leave the tab running if the abort was lost.
                 match tokio::time::timeout(CANCEL_SETTLE_TIMEOUT, work).await {
                     Ok(result) => result,
-                    Err(_) => return Err(QueryError::Cancelled),
+                    Err(_) if sent => return Err(QueryError::Cancelled),
+                    Err(_) => {
+                        return Err(QueryError::Server(
+                            "Snowflake did not confirm the cancel; the statement may still be running. Check Query History in Snowsight."
+                                .to_owned(),
+                        ));
+                    }
                 }
             }
         };
@@ -357,11 +363,23 @@ impl SnowflakeConnection {
     }
 }
 
-async fn abort(canceller: &QueryCanceller) {
+/// Whether Snowflake accepted the abort request.
+async fn abort(canceller: &QueryCanceller) -> bool {
     match tokio::time::timeout(CANCEL_REQUEST_TIMEOUT, canceller.cancel()).await {
-        Ok(Ok(status)) => tracing::debug!(?status, "snowflake cancel sent"),
-        Ok(Err(error)) => tracing::debug!(%error, "snowflake cancel failed"),
-        Err(_) => tracing::debug!("snowflake cancel timed out"),
+        Ok(Ok(status)) => {
+            tracing::debug!(?status, "snowflake cancel sent");
+            true
+        }
+        Ok(Err(error)) => {
+            // The error text may quote the statement, so it stays at debug.
+            tracing::debug!(%error, "snowflake cancel failed");
+            tracing::warn!("snowflake cancel failed");
+            false
+        }
+        Err(_) => {
+            tracing::warn!("snowflake cancel timed out");
+            false
+        }
     }
 }
 
