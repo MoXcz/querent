@@ -91,73 +91,116 @@ async fn check_partial_output(variable: &str) {
     assert_eq!(next.result_sets.len(), 1);
 }
 
-/// A table's primary key comes back in key order, not column order.
+/// The CREATE script of a table built with keys, a default, a check and an
+/// index runs on the server it came from.
 #[expect(clippy::unwrap_used, reason = "a test helper")]
-async fn check_primary_key(variable: &str, database: &str, schema: &str) {
+async fn check_create_script(
+    variable: &str,
+    database: &str,
+    schema: &str,
+    setup: &[&str],
+    column_extras: usize,
+) {
     let text = std::env::var(variable).unwrap();
-    let config = ConnectionSettings::from_connection_string(&text)
-        .unwrap()
-        .config()
+    let settings = ConnectionSettings::from_connection_string(&text).unwrap();
+    let dialect = settings.driver.dialect();
+    let mut connection = Connection::connect(settings.config().unwrap())
+        .await
         .unwrap();
-    let mut connection = Connection::connect(config).await.unwrap();
+    let cancel = CancelHandle::new();
     for sql in [
-        "drop table if exists querent_pk_test",
-        "create table querent_pk_test (a int not null, b int not null, c int, primary key (b, a))",
-    ] {
-        connection.execute(sql, &CancelHandle::new()).await.unwrap();
+        "drop table if exists querent_child_test",
+        "drop table if exists querent_parent_test",
+    ]
+    .iter()
+    .chain(setup)
+    {
+        connection.execute(sql, &cancel).await.unwrap();
     }
     let table = CatalogObject {
         schema: schema.to_owned(),
-        name: "querent_pk_test".to_owned(),
+        name: "querent_child_test".to_owned(),
         kind: ObjectKind::Table,
     };
-    let key = connection.primary_key(database, &table).await;
+    let columns = connection.list_columns(database, &table).await.unwrap();
+    let details = connection.table_details(database, &table).await.unwrap();
+    let script = sql_db::create_table_script(dialect, &table, &columns, &details);
+    let kinds: Vec<_> = details.constraints.iter().map(|found| found.kind).collect();
     connection
-        .execute("drop table querent_pk_test", &CancelHandle::new())
+        .execute("drop table querent_child_test", &cancel)
         .await
         .unwrap();
-    assert_eq!(key.unwrap(), vec!["b".to_owned(), "a".to_owned()]);
+    let rebuilt = connection.execute(&script, &cancel).await;
+    let again = connection.table_details(database, &table).await;
+    for sql in [
+        "drop table if exists querent_child_test",
+        "drop table if exists querent_parent_test",
+    ] {
+        connection.execute(sql, &cancel).await.unwrap();
+    }
+    rebuilt.unwrap_or_else(|error| panic!("{error}\n{script}"));
+    assert_eq!(again.unwrap(), details, "{script}");
+    assert_eq!(
+        kinds,
+        [
+            sql_db::ConstraintKind::PrimaryKey,
+            sql_db::ConstraintKind::Unique,
+            sql_db::ConstraintKind::ForeignKey,
+            sql_db::ConstraintKind::Check,
+        ],
+        "{script}"
+    );
+    assert_eq!(details.indexes.len(), 1, "{script}");
+    assert_eq!(details.column_extras.len(), column_extras, "{script}");
 }
 
 #[tokio::test]
 #[ignore = "needs a SQL Server; set QUERENT_SQLSERVER"]
-async fn sql_server_reads_a_primary_key() {
-    check_primary_key("QUERENT_SQLSERVER", "master", "dbo").await;
+async fn sql_server_scripts_a_table_that_runs() {
+    check_create_script(
+        "QUERENT_SQLSERVER",
+        "master",
+        "dbo",
+        &[
+            "create table querent_parent_test (id int not null primary key)",
+            "create table querent_child_test (
+                a int identity(5, 2) not null,
+                b int not null constraint querent_df default (7),
+                c nvarchar(20) null,
+                d as (b * 2),
+                constraint querent_pk primary key (b, a),
+                constraint querent_uq unique (c),
+                constraint querent_fk foreign key (b) references querent_parent_test (id) on delete cascade,
+                constraint querent_ck check (b > 0))",
+            "create index querent_ix on querent_child_test (c desc) include (b) where c is not null",
+        ],
+        3,
+    )
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
-async fn postgres_reads_a_primary_key() {
-    check_primary_key("QUERENT_PG_URL", "postgres", "public").await;
-}
-
-/// INCLUDE columns are stored with the key but are not part of it.
-#[tokio::test]
-#[ignore = "needs a PostgreSQL server; set QUERENT_PG_URL"]
-async fn postgres_leaves_included_columns_out_of_the_key() {
-    let text = std::env::var("QUERENT_PG_URL").unwrap();
-    let config = ConnectionSettings::from_connection_string(&text)
-        .unwrap()
-        .config()
-        .unwrap();
-    let mut connection = Connection::connect(config).await.unwrap();
-    for sql in [
-        "drop table if exists querent_pk_include_test",
-        "create table querent_pk_include_test (a int, b int, c int, primary key (b) include (c))",
-    ] {
-        connection.execute(sql, &CancelHandle::new()).await.unwrap();
-    }
-    let table = CatalogObject {
-        schema: "public".to_owned(),
-        name: "querent_pk_include_test".to_owned(),
-        kind: ObjectKind::Table,
-    };
-    let key = connection.primary_key("postgres", &table).await;
-    connection
-        .execute("drop table querent_pk_include_test", &CancelHandle::new())
-        .await
-        .unwrap();
-    assert_eq!(key.unwrap(), vec!["b".to_owned()]);
+async fn postgres_scripts_a_table_that_runs() {
+    check_create_script(
+        "QUERENT_PG_URL",
+        "postgres",
+        "public",
+        &[
+            "create table querent_parent_test (id int not null primary key)",
+            "create table querent_child_test (
+                a serial,
+                b int not null default 7,
+                c varchar(20),
+                constraint querent_pk primary key (b, a) include (c),
+                constraint querent_uq unique (c),
+                constraint querent_fk foreign key (b) references querent_parent_test (id) on delete cascade,
+                constraint querent_ck check (b > 0))",
+            "create index querent_ix on querent_child_test (c desc) include (b) where c is not null",
+        ],
+        2,
+    )
+    .await;
 }
 
 /// A run reports whether it left a transaction open.

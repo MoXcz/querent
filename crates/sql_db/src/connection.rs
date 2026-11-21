@@ -210,17 +210,16 @@ impl Connection {
         }
     }
 
-    /// A table's primary key columns. SQLite and Snowflake script a table from
-    /// the server's own DDL, which already names the key, so they report none.
-    pub async fn primary_key(
+    /// A table's defaults, keys and indexes; empty for drivers that hand out the table's own DDL.
+    pub async fn table_details(
         &mut self,
         database: &str,
         object: &CatalogObject,
-    ) -> Result<Vec<String>, QueryError> {
+    ) -> Result<crate::TableDetails, QueryError> {
         match self {
-            Self::Tds(connection) => connection.primary_key(database, object).await,
-            Self::Postgres(connection) => connection.primary_key(database, object).await,
-            Self::Sqlite(_) | Self::Snowflake(_) => Ok(Vec::new()),
+            Self::Tds(connection) => connection.table_details(database, object).await,
+            Self::Postgres(connection) => connection.table_details(database, object).await,
+            Self::Sqlite(_) | Self::Snowflake(_) => Ok(crate::TableDetails::default()),
         }
     }
 

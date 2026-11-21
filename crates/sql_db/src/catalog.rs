@@ -135,6 +135,55 @@ pub struct ColumnInfo {
     pub nullable: bool,
 }
 
+/// What a table has besides its columns' names and types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableDetails {
+    /// The server refused part of the lookup, so keys or indexes may be missing.
+    pub incomplete: bool,
+    pub column_extras: Vec<ColumnExtra>,
+    pub constraints: Vec<TableConstraint>,
+    pub indexes: Vec<TableIndex>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnExtra {
+    pub column: String,
+    pub clause: ColumnClause,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnClause {
+    /// Follows the type: `default (0)`, `identity(1,1)`.
+    AfterType(String),
+    /// Stands in for the type and nullability: T-SQL's `as ([a] + [b])`.
+    Computed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintKind {
+    PrimaryKey,
+    Unique,
+    ForeignKey,
+    Check,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableConstraint {
+    pub name: String,
+    pub kind: ConstraintKind,
+    /// As written after `constraint <name>`: `primary key ([id])`.
+    pub definition: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableIndex {
+    pub name: String,
+    /// `unique index (a, b)`, for a tree label.
+    pub summary: String,
+    /// The `create index` statement, without its `;`.
+    pub statement: String,
+}
+
 /// `[name]`, with `]` doubled.
 #[must_use]
 pub fn quote_identifier(name: &str) -> String {
@@ -216,31 +265,128 @@ impl TdsConnection {
             .collect())
     }
 
-    /// The table's primary key columns, in key order; empty when it has none.
-    pub async fn primary_key(
+    /// Defaults, identity, keys, checks and indexes of a table. A part the
+    /// server cannot list (a Fabric lakehouse has no index catalog) is left out.
+    pub async fn table_details(
         &mut self,
         database: &str,
         object: &CatalogObject,
-    ) -> Result<Vec<String>, QueryError> {
-        let quoted_database = quote_identifier(database);
-        let full_name = format!("{quoted_database}.{}", object.qualified_name(Dialect::TSql));
-        let sql = format!(
-            "select c.name from {quoted_database}.sys.indexes i \
-             join {quoted_database}.sys.index_columns ic \
-               on ic.object_id = i.object_id and ic.index_id = i.index_id \
-             join {quoted_database}.sys.columns c \
-               on c.object_id = ic.object_id and c.column_id = ic.column_id \
-             where i.is_primary_key = 1 and ic.key_ordinal > 0 \
-               and i.object_id = object_id({}) \
-             order by ic.key_ordinal",
-            quote_literal(&full_name)
+    ) -> Result<TableDetails, QueryError> {
+        let sys = format!("{}.sys", quote_identifier(database));
+        let table = object.qualified_name(Dialect::TSql);
+        let object_id = format!(
+            "object_id({})",
+            quote_literal(&format!("{}.{table}", quote_identifier(database)))
         );
-        let result = self.query_one(&sql).await?;
-        Ok(result
-            .rows
-            .iter()
-            .filter_map(|row| row.first().map(text))
-            .collect())
+        // XML, spatial and hash indexes are left out: their statements need more than columns.
+        let mut incomplete = false;
+        let extras = self
+            .optional_rows(
+                &mut incomplete,
+                &format!(
+                    "select c.name, d.definition, convert(nvarchar(60), i.seed_value), \
+                 convert(nvarchar(60), i.increment_value), cc.definition, cc.is_persisted \
+                 from {sys}.columns c \
+                 left join {sys}.default_constraints d \
+                   on d.parent_object_id = c.object_id and d.parent_column_id = c.column_id \
+                 left join {sys}.identity_columns i \
+                   on i.object_id = c.object_id and i.column_id = c.column_id \
+                 left join {sys}.computed_columns cc \
+                   on cc.object_id = c.object_id and cc.column_id = c.column_id \
+                 where c.object_id = {object_id} order by c.column_id"
+                ),
+            )
+            .await?;
+        let indexes = self
+            .optional_rows(
+                &mut incomplete,
+                &format!(
+                    "select i.name, i.is_primary_key, i.is_unique_constraint, i.is_unique, \
+                 i.type_desc, i.filter_definition, c.name, ic.is_descending_key, \
+                 ic.is_included_column \
+                 from {sys}.indexes i \
+                 join {sys}.index_columns ic \
+                   on ic.object_id = i.object_id and ic.index_id = i.index_id \
+                 join {sys}.columns c \
+                   on c.object_id = ic.object_id and c.column_id = ic.column_id \
+                 where i.object_id = {object_id} and i.type in (1, 2, 5, 6) \
+                   and i.is_hypothetical = 0 \
+                 order by i.index_id, ic.is_included_column, ic.key_ordinal, ic.index_column_id"
+                ),
+            )
+            .await?;
+        let foreign_keys = self
+            .optional_rows(
+                &mut incomplete,
+                &format!(
+                    "select fk.name, pc.name, rs.name, rt.name, rc.name, \
+                 fk.delete_referential_action_desc, fk.update_referential_action_desc \
+                 from {sys}.foreign_keys fk \
+                 join {sys}.foreign_key_columns fkc on fkc.constraint_object_id = fk.object_id \
+                 join {sys}.columns pc \
+                   on pc.object_id = fkc.parent_object_id and pc.column_id = fkc.parent_column_id \
+                 join {sys}.columns rc \
+                   on rc.object_id = fkc.referenced_object_id \
+                  and rc.column_id = fkc.referenced_column_id \
+                 join {sys}.tables rt on rt.object_id = fk.referenced_object_id \
+                 join {sys}.schemas rs on rs.schema_id = rt.schema_id \
+                 where fk.parent_object_id = {object_id} \
+                 order by fk.name, fkc.constraint_column_id"
+                ),
+            )
+            .await?;
+        let checks = self
+            .optional_rows(
+                &mut incomplete,
+                &format!(
+                    "select name, definition from {sys}.check_constraints \
+                 where parent_object_id = {object_id} order by name"
+                ),
+            )
+            .await?;
+
+        let (mut constraints, indexes) = tsql_indexes(&table, &indexes);
+        constraints.extend(tsql_foreign_keys(&foreign_keys));
+        constraints.extend(checks.iter().filter_map(|row| {
+            let [name, definition] = row.as_slice() else {
+                return None;
+            };
+            Some(TableConstraint {
+                name: text(name),
+                kind: ConstraintKind::Check,
+                definition: format!("check {}", text(definition)),
+            })
+        }));
+        Ok(TableDetails {
+            incomplete,
+            column_extras: extras
+                .iter()
+                .filter_map(|row| tsql_column_extra(row))
+                .collect(),
+            constraints,
+            indexes,
+        })
+    }
+
+    /// The rows, or none and `refused` set when the server refuses the query; a lost connection still fails.
+    async fn optional_rows(
+        &mut self,
+        refused: &mut bool,
+        sql: &str,
+    ) -> Result<Vec<Vec<Value>>, QueryError> {
+        match self.query_one(sql).await {
+            Ok(result) => Ok(result.rows),
+            Err(QueryError::Server(_) | QueryError::ServerAt { .. }) => {
+                *refused = true;
+                Ok(Vec::new())
+            }
+            Err(
+                error @ (QueryError::Auth(_)
+                | QueryError::Connect(_)
+                | QueryError::ConnectionLost(_)
+                | QueryError::Cancelled),
+            ) => Err(error),
+        }
     }
 
     /// Source of a view, procedure or function; `None` for tables or encrypted modules.
@@ -374,6 +520,235 @@ fn declared_type(type_name: &str, max_length: i64, precision: i64, scale: i64) -
     }
 }
 
+fn tsql_column_extra(row: &[Value]) -> Option<ColumnExtra> {
+    let [column, default, seed, increment, computed, persisted] = row else {
+        return None;
+    };
+    let (default, seed, increment, computed) =
+        (text(default), text(seed), text(increment), text(computed));
+    let clause = if !computed.is_empty() {
+        let persisted = if int(persisted) != 0 {
+            " persisted"
+        } else {
+            ""
+        };
+        ColumnClause::Computed(format!("as {computed}{persisted}"))
+    } else if !seed.is_empty() {
+        ColumnClause::AfterType(format!("identity({seed},{increment})"))
+    } else if !default.is_empty() {
+        ColumnClause::AfterType(format!("default {default}"))
+    } else {
+        return None;
+    };
+    Some(ColumnExtra {
+        column: text(column),
+        clause,
+    })
+}
+
+struct IndexColumns {
+    name: String,
+    primary_key: bool,
+    unique_constraint: bool,
+    unique: bool,
+    type_desc: String,
+    filter: String,
+    /// Quoted for the statement, and bare for the label.
+    keys: Vec<(String, String)>,
+    included: Vec<String>,
+}
+
+/// Groups one `sys.indexes` row per index column by index.
+fn index_columns(rows: &[Vec<Value>]) -> Vec<IndexColumns> {
+    let mut found: Vec<IndexColumns> = Vec::new();
+    for row in rows {
+        let [
+            name,
+            primary_key,
+            unique_constraint,
+            unique,
+            type_desc,
+            filter,
+            column,
+            descending,
+            included,
+        ] = row.as_slice()
+        else {
+            continue;
+        };
+        let name = text(name);
+        if found.last().is_none_or(|index| index.name != name) {
+            found.push(IndexColumns {
+                name,
+                primary_key: int(primary_key) != 0,
+                unique_constraint: int(unique_constraint) != 0,
+                unique: int(unique) != 0,
+                type_desc: text(type_desc),
+                filter: text(filter),
+                keys: Vec::new(),
+                included: Vec::new(),
+            });
+        }
+        let Some(index) = found.last_mut() else {
+            continue;
+        };
+        let column = text(column);
+        if int(included) != 0 {
+            index.included.push(quote_identifier(&column));
+        } else {
+            let order = if int(descending) != 0 { " desc" } else { "" };
+            index.keys.push((
+                format!("{}{order}", quote_identifier(&column)),
+                format!("{column}{order}"),
+            ));
+        }
+    }
+    found
+}
+
+/// Key constraints and `create index` statements on `table`, from one
+/// `sys.indexes` row per index column.
+fn tsql_indexes(table: &str, rows: &[Vec<Value>]) -> (Vec<TableConstraint>, Vec<TableIndex>) {
+    let mut constraints = Vec::new();
+    let mut indexes = Vec::new();
+    for index in index_columns(rows) {
+        let quoted: Vec<&str> = index
+            .keys
+            .iter()
+            .map(|(quoted, _)| quoted.as_str())
+            .collect();
+        let bare: Vec<&str> = index.keys.iter().map(|(_, bare)| bare.as_str()).collect();
+        let clustered = if index.type_desc.starts_with("CLUSTERED") {
+            "clustered"
+        } else {
+            "nonclustered"
+        };
+        let name = quote_identifier(&index.name);
+        if index.primary_key || index.unique_constraint {
+            let (kind, word) = if index.primary_key {
+                (ConstraintKind::PrimaryKey, "primary key")
+            } else {
+                (ConstraintKind::Unique, "unique")
+            };
+            constraints.push(TableConstraint {
+                name: index.name,
+                kind,
+                definition: format!("{word} {clustered} ({})", quoted.join(", ")),
+            });
+        } else if index.type_desc.contains("COLUMNSTORE") {
+            // A columnstore index has no key; its columns come back as included.
+            let columns = if clustered == "clustered" || index.included.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", index.included.join(", "))
+            };
+            let filter = if index.filter.is_empty() {
+                String::new()
+            } else {
+                format!(" where {}", index.filter)
+            };
+            indexes.push(TableIndex {
+                summary: format!("{clustered} columnstore index"),
+                statement: format!(
+                    "create {clustered} columnstore index {name} on {table}{columns}{filter}"
+                ),
+                name: index.name,
+            });
+        } else {
+            let unique = if index.unique { "unique " } else { "" };
+            let include = if index.included.is_empty() {
+                String::new()
+            } else {
+                format!(" include ({})", index.included.join(", "))
+            };
+            let filter = if index.filter.is_empty() {
+                String::new()
+            } else {
+                format!(" where {}", index.filter)
+            };
+            let statement = format!(
+                "create {unique}{clustered} index {name} on {table} ({}){include}{filter}",
+                quoted.join(", ")
+            );
+            indexes.push(TableIndex {
+                summary: format!("{unique}index ({})", bare.join(", ")),
+                statement,
+                name: index.name,
+            });
+        }
+    }
+    (constraints, indexes)
+}
+
+/// One row per foreign key column, grouped into one constraint per key.
+fn tsql_foreign_keys(rows: &[Vec<Value>]) -> Vec<TableConstraint> {
+    struct ForeignKey {
+        name: String,
+        columns: Vec<String>,
+        references: String,
+        referenced_columns: Vec<String>,
+        actions: String,
+    }
+    let action = |event: &str, description: &Value| match text(description).as_str() {
+        "CASCADE" => format!(" on {event} cascade"),
+        "SET_NULL" => format!(" on {event} set null"),
+        "SET_DEFAULT" => format!(" on {event} set default"),
+        _ => String::new(),
+    };
+    let mut found: Vec<ForeignKey> = Vec::new();
+    for row in rows {
+        let [
+            name,
+            column,
+            schema,
+            table,
+            referenced,
+            on_delete,
+            on_update,
+        ] = row.as_slice()
+        else {
+            continue;
+        };
+        let name = text(name);
+        if found.last().is_none_or(|key| key.name != name) {
+            found.push(ForeignKey {
+                name,
+                columns: Vec::new(),
+                references: format!(
+                    "{}.{}",
+                    quote_identifier(&text(schema)),
+                    quote_identifier(&text(table))
+                ),
+                referenced_columns: Vec::new(),
+                actions: format!(
+                    "{}{}",
+                    action("delete", on_delete),
+                    action("update", on_update)
+                ),
+            });
+        }
+        if let Some(key) = found.last_mut() {
+            key.columns.push(quote_identifier(&text(column)));
+            key.referenced_columns
+                .push(quote_identifier(&text(referenced)));
+        }
+    }
+    found
+        .into_iter()
+        .map(|key| TableConstraint {
+            definition: format!(
+                "foreign key ({}) references {} ({}){}",
+                key.columns.join(", "),
+                key.references,
+                key.referenced_columns.join(", "),
+                key.actions
+            ),
+            name: key.name,
+            kind: ConstraintKind::ForeignKey,
+        })
+        .collect()
+}
+
 /// `select top N [a], [b] from [schema].[name];` (or `limit N` on PostgreSQL),
 /// with `*` when columns are unknown.
 #[must_use]
@@ -403,36 +778,58 @@ pub fn select_script(
     }
 }
 
+/// `create table` with defaults, identity, keys and checks, then one
+/// `create index` per index.
 #[must_use]
 pub fn create_table_script(
     dialect: Dialect,
     object: &CatalogObject,
     columns: &[ColumnInfo],
-    primary_key: &[String],
+    details: &TableDetails,
 ) -> String {
     let mut lines: Vec<String> = columns
         .iter()
         .map(|column| {
-            let null = if column.nullable { "null" } else { "not null" };
-            format!(
-                "    {} {} {null}",
-                dialect.quote_identifier(&column.name),
-                column.type_name
-            )
+            let name = dialect.quote_identifier(&column.name);
+            let mut parts = vec![name.as_str(), column.type_name.as_str()];
+            for extra in &details.column_extras {
+                match &extra.clause {
+                    ColumnClause::Computed(expression) if extra.column == column.name => {
+                        return format!("    {name} {expression}");
+                    }
+                    ColumnClause::AfterType(clause) if extra.column == column.name => {
+                        parts.push(clause);
+                    }
+                    ColumnClause::Computed(_) | ColumnClause::AfterType(_) => {}
+                }
+            }
+            parts.push(if column.nullable { "null" } else { "not null" });
+            format!("    {}", parts.join(" "))
         })
         .collect();
-    if !primary_key.is_empty() {
-        let key: Vec<String> = primary_key
-            .iter()
-            .map(|column| dialect.quote_identifier(column))
-            .collect();
-        lines.push(format!("    primary key ({})", key.join(", ")));
-    }
-    format!(
-        "create table {} (\n{}\n);\n",
+    lines.extend(details.constraints.iter().map(|constraint| {
+        format!(
+            "    constraint {} {}",
+            dialect.quote_identifier(&constraint.name),
+            constraint.definition
+        )
+    }));
+    let warning = if details.incomplete {
+        "-- The server refused part of the lookup: keys, defaults or indexes may be missing.\n"
+    } else {
+        ""
+    };
+    let mut script = format!(
+        "{warning}create table {} (\n{}\n);\n",
         object.qualified_name(dialect),
         lines.join(",\n")
-    )
+    );
+    for index in &details.indexes {
+        script.push('\n');
+        script.push_str(&index.statement);
+        script.push_str(";\n");
+    }
+    script
 }
 
 #[cfg(test)]
@@ -510,21 +907,94 @@ mod tests {
             "select\n    *\nfrom [dbo].[odd]]name];\n"
         );
         assert_eq!(
-            create_table_script(Dialect::TSql, &table(), &columns(), &[]),
-            "create table [dbo].[odd]]name] (\n    [id] int not null,\n    [label] nvarchar(100) null\n);\n"
-        );
-        assert_eq!(
             create_table_script(
-                Dialect::Postgres,
+                Dialect::TSql,
                 &table(),
                 &columns(),
-                &["id".to_owned(), "label".to_owned()]
+                &TableDetails::default()
             ),
-            "create table \"dbo\".\"odd]name\" (\n    \"id\" int not null,\n    \"label\" nvarchar(100) null,\n    primary key (\"id\", \"label\")\n);\n"
+            "create table [dbo].[odd]]name] (\n    [id] int not null,\n    [label] nvarchar(100) null\n);\n"
         );
         assert_eq!(
             select_script(Dialect::Postgres, &table(), Some(&columns()), Some(10)),
             "select\n    \"id\",\n    \"label\"\nfrom \"dbo\".\"odd]name\"\nlimit 10;\n"
+        );
+    }
+
+    fn value_row(values: &[&str]) -> Vec<Value> {
+        values
+            .iter()
+            .map(|value| match *value {
+                "" => Value::Null,
+                "0" => Value::Bool(false),
+                "1" => Value::Bool(true),
+                other => Value::Text(other.to_owned()),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn scripts_a_table_with_its_keys_and_indexes() {
+        let index_rows = [
+            value_row(&["pk", "1", "0", "1", "CLUSTERED", "", "id", "0", "0"]),
+            value_row(&["uq", "0", "1", "1", "NONCLUSTERED", "", "label", "0", "0"]),
+            value_row(&[
+                "ix",
+                "0",
+                "0",
+                "0",
+                "NONCLUSTERED",
+                "([id]>(0))",
+                "label",
+                "1",
+                "0",
+            ]),
+            value_row(&[
+                "ix",
+                "0",
+                "0",
+                "0",
+                "NONCLUSTERED",
+                "([id]>(0))",
+                "id",
+                "0",
+                "1",
+            ]),
+        ];
+        let (mut constraints, indexes) = tsql_indexes("[dbo].[t]", &index_rows);
+        assert_eq!(indexes[0].summary, "index (label desc)");
+        constraints.extend(tsql_foreign_keys(&[
+            value_row(&["fk", "id", "dbo", "parent", "a", "CASCADE", "NO_ACTION"]),
+            value_row(&["fk", "label", "dbo", "parent", "b", "CASCADE", "NO_ACTION"]),
+        ]));
+        let details = TableDetails {
+            incomplete: false,
+            column_extras: [
+                value_row(&["id", "", "1", "1", "", ""]),
+                value_row(&["label", "(N'x')", "", "", "", ""]),
+                value_row(&["plain", "", "", "", "", ""]),
+            ]
+            .iter()
+            .filter_map(|row| tsql_column_extra(row))
+            .collect(),
+            constraints,
+            indexes,
+        };
+        assert_eq!(
+            create_table_script(Dialect::TSql, &table(), &columns(), &details),
+            "create table [dbo].[odd]]name] (\n    \
+             [id] int identity(1,1) not null,\n    \
+             [label] nvarchar(100) default (N'x') null,\n    \
+             constraint [pk] primary key clustered ([id]),\n    \
+             constraint [uq] unique nonclustered ([label]),\n    \
+             constraint [fk] foreign key ([id], [label]) references [dbo].[parent] ([a], [b]) on delete cascade\n\
+             );\n\n\
+             create nonclustered index [ix] on [dbo].[t] ([label] desc) include ([id]) where ([id]>(0));\n"
+        );
+        let computed = tsql_column_extra(&value_row(&["id", "", "", "", "([a]+[b])", "1"]));
+        assert_eq!(
+            computed.map(|extra| extra.clause),
+            Some(ColumnClause::Computed("as ([a]+[b]) persisted".to_owned()))
         );
     }
 }

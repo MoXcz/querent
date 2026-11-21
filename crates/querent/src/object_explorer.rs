@@ -15,7 +15,10 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
     prelude::FluentBuilder as _, px, uniform_list,
 };
-use sql_db::{CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind};
+use sql_db::{
+    CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind, QueryError,
+    TableDetails,
+};
 use tokio::sync::Mutex;
 
 use crate::connections::{self, ConnectionStore, SavedConnection};
@@ -80,8 +83,41 @@ enum Load<T> {
     Failed(SharedString),
 }
 
+/// What expanding a table or view shows.
+struct TableContents {
+    columns: Vec<ColumnInfo>,
+    details: TableDetails,
+}
+
+/// A table's keys and indexes. A lookup the server refuses leaves them out and
+/// says so; any other failure is reported, so the next expand tries again.
+async fn table_details(
+    connection: &mut Connection,
+    database: &str,
+    object: &CatalogObject,
+) -> Result<TableDetails, QueryError> {
+    if object.kind != ObjectKind::Table {
+        return Ok(TableDetails::default());
+    }
+    match connection.table_details(database, object).await {
+        Ok(details) => Ok(details),
+        Err(QueryError::Server(_) | QueryError::ServerAt { .. }) => Ok(TableDetails {
+            incomplete: true,
+            ..TableDetails::default()
+        }),
+        Err(
+            error @ (QueryError::Auth(_)
+            | QueryError::Connect(_)
+            | QueryError::ConnectionLost(_)
+            | QueryError::Cancelled),
+        ) => Err(error),
+    }
+}
+
 enum RowContent {
     Node(NodeId),
+    /// A key, check or index of a table: a label only.
+    Detail,
     /// The connection name picks how a double-click quotes the column.
     Column(SharedString, ColumnInfo),
     Loading,
@@ -104,7 +140,7 @@ pub struct ObjectExplorer {
     selected: Option<NodeId>,
     databases: HashMap<SharedString, Load<Arc<Vec<SharedString>>>>,
     objects: HashMap<(SharedString, SharedString), Load<Arc<Vec<CatalogObject>>>>,
-    columns: HashMap<ObjectKey, Load<Arc<Vec<ColumnInfo>>>>,
+    columns: HashMap<ObjectKey, Load<Arc<TableContents>>>,
     catalog_connections: HashMap<SharedString, CatalogConnection>,
     /// Bumped when the connections change, so a load that started before is ignored.
     generation: u64,
@@ -311,10 +347,16 @@ impl ObjectExplorer {
         self.run_catalog(
             &connection,
             cx,
-            move |tds| Box::pin(async move { tds.list_columns(&database, &object).await }),
+            move |connection| {
+                Box::pin(async move {
+                    let columns = connection.list_columns(&database, &object).await?;
+                    let details = table_details(connection, &database, &object).await?;
+                    Ok(TableContents { columns, details })
+                })
+            },
             move |this, result, _| {
                 let load = match result {
-                    Ok(columns) => Load::Loaded(Arc::new(columns)),
+                    Ok(contents) => Load::Loaded(Arc::new(contents)),
                     Err(message) => Load::Failed(message),
                 };
                 this.columns.insert(key, load);
@@ -355,7 +397,9 @@ impl ObjectExplorer {
         let sql = sql_db::select_script(
             Self::dialect(&key.connection, cx),
             &key.catalog_object(),
-            columns.as_deref().map(Vec::as_slice),
+            columns
+                .as_deref()
+                .map(|contents| contents.columns.as_slice()),
             Some(SELECT_TOP_ROWS),
         );
         cx.emit(ExplorerEvent::OpenQuery {
@@ -366,7 +410,7 @@ impl ObjectExplorer {
         });
     }
 
-    fn loaded_columns(&self, key: &ObjectKey) -> Option<Arc<Vec<ColumnInfo>>> {
+    fn loaded_columns(&self, key: &ObjectKey) -> Option<Arc<TableContents>> {
         match self.columns.get(key) {
             Some(Load::Loaded(columns)) => Some(columns.clone()),
             Some(Load::Loading | Load::Failed(_)) | None => None,
@@ -416,20 +460,9 @@ impl ObjectExplorer {
                         && !matches!(dialect, Dialect::Sqlite | Dialect::Snowflake)
                     {
                         let columns = connection.list_columns(&database, &object).await?;
-                        // A key that cannot be read (a Fabric lakehouse has no index catalog) is left out.
-                        let primary_key = match connection.primary_key(&database, &object).await {
-                            Ok(key) => key,
-                            // A lost connection must be reported, so it is opened again next time.
-                            Err(error @ sql_db::QueryError::ConnectionLost(_)) => {
-                                return Err(error);
-                            }
-                            Err(_) => Vec::new(),
-                        };
+                        let details = table_details(connection, &database, &object).await?;
                         return Ok(Some(sql_db::create_table_script(
-                            dialect,
-                            &object,
-                            &columns,
-                            &primary_key,
+                            dialect, &object, &columns, &details,
                         )));
                     }
                     connection.object_definition(&database, &object).await
@@ -627,10 +660,10 @@ impl ObjectExplorer {
         if !expanded {
             return;
         }
-        let Some(columns) = Self::load_rows(self.columns.get(&key), depth + 1, rows) else {
+        let Some(contents) = Self::load_rows(self.columns.get(&key), depth + 1, rows) else {
             return;
         };
-        for column in columns.iter() {
+        for column in &contents.columns {
             let null = if column.nullable { "null" } else { "not null" };
             rows.push(Row {
                 label: format!("{} ({}, {null})", column.name, column.type_name).into(),
@@ -638,6 +671,23 @@ impl ObjectExplorer {
                 depth: depth + 1,
                 expanded: None,
             });
+        }
+        let constraints = contents
+            .details
+            .constraints
+            .iter()
+            .map(|constraint| format!("{}: {}", constraint.name, constraint.definition));
+        let indexes = contents
+            .details
+            .indexes
+            .iter()
+            .map(|index| format!("{}: {}", index.name, index.summary));
+        for label in constraints.chain(indexes) {
+            rows.push(info_row(RowContent::Detail, depth + 1, label));
+        }
+        if contents.details.incomplete {
+            let label = "Keys and indexes could not be read";
+            rows.push(info_row(RowContent::Detail, depth + 1, label));
         }
     }
 
@@ -789,9 +839,10 @@ impl ObjectExplorer {
                 let is_selected = matches!(&row.content, RowContent::Node(id) if self.selected.as_ref() == Some(id));
                 let text_color = match &row.content {
                     RowContent::Error => cx.theme().danger,
-                    RowContent::Loading | RowContent::Empty | RowContent::Column(..) => {
-                        cx.theme().muted_foreground
-                    }
+                    RowContent::Loading
+                    | RowContent::Empty
+                    | RowContent::Detail
+                    | RowContent::Column(..) => cx.theme().muted_foreground,
                     RowContent::Node(_) => cx.theme().foreground,
                 };
                 let base = h_flex()
@@ -819,7 +870,11 @@ impl ObjectExplorer {
                         })
                         .into_any_element()
                     }
-                    RowContent::Column(..) | RowContent::Loading | RowContent::Error | RowContent::Empty => {
+                    RowContent::Column(..)
+                    | RowContent::Detail
+                    | RowContent::Loading
+                    | RowContent::Error
+                    | RowContent::Empty => {
                         base.into_any_element()
                     }
                 };

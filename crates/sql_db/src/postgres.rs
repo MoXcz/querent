@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::catalog::Dialect;
 use crate::{
-    Authentication, CancelHandle, CatalogObject, Column, ColumnInfo, Encryption, ObjectKind,
-    QueryError, QueryOutput, ResultSet, Value,
+    Authentication, CancelHandle, CatalogObject, Column, ColumnClause, ColumnExtra, ColumnInfo,
+    ConstraintKind, Encryption, ObjectKind, QueryError, QueryOutput, ResultSet, TableConstraint,
+    TableDetails, TableIndex, Value,
 };
 
 pub const DEFAULT_PORT: u16 = 5432;
@@ -251,28 +252,100 @@ impl PgConnection {
         Ok(objects)
     }
 
-    /// The table's primary key columns, in key order; empty when it has none.
-    pub async fn primary_key(
+    /// Defaults, identity, keys, checks and indexes of a table, in the server's own wording.
+    pub async fn table_details(
         &mut self,
         database: &str,
         object: &CatalogObject,
-    ) -> Result<Vec<String>, QueryError> {
+    ) -> Result<TableDetails, QueryError> {
         let name = object.qualified_name(Dialect::Postgres);
         let client = &self.catalog_session(database).await?.client;
-        let rows = client
+        let extras = client
             .query(
-                // Columns past `indnkeyatts` are INCLUDE columns, not part of the key.
-                "select a.attname::text from pg_index i \
-                 join lateral unnest(i.indkey::int2[]) with ordinality k(attnum, ord) \
-                   on k.ord <= i.indnkeyatts \
-                 join pg_attribute a on a.attrelid = i.indrelid and a.attnum = k.attnum \
-                 where i.indisprimary and i.indrelid = to_regclass($1) \
-                 order by k.ord",
+                // A `serial` column owns its sequence, which the script would lack.
+                "select a.attname::text, pg_get_expr(d.adbin, d.adrelid), \
+                 case when a.attidentity = '' and pg_get_serial_sequence($1, a.attname::text) is not null \
+                   then 'd' else a.attidentity::text end, a.attgenerated::text \
+                 from pg_attribute a \
+                 left join pg_attrdef d on d.adrelid = a.attrelid and d.adnum = a.attnum \
+                 where a.attrelid = to_regclass($1) and a.attnum > 0 and not a.attisdropped \
+                   and (d.adbin is not null or a.attidentity <> '') \
+                 order by a.attnum",
                 &[&name],
             )
             .await
             .map_err(|error| map_error(&error))?;
-        Ok(rows.iter().map(|row| row.get(0)).collect())
+        let constraints = client
+            .query(
+                "select conname::text, contype::text, pg_get_constraintdef(oid) \
+                 from pg_constraint \
+                 where conrelid = to_regclass($1) and contype in ('p', 'u', 'f', 'c') \
+                 order by array_position(array['p', 'u', 'f', 'c'], contype::text), conname",
+                &[&name],
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        let indexes = client
+            .query(
+                // An index behind a primary key or unique constraint is scripted as that constraint.
+                "select c.relname::text, i.indisunique, pg_get_indexdef(i.indexrelid) \
+                 from pg_index i join pg_class c on c.oid = i.indexrelid \
+                 where i.indrelid = to_regclass($1) and not exists ( \
+                   select 1 from pg_constraint k \
+                   where k.conindid = i.indexrelid and k.contype in ('p', 'u')) \
+                 order by c.relname",
+                &[&name],
+            )
+            .await
+            .map_err(|error| map_error(&error))?;
+        Ok(TableDetails {
+            incomplete: false,
+            column_extras: extras
+                .iter()
+                .filter_map(|row| {
+                    let default: Option<String> = row.get(1);
+                    let identity: String = row.get(2);
+                    let generated: String = row.get(3);
+                    Some(ColumnExtra {
+                        column: row.get(0),
+                        clause: ColumnClause::AfterType(column_clause(
+                            default.as_deref(),
+                            &identity,
+                            &generated,
+                        )?),
+                    })
+                })
+                .collect(),
+            constraints: constraints
+                .iter()
+                .filter_map(|row| {
+                    let kind: String = row.get(1);
+                    Some(TableConstraint {
+                        name: row.get(0),
+                        kind: match kind.as_str() {
+                            "p" => ConstraintKind::PrimaryKey,
+                            "u" => ConstraintKind::Unique,
+                            "f" => ConstraintKind::ForeignKey,
+                            "c" => ConstraintKind::Check,
+                            _ => return None,
+                        },
+                        definition: row.get(2),
+                    })
+                })
+                .collect(),
+            indexes: indexes
+                .iter()
+                .map(|row| {
+                    let unique: bool = row.get(1);
+                    let statement: String = row.get(2);
+                    TableIndex {
+                        name: row.get(0),
+                        summary: index_summary(unique, &statement),
+                        statement,
+                    }
+                })
+                .collect(),
+        })
     }
 
     pub async fn list_columns(
@@ -726,6 +799,27 @@ fn connect_error(config: &PgConfig, error: &tokio_postgres::Error) -> QueryError
         ""
     };
     QueryError::Connect(format!("{server}: {text}{source}{hint}"))
+}
+
+/// What follows a column's type: an identity, a generated expression or a default.
+fn column_clause(default: Option<&str>, identity: &str, generated: &str) -> Option<String> {
+    match (identity, generated, default) {
+        ("a", _, _) => Some("generated always as identity".to_owned()),
+        ("d", _, _) => Some("generated by default as identity".to_owned()),
+        (_, "s", Some(expression)) => Some(format!("generated always as ({expression}) stored")),
+        (_, "v", Some(expression)) => Some(format!("generated always as ({expression}) virtual")),
+        (_, _, Some(expression)) => Some(format!("default {expression}")),
+        (_, _, None) => None,
+    }
+}
+
+/// `unique index btree (a, b)` from `CREATE UNIQUE INDEX i ON public.t USING btree (a, b)`.
+fn index_summary(unique: bool, statement: &str) -> String {
+    let unique = if unique { "unique " } else { "" };
+    let columns = statement
+        .split_once(" USING ")
+        .map_or("", |(_, columns)| columns);
+    format!("{unique}index {columns}").trim_end().to_owned()
 }
 
 #[cfg(test)]

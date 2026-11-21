@@ -37,11 +37,11 @@ async fn main() -> anyhow::Result<()> {
         .find(|object| object.kind == ObjectKind::Table)
     {
         let columns = connection.list_columns(&database, table).await?;
-        let primary_key = connection.primary_key(&database, table).await?;
+        let details = connection.table_details(&database, table).await?;
         write!(
             stdout,
             "{}",
-            sql_db::create_table_script(dialect, table, &columns, &primary_key)
+            sql_db::create_table_script(dialect, table, &columns, &details)
         )?;
     }
     if let Some(view) = objects
