@@ -8,7 +8,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{
     Copy, Cut, Editor, EditorState, InputEvent, InputState, MoveDown, MoveUp, Paste,
-    RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, Redo, RopeExt as _, Undo,
+    RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, Redo, RopeExt as _,
+    TextDecoration, TextDecorationCollection, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::TableState;
@@ -17,9 +18,9 @@ use gpui_kit::component::{
     v_flex, v_resizable,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, Keystroke, ParentElement as _, Render, SharedString, Styled as _, Subscription,
-    Task, Window, actions, div, px,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable, HighlightStyle, Hsla,
+    InteractiveElement as _, IntoElement, Keystroke, ParentElement as _, Render, SharedString,
+    Styled as _, Subscription, Task, Window, actions, div, px,
 };
 use sql_db::{CancelHandle, Connection, ConnectionConfig, QueryError, QueryOutput, ResultSet};
 use sql_text::vim::{Buffer, Edit, Key, Mode, Vim};
@@ -83,7 +84,6 @@ impl gpui_kit::Global for LineClip {}
 
 type SharedConnection = Arc<Mutex<Connection>>;
 
-const BLOCK_CURSOR_OPACITY: f32 = 0.45;
 const RUN_HIGHLIGHT_DURATION: Duration = Duration::from_millis(600);
 const RUNNING_TICK: Duration = Duration::from_millis(100);
 /// Outer error: the task died. Middle: connecting failed. Inner: the query
@@ -182,7 +182,10 @@ pub struct QueryTab {
     vim: Vim,
     /// Fill under the character at the cursor in normal and visual mode.
     block_cursor: Option<RangeDecorationCollection>,
-    block_cursor_range: Option<Range<usize>>,
+    /// Draws the character under the block cursor in the background color, as vim does.
+    block_cursor_text: Option<TextDecorationCollection>,
+    /// The range and the caret and background colors the block cursor was drawn with.
+    block_cursor_range: Option<(Range<usize>, Hsla, Hsla)>,
     /// Brief fill over the SQL that was sent to the server.
     run_highlight: Option<RangeDecorationCollection>,
     /// This tab's document URI for language servers.
@@ -294,6 +297,7 @@ impl QueryTab {
             export_task: None,
             vim: Vim::default(),
             block_cursor: None,
+            block_cursor_text: None,
             block_cursor_range: None,
             run_highlight: None,
             run_highlight_task: None,
@@ -673,35 +677,58 @@ impl QueryTab {
             // Runs on every caret blink, so it reads one character, not the buffer.
             let editor = self.editor.read(cx);
             let cursor = editor.cursor();
-            let end = editor
+            // A newline fills a one-space cell, so empty lines get a block too.
+            // The end of the text has no cell, and keeps the thin caret.
+            editor
                 .text()
                 .char_at(cursor)
-                .filter(|character| *character != '\n')
-                .map(|character| cursor + character.len_utf8());
-            end.map(|end| cursor..end)
+                .map(|character| cursor..cursor + character.len_utf8())
         } else {
             None
         };
-        if wanted == self.block_cursor_range {
+        // The colors are part of the key, so a theme switch redraws the block.
+        let drawn = wanted
+            .clone()
+            .map(|range| (range, cx.theme().caret, cx.theme().background));
+        if drawn == self.block_cursor_range {
             return;
         }
-        self.block_cursor_range.clone_from(&wanted);
-        let color = cx.theme().caret.opacity(BLOCK_CURSOR_OPACITY);
-        let decorations: Vec<RangeDecoration> = wanted
+        self.block_cursor_range = drawn;
+        let fills: Vec<RangeDecoration> = wanted
+            .iter()
+            .map(|range| {
+                RangeDecoration::new(range.clone())
+                    .with_style(RangeDecorationStyle::Fill)
+                    .with_color(cx.theme().caret)
+            })
+            .collect();
+        let inverted_text: Vec<TextDecoration> = wanted
             .into_iter()
             .map(|range| {
-                RangeDecoration::new(range)
-                    .with_style(RangeDecorationStyle::Fill)
-                    .with_color(color)
+                TextDecoration::new(
+                    range,
+                    HighlightStyle {
+                        color: Some(cx.theme().background),
+                        ..HighlightStyle::default()
+                    },
+                )
             })
             .collect();
         if let Some(collection) = &self.block_cursor {
-            collection.set(decorations, cx);
+            collection.set(fills, cx);
         } else {
             let collection = self.editor.update(cx, |editor, cx| {
-                editor.create_range_decorations_collection(decorations, cx)
+                editor.create_range_decorations_collection(fills, cx)
             });
             self.block_cursor = Some(collection);
+        }
+        if let Some(collection) = &self.block_cursor_text {
+            collection.set(inverted_text, cx);
+        } else {
+            let collection = self.editor.update(cx, |editor, cx| {
+                editor.create_decorations_collection(inverted_text, cx)
+            });
+            self.block_cursor_text = Some(collection);
         }
     }
 
