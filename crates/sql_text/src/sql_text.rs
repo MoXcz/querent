@@ -185,6 +185,50 @@ pub fn fingerprint<'a>(pieces: impl IntoIterator<Item = &'a str>) -> u64 {
     hash
 }
 
+/// The text a cut removes for a cursor at `cursor` with nothing selected:
+/// its whole line and line break, or for a last line without one, the line
+/// break before it, so no empty line is left behind.
+#[must_use]
+pub fn line_to_cut(text: &str, cursor: usize) -> Range<usize> {
+    let line = line_at(text, cursor);
+    if line.end == text.len() && !text.ends_with('\n') && line.start > 0 {
+        let crlf = text
+            .get(..line.start)
+            .is_some_and(|before| before.ends_with("\r\n"));
+        line.start - if crlf { 2 } else { 1 }..line.end
+    } else {
+        line
+    }
+}
+
+/// The line `cursor` is on, from its start through its line break if it has one.
+#[must_use]
+pub fn line_at(text: &str, cursor: usize) -> Range<usize> {
+    let cursor = cursor.min(text.len());
+    let before = text.get(..cursor).unwrap_or_default();
+    let start = before.rfind('\n').map_or(0, |index| index + 1);
+    let after = text.get(cursor..).unwrap_or_default();
+    let end = after
+        .find('\n')
+        .map_or(text.len(), |index| cursor + index + 1);
+    start..end
+}
+
+/// The clipboard text for copying or cutting `line`: always ends in a line break.
+#[must_use]
+pub fn line_clip(text: &str, line: Range<usize>) -> String {
+    let line = text.get(line).unwrap_or_default();
+    let line = line
+        .strip_prefix("\r\n")
+        .or_else(|| line.strip_prefix('\n'))
+        .unwrap_or(line);
+    if line.ends_with('\n') {
+        line.to_owned()
+    } else {
+        format!("{line}\n")
+    }
+}
+
 /// The statement to run for a cursor at byte offset `cursor`.
 ///
 /// A cursor inside a statement picks it. A cursor between statements picks the
@@ -344,6 +388,25 @@ pub(crate) fn skip_block_comment(bytes: &[u8], start: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_and_cuts_whole_lines() {
+        let text = "select 1\nfrom t\nwhere x";
+        assert_eq!(line_at(text, 3), 0..9);
+        assert_eq!(line_at(text, 9), 9..16);
+        assert_eq!(line_at(text, text.len()), 16..23);
+        assert_eq!(line_clip(text, line_at(text, 3)), "select 1\n");
+        assert_eq!(line_clip(text, line_at(text, 20)), "where x\n");
+        // The last line takes the break before it, so cutting leaves no empty line.
+        assert_eq!(line_to_cut(text, 20), 15..23);
+        assert_eq!(line_clip(text, line_to_cut(text, 20)), "where x\n");
+        assert_eq!(line_to_cut(text, 3), 0..9);
+        assert_eq!(line_to_cut("only", 2), 0..4);
+        assert_eq!(line_at("", 0), 0..0);
+        let crlf = "select 1\r\nwhere x";
+        assert_eq!(line_to_cut(crlf, 12), 8..17);
+        assert_eq!(line_clip(crlf, line_to_cut(crlf, 12)), "where x\n");
+    }
 
     #[test]
     fn a_cursor_inside_a_multibyte_character_or_past_the_end_is_safe() {

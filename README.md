@@ -45,6 +45,7 @@ Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `inform
 | `Ctrl+S` / `Ctrl+Shift+S` | Save / save as |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
 | `Ctrl+N` / `Ctrl+P` in a menu | Next / previous item |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste; with nothing selected and vim mode off, copy or cut the whole line, and paste it above the current line |
 | `Ctrl+W` | Delete the word before the cursor |
 
 Vim keys are on by default; turn them off in Settings or with "Vim mode" in the command palette.

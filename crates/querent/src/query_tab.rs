@@ -7,8 +7,8 @@ use gpui_kit::component::IndexPath;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::combobox::{Combobox, ComboboxEvent, ComboboxState};
 use gpui_kit::component::input::{
-    Editor, EditorState, InputEvent, InputState, MoveDown, MoveUp, RangeDecoration,
-    RangeDecorationCollection, RangeDecorationStyle, Redo, RopeExt as _, Undo,
+    Copy, Cut, Editor, EditorState, InputEvent, InputState, MoveDown, MoveUp, Paste,
+    RangeDecoration, RangeDecorationCollection, RangeDecorationStyle, Redo, RopeExt as _, Undo,
 };
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::table::TableState;
@@ -65,9 +65,21 @@ actions!(
         /// Load the database's tables and columns again for completion and hover.
         RefreshSchema,
         /// Forget this connection's Entra sign-in, so the next run asks again.
-        SignOut
+        SignOut,
+        /// Copy the selection, or the whole line with nothing selected.
+        CopySelectionOrLine,
+        /// Cut the selection, or the whole line with nothing selected.
+        CutSelectionOrLine,
+        /// Paste; a whole line copied with nothing selected goes above the cursor's line.
+        PasteSelectionOrLine
     ]
 );
+
+/// The last line copied or cut whole, so pasting that text inserts it as a line.
+#[derive(Default)]
+struct LineClip(Option<String>);
+
+impl gpui_kit::Global for LineClip {}
 
 type SharedConnection = Arc<Mutex<Connection>>;
 
@@ -525,6 +537,80 @@ impl QueryTab {
         }
         window.dispatch_action(action, cx);
         true
+    }
+
+    /// Whether a copy, cut or paste works on whole lines, as in VS Code: only in
+    /// the editor, outside vim mode, with nothing selected.
+    fn acts_on_line(&self, window: &Window, cx: &App) -> bool {
+        !settings::get(cx).vim_mode
+            && self.editor.focus_handle(cx).is_focused(window)
+            && self.editor.read(cx).selected_range().is_empty()
+    }
+
+    fn copy_selection_or_line(
+        &mut self,
+        _: &CopySelectionOrLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.acts_on_line(window, cx) {
+            cx.set_global(LineClip(None));
+            window.dispatch_action(Box::new(Copy), cx);
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let text = editor.value();
+        let clip = sql_text::line_clip(&text, sql_text::line_at(&text, editor.cursor()));
+        write_line_clip(clip, cx);
+    }
+
+    fn cut_selection_or_line(
+        &mut self,
+        _: &CutSelectionOrLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.acts_on_line(window, cx) {
+            cx.set_global(LineClip(None));
+            window.dispatch_action(Box::new(Cut), cx);
+            return;
+        }
+        let editor = self.editor.read(cx);
+        let text = editor.value();
+        let range = sql_text::line_to_cut(&text, editor.cursor());
+        if range.is_empty() {
+            return;
+        }
+        write_line_clip(sql_text::line_clip(&text, range.clone()), cx);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_selected_range(range, cx);
+            editor.replace("", window, cx);
+        });
+    }
+
+    fn paste_selection_or_line(
+        &mut self,
+        _: &PasteSelectionOrLine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        let line = clipboard.filter(|text| {
+            self.acts_on_line(window, cx)
+                && cx.try_global::<LineClip>().and_then(|clip| clip.0.as_ref()) == Some(text)
+        });
+        let Some(line) = line else {
+            window.dispatch_action(Box::new(Paste), cx);
+            return;
+        };
+        self.editor.update(cx, |editor, cx| {
+            let cursor = editor.cursor();
+            let start = sql_text::line_at(&editor.value(), cursor).start;
+            editor.set_selected_range(start..start, cx);
+            editor.insert(line.clone(), window, cx);
+            let moved = cursor + line.len();
+            editor.set_selected_range(moved..moved, cx);
+        });
     }
 
     fn handle_vim_keystroke(
@@ -1249,6 +1335,9 @@ impl Render for QueryTab {
             .on_action(cx.listener(Self::save_file_as))
             .on_action(cx.listener(Self::refresh_schema))
             .on_action(cx.listener(Self::sign_out))
+            .on_action(cx.listener(Self::copy_selection_or_line))
+            .on_action(cx.listener(Self::cut_selection_or_line))
+            .on_action(cx.listener(Self::paste_selection_or_line))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_toolbar(cx))
@@ -1296,6 +1385,11 @@ fn new_database_select(
         )
         .searchable(true)
     })
+}
+
+fn write_line_clip(clip: String, cx: &mut App) {
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(clip.clone()));
+    cx.set_global(LineClip(Some(clip)));
 }
 
 fn apply_vim_edit(

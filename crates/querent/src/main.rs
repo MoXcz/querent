@@ -30,7 +30,8 @@ use tracing_subscriber::EnvFilter;
 
 use crate::command_palette::{OpenCommandPalette, OpenSettings};
 use crate::query_tab::{
-    CancelQuery, ExportCsv, FormatSql, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
+    CancelQuery, CopySelectionOrLine, CutSelectionOrLine, ExportCsv, FormatSql,
+    PasteSelectionOrLine, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
 };
 use crate::workspace::{
     CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
@@ -38,6 +39,8 @@ use crate::workspace::{
 };
 
 const KEY_CONTEXT: &str = "SqlEditor";
+/// gpui-kit's editor inside a query tab.
+const EDITOR_INPUT_CONTEXT: &str = "SqlEditor > Input";
 /// gpui-kit's key context for `Command` lists.
 const PALETTE_CONTEXT: &str = "Command";
 
@@ -127,6 +130,11 @@ fn bind_keys(cx: &mut App) {
             "ctrl-shift-f",
         )
     };
+    let (copy, cut, paste) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-x", "cmd-v")
+    } else {
+        ("ctrl-c", "ctrl-x", "ctrl-v")
+    };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
         KeyBinding::new(run, RunQuery, Some(KEY_CONTEXT)),
@@ -147,6 +155,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(close_tab, CloseTab, Some(WORKSPACE_CONTEXT)),
         // Vim's insert-mode delete-word-before-cursor; with vim off it does the same.
         KeyBinding::new("ctrl-w", DeleteToPreviousWordStart, Some("Input")),
+        // Over the editor's own copy, cut and paste, which do nothing without a selection.
+        KeyBinding::new(copy, CopySelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
+        KeyBinding::new(cut, CutSelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
+        KeyBinding::new(paste, PasteSelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
         // Vim-style list movement in the palette and the history list.
         KeyBinding::new("ctrl-n", SelectDown, Some(PALETTE_CONTEXT)),
         KeyBinding::new("ctrl-p", SelectUp, Some(PALETTE_CONTEXT)),
