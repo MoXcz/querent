@@ -557,7 +557,7 @@ impl FileExplorer {
             let result = applied.await;
             let shown = this.update_in(cx, |this, window, cx| match result {
                 Ok(()) => this.after_operation(operation, cx),
-                Err(message) => window.push_notification(message, cx),
+                Err(message) => crate::workspace::notify_error(message, window, cx),
             });
             if let Err(error) = shown {
                 tracing::debug!(%error, "file tree closed during a file operation");

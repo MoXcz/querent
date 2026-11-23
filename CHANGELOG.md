@@ -2,6 +2,11 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.4.3
+
+- **Copy error** next to a failed query's error copies the whole message, since the text cannot be selected. Under Messages, **Copy messages** copies every message.
+- Error notifications (a file that cannot be saved or opened, a failed format, a dbt model that needs compiling, a bad connection string) have a **Copy** button and stay until closed.
+
 ## 0.4.2
 
 - The results grid numbers its rows in a narrow column on the left, which stays in place when you scroll sideways. Large numbers are cut off so the column stays narrow.

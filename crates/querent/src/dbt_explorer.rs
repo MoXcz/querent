@@ -575,7 +575,9 @@ impl DbtExplorer {
                         run,
                     });
                 }
-                Err(error) => window.push_notification(format!("{file}: {error}."), cx),
+                Err(error) => {
+                    crate::workspace::notify_error(format!("{file}: {error}."), window, cx);
+                }
             });
             if let Err(error) = shown {
                 tracing::debug!(%error, "dbt tree closed while the SQL was read");

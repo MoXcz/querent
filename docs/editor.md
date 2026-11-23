@@ -30,7 +30,7 @@ The exports and "Copy all rows" write the rows the grid shows, in its order. Cop
 
 ### Errors
 
-When the server reports where a statement failed, the error starts with the tab's line number and a button jumps to that line. SQL Server and PostgreSQL report a line for most errors; SQLite and Snowflake only for syntax errors.
+When the server reports where a statement failed, the error starts with the tab's line number and a button jumps to that line. **Copy error** puts the whole message on the clipboard, and under Messages **Copy messages** copies them all. Error notifications have a **Copy** button too. SQL Server and PostgreSQL report a line for most errors; SQLite and Snowflake only for syntax errors.
 
 ### Open transactions
 

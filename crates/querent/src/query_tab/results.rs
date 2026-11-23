@@ -343,7 +343,12 @@ impl QueryTab {
                 .p_3()
                 .gap_2()
                 .child(div().text_color(cx.theme().danger).child(message.clone()))
-                .children(line.map(|line| go_to_line_button(line, cx)))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .children(line.map(|line| go_to_line_button(line, cx)))
+                        .child(copy_button("copy-error", "Copy error", message.to_string())),
+                )
                 .into_any_element(),
             QueryState::Done { output, failed, .. } if output.result_sets.is_empty() && !failed => {
                 div()
@@ -389,7 +394,7 @@ impl QueryTab {
                                         .child(message.clone())
                                 }),
                         )
-                        .children(error_line.map(|line| go_to_line_button(line, cx))),
+                        .child(message_actions(output, *failed, *error_line, cx)),
                 )
                 .into_any_element(),
             QueryState::Idle | QueryState::Running { .. } | QueryState::Done { .. } => v_flex()
@@ -508,6 +513,37 @@ impl QueryTab {
             .children(export)
             .into_any_element()
     }
+}
+
+/// Under Messages: go to the error's line, and copy the error or every message.
+fn message_actions(
+    output: &QueryOutput,
+    failed: bool,
+    error_line: Option<usize>,
+    cx: &mut Context<QueryTab>,
+) -> impl IntoElement {
+    let error = output.messages.last().filter(|_| failed).cloned();
+    h_flex()
+        .gap_1()
+        .children(error_line.map(|line| go_to_line_button(line, cx)))
+        .children(error.map(|error| copy_button("copy-error", "Copy error", error)))
+        .child(copy_button(
+            "copy-messages",
+            "Copy messages",
+            output.messages.join("\n"),
+        ))
+}
+
+/// Error text cannot be selected, so a button copies it.
+fn copy_button(id: &'static str, label: &'static str, text: String) -> impl IntoElement {
+    Button::new(id)
+        .ghost()
+        .xsmall()
+        .label(label)
+        .on_click(move |_, window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            window.push_notification("Copied.", cx);
+        })
 }
 
 fn go_to_line_button(line: usize, cx: &mut Context<QueryTab>) -> impl IntoElement {

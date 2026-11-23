@@ -407,7 +407,9 @@ impl ConnectionForm {
                 // The fields now hold its values, and a password should not linger here.
                 set_text(&self.connection_string, "", window, cx);
             }
-            Err(error) => window.push_notification(format!("Connection string: {error}"), cx),
+            Err(error) => {
+                crate::workspace::notify_error(format!("Connection string: {error}"), window, cx);
+            }
         }
     }
 

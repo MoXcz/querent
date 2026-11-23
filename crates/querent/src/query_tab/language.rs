@@ -246,7 +246,11 @@ impl QueryTab {
                 Ok(edits) => edits,
                 Err(error) => {
                     let shown = this.update_in(cx, |_, window, cx| {
-                        window.push_notification(format!("Format SQL failed: {error}."), cx);
+                        crate::workspace::notify_error(
+                            format!("Format SQL failed: {error}."),
+                            window,
+                            cx,
+                        );
                     });
                     if let Err(error) = shown {
                         tracing::debug!(%error, "tab closed before formatting failed");

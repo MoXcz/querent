@@ -214,8 +214,9 @@ impl QueryTab {
                         this.refresh_modified(cx);
                         cx.notify();
                     }
-                    Err(error) => window.push_notification(
+                    Err(error) => crate::workspace::notify_error(
                         format!("Could not save {}: {error}.", path.display()),
+                        window,
                         cx,
                     ),
                 }

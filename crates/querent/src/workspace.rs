@@ -4,15 +4,16 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandItem, CommandState};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
+use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, IconName, Sizable as _, WindowExt as _, h_flex, h_resizable, resizable_panel,
     v_flex,
 };
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, ExternalPaths, Focusable as _, InteractiveElement as _,
-    IntoElement, ParentElement as _, PathPromptOptions, Render, SharedString, Styled as _,
-    Subscription, Task, Window, actions, div, px,
+    App, AppContext as _, ClipboardItem, Context, Entity, ExternalPaths, Focusable as _,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, Styled as _, Subscription, Task, Window, actions, div, px,
 };
 
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
@@ -592,7 +593,7 @@ impl Workspace {
                 let shown = this.update_in(cx, |this, window, cx| match read {
                     None => this.show_folder(path, cx),
                     Some(Ok(file)) => this.show_file(path, &file, opening, window, cx),
-                    Some(Err(message)) => window.push_notification(message, cx),
+                    Some(Err(message)) => notify_error(message, window, cx),
                 });
                 if shown.is_err() {
                     return;
@@ -1327,6 +1328,31 @@ fn close_question(title: &str, modified: bool, open_transaction: bool) -> Option
         ),
     };
     Some(CloseQuestion { title, description })
+}
+
+/// Shows an error notification with a Copy button; toast text cannot be selected.
+pub fn notify_error(message: impl Into<SharedString>, window: &mut Window, cx: &mut App) {
+    let message: SharedString = message.into();
+    let copied = message.clone();
+    window.push_notification(
+        Notification::error(message).action(move |_, _, cx| {
+            let copied = copied.clone();
+            let toast = cx.weak_entity();
+            Button::new("copy-notification")
+                .xsmall()
+                .ghost()
+                .label("Copy")
+                .on_click(move |_, window, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copied.to_string()));
+                    // Closing is the sign that the copy happened.
+                    let closed = toast.update(cx, |toast, cx| toast.dismiss(window, cx));
+                    if let Err(error) = closed {
+                        tracing::debug!(%error, "notification closed before Copy");
+                    }
+                })
+        }),
+        cx,
+    );
 }
 
 /// Rows "Select Top" reads from a dbt model, as in the object explorer.
