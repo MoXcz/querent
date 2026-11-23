@@ -377,7 +377,9 @@ impl TableDelegate for ResultsTable {
         let selected = self
             .cells
             .filter(|range| range.contains(row_index, column_index));
-        let border = cx.theme().table_active_border;
+        // The editor's selection color, so a selection looks the same in the grid and the text.
+        let fill = cx.theme().selection;
+        let border = fill.alpha(1.);
         div()
             .mx(px(-CELL_PADDING_X))
             .my(px(-CELL_PADDING_Y))
@@ -387,7 +389,7 @@ impl TableDelegate for ResultsTable {
                 // The outline runs only along the rectangle's outer edges.
                 let rows = range.rows();
                 let columns = range.columns();
-                cell.bg(cx.theme().tokens.table_active)
+                cell.bg(fill)
                     .border_color(border)
                     .when(row_index == *rows.start(), Styled::border_t_1)
                     .when(row_index == *rows.end(), Styled::border_b_1)

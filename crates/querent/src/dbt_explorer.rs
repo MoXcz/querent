@@ -997,7 +997,7 @@ impl DbtExplorer {
                     .gap_1()
                     .text_sm()
                     .text_color(text_color)
-                    .when(is_selected, |row| row.bg(cx.theme().accent))
+                    .when(is_selected, |row| row.bg(cx.theme().selection))
                     .hover(|row| row.bg(cx.theme().list_hover))
                     .child(div().w(px(10.)).flex_shrink_0().child(chevron))
                     .child(div().flex_shrink_0().max_w_full().truncate().child(row.label.clone()))

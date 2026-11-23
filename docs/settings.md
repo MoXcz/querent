@@ -6,7 +6,7 @@ Open Settings with `Ctrl+,` or the gear in the status bar, or find any setting b
 
 Built in: Solitude (the default), Catppuccin (Latte, Frappé, Macchiato, Mocha) and Solarized (Dark, Light). Pick one in Settings or type "Theme" in the command palette.
 
-To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`. It loads without a restart, and a theme with the same name as a built-in one replaces it.
+To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`. It loads without a restart, and a theme with the same name as a built-in one replaces it. Its `selection.background` colors selected text, selected grid cells and the selected sidebar row. Write it with an alpha, such as `#6991b766` (40%), to set how strong it is; without one, gpui-kit shows it at 30% opacity at most.
 
 ## Running statements
 

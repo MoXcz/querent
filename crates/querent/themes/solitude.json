@@ -14,7 +14,7 @@
         "input.border": "#323232",
         "ring": "#535353",
         "caret": "#e5e5e5",
-        "selection.background": "#323232",
+        "selection.background": "#6991b766",
         "muted.background": "#191919",
         "muted.foreground": "#949494",
         "accent.background": "#212121",

@@ -87,7 +87,16 @@ fn apply(name: &SharedString, cx: &mut App) {
     let Some(config) = cx.global::<ThemeCatalog>().configs.get(name).cloned() else {
         return;
     };
-    Theme::update(cx, |theme| theme.apply_config(&config));
+    Theme::update(cx, |theme| {
+        theme.apply_config(&config);
+        // gpui-kit caps the selection at 30% opacity, too faint on dark themes; a
+        // theme that writes its alpha out (`#rrggbbaa`) gets that alpha.
+        if let Some(alpha) = config.colors.selection.as_deref().and_then(written_alpha) {
+            theme.colors.selection = theme.colors.selection.alpha(alpha);
+            // `Theme::update` puts the token back over a color left unchanged, so both change.
+            theme.tokens.selection = theme.colors.selection.into();
+        }
+    });
     cx.refresh_windows();
 }
 
@@ -103,6 +112,15 @@ fn reload(cx: &mut App) {
     themes.configs = configs;
     themes.selected = selected.clone();
     apply(&selected, cx);
+}
+
+/// The alpha of a `#rrggbbaa` color, from 0 to 1; `None` for colors without one.
+fn written_alpha(color: &str) -> Option<f32> {
+    let hex = color.trim().strip_prefix('#')?;
+    let alpha = hex.get(6..8).filter(|_| hex.len() == 8)?;
+    u8::from_str_radix(alpha, 16)
+        .ok()
+        .map(|alpha| f32::from(alpha) / 255.)
 }
 
 /// Built-in themes first, then user files in name order; a later theme with the same name wins.
@@ -179,6 +197,14 @@ fn watch(themes_dir: &Path, cx: &mut App) -> notify::Result<notify::RecommendedW
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_alpha_a_color_writes_out() {
+        assert_eq!(written_alpha("#6991b766"), Some(102. / 255.));
+        assert_eq!(written_alpha("#323232"), None);
+        assert_eq!(written_alpha("#6991b7zz"), None);
+        assert_eq!(written_alpha("red"), None);
+    }
 
     #[test]
     fn built_in_themes_parse() {

@@ -2,6 +2,11 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.4.4
+
+- Selections are easier to see: every built-in theme now selects in its blue at 40% opacity on dark themes and 25% on light ones, where it was a grey close to the background. Selected text in the editor, selected cells in the results grid and the selected row in the sidebar trees all use it.
+- A user theme sets it with `selection.background`; write the alpha out (`#rrggbbaa`) to go above the 30% gpui-kit allows otherwise.
+
 ## 0.4.3
 
 - **Copy error** next to a failed query's error copies the whole message, since the text cannot be selected. Under Messages, **Copy messages** copies every message.
