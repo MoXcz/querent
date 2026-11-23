@@ -15,6 +15,7 @@ use crate::query_tab::{
     CancelQuery, ExportCsv, ExportJson, FormatSql, RefreshSchema, RunAll, RunQuery, SaveFile,
     SaveFileAs, SignOut, ToggleVimMode,
 };
+use crate::release_notes::ShowReleaseNotes;
 use crate::settings;
 use crate::themes::{self, SelectTheme};
 use crate::updater::CheckForUpdates;
@@ -183,6 +184,12 @@ fn settings_commands(cx: &App) -> Vec<PaletteCommand> {
             "Check for updates",
             &["upgrade", "version", "release", "new"],
             CheckForUpdates,
+        ),
+        command(
+            "Settings",
+            "What's new",
+            &["release notes", "changelog", "version"],
+            ShowReleaseNotes,
         ),
         command(
             "Settings",

@@ -25,6 +25,7 @@ use crate::history::{self, HistoryEntry};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, FileText, QueryTab, read_sql_file};
+use crate::release_notes::LastStart;
 use crate::session::{self, SavedTab, Session, SidebarView};
 use crate::tokio_bridge;
 
@@ -148,8 +149,29 @@ impl Workspace {
                 })
             })
         });
-        if let Some(saved) = session::load(cx) {
+        let saved = session::load(cx);
+        let last_start = match &saved {
+            None => LastStart::None,
+            Some(Session {
+                last_version: None, ..
+            }) => LastStart::Unrecorded,
+            Some(Session {
+                last_version: Some(version),
+                ..
+            }) => LastStart::Version(version),
+        };
+        if let Some(notes) = crate::release_notes::notes_after_update(last_start) {
+            Self::show_release_notes_soon(notes, window, cx);
+        }
+        if let Some(saved) = saved {
+            let updated =
+                saved.last_version.as_deref() != Some(crate::release_notes::CURRENT_VERSION);
             workspace.restore(saved, window, cx);
+            if updated {
+                // Record the new version now, so the notes show once even after a crash.
+                workspace.last_saved = None;
+                workspace.schedule_session_save(cx);
+            }
             return workspace;
         }
         let first_connection = connections::names(cx).into_iter().next();
@@ -162,6 +184,17 @@ impl Workspace {
             tab.update(cx, |tab, cx| tab.use_connection(&name, window, cx));
         }
         workspace
+    }
+
+    fn show_release_notes_soon(notes: String, window: &mut Window, cx: &mut Context<Self>) {
+        // Shown from a task: the window has no dialog layer until it is open.
+        cx.spawn_in(window, async move |_, cx| {
+            let shown = cx.update(|window, cx| crate::release_notes::show(Some(notes), window, cx));
+            if let Err(error) = shown {
+                tracing::debug!(%error, "window closed before the release notes showed");
+            }
+        })
+        .detach();
     }
 
     /// Says once which config file is not being saved, so changes are not lost unnoticed.
@@ -528,6 +561,7 @@ impl Workspace {
             active: self.active_index,
             folders: self.file_explorer.read(cx).saved_folders(),
             sidebar: self.sidebar,
+            last_version: Some(crate::release_notes::CURRENT_VERSION.to_owned()),
         }
     }
 
@@ -1071,6 +1105,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::reopen_closed_tab))
             .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(
+                |_, _: &crate::release_notes::ShowReleaseNotes, window, cx| {
+                    crate::release_notes::show(None, window, cx);
+                },
+            ))
             .on_action(cx.listener(Self::find_in_folders))
             .on_action(
                 cx.listener(|_, _: &crate::updater::CheckForUpdates, window, cx| {

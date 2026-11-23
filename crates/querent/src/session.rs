@@ -19,6 +19,9 @@ pub struct Session {
     pub folders: Vec<SavedFolder>,
     #[serde(default)]
     pub sidebar: SidebarView,
+    /// The Querent version that wrote the session; a newer one shows its release notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_version: Option<String>,
 }
 
 /// What the sidebar shows.
@@ -135,6 +138,7 @@ mod tests {
                 database: "analytics".to_owned(),
             }],
             sidebar: SidebarView::Files,
+            last_version: Some("0.3.0".to_owned()),
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);

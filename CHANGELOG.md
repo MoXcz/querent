@@ -1,0 +1,21 @@
+# Changelog
+
+Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
+
+## 0.3.0
+
+### Folders
+
+- **Open Folder** (`ctrl-shift-o`) shows a folder of `.sql` files in the sidebar, under the new Files view. Dropping a folder on the window opens it too. Open folders come back after a restart.
+- The tree hides dotfiles and whatever `.gitignore` lists. "All files" shows them.
+- Click a file to open it. The tree follows files added, renamed or deleted in other programs, and an open tab follows a rename.
+- The filter box finds files by name or path and opens the folders that hold them.
+- Right-click for New File, New Folder, Rename, Delete (to the trash), Open and Run, Copy Path and Reveal in File Manager.
+- A file opened from a folder starts on the connection you last ran one of that folder's files on.
+- **Find in Folder** (`ctrl-alt-f`) searches the text of every file, as plain text or a regular expression. Click a line to open the file there.
+
+## 0.2.2
+
+- **Check for updates** in the command palette, and once at start, looks for a newer release on GitHub. Querent installs it when you agree, after checking its signature.
+- Completion offers tables and columns in other databases (`other_db.schema.table`).
+- Copy, cut and paste with nothing selected act on the whole line.

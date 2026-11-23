@@ -12,6 +12,7 @@ mod history;
 mod lsp_servers;
 mod object_explorer;
 mod query_tab;
+mod release_notes;
 mod results_table;
 mod schema_cache;
 mod secrets;
