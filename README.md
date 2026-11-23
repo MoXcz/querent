@@ -10,6 +10,8 @@ Download a release for Linux (`.tar.gz`) or Windows (`.zip` with `querent.exe`) 
 cargo run --release
 ```
 
+On Linux, run `scripts/install-linux.sh` from a clone of the repo to install the latest release into `~/.local/bin` with a desktop entry for app launchers. It checks the download's checksum and minisign signature, so it needs `minisign` or `rsign`. It also uninstalls `~/.cargo/bin/querent` if cargo installed it there.
+
 A release copy offers to update itself when a new version is out ([Settings](docs/settings.md#updates)).
 
 On Linux the build needs Wayland and X11 headers, `libxkbcommon`, `fontconfig`, OpenSSL and a Vulkan driver.
