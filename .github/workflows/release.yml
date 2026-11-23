@@ -1,6 +1,7 @@
 name: Release
 
-# Pushing a tag such as v0.2.0 builds the Linux and Windows binaries and publishes a GitHub release.
+# Pushing a tag such as v0.2.0 builds the Linux and Windows binaries, signs them with minisign
+# and publishes a GitHub release.
 on:
   push:
     tags: ["v*"]
@@ -84,9 +85,35 @@ jobs:
     needs: build
     runs-on: ubuntu-22.04
     steps:
+      # Only for the public key the signatures are checked against.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           merge-multiple: true
+
+      - name: Install rsign
+        run: cargo install rsign2 --version 0.6.7 --locked
+
+      # The app installs an update only when its signature matches the public
+      # key built into it and the trusted comment names the archive.
+      - name: Sign the archives
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          if [ -z "$MINISIGN_SECRET_KEY" ]; then
+            echo "The MINISIGN_SECRET_KEY secret is not set" >&2
+            exit 1
+          fi
+          key="$RUNNER_TEMP/minisign.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          for file in querent-*.tar.gz querent-*.zip; do
+            rsign sign -W -s "$key" -t "$file" "$file" < /dev/null
+            rsign verify -p crates/querent/minisign.pub "$file"
+          done
 
       - name: Publish the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -97,3 +124,4 @@ jobs:
             querent-*.tar.gz
             querent-*.zip
             querent-*.sha256
+            querent-*.minisig
