@@ -5653,7 +5653,7 @@ dependencies = [
 
 [[package]]
 name = "querent"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -7057,7 +7057,7 @@ dependencies = [
 
 [[package]]
 name = "sql_db"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "azure_core",
@@ -7088,7 +7088,7 @@ dependencies = [
 
 [[package]]
 name = "sql_lsp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "lsp-types",
  "serde",
@@ -7100,7 +7100,7 @@ dependencies = [
 
 [[package]]
 name = "sql_text"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "sqlformat",
