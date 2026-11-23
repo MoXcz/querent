@@ -38,6 +38,11 @@ actions!(
 /// element spreads over it so the selection fills the cell.
 const CELL_PADDING_X: f32 = 8.;
 const CELL_PADDING_Y: f32 = 4.;
+/// The row-number column stays this narrow; long numbers are cut off rather than widen it.
+const ROW_NUMBER_WIDTH: f32 = 32.;
+const ROW_NUMBER_PADDING_X: f32 = 4.;
+/// gpui-kit's header row height at the grid's default size, filled by the select-all corner.
+const HEADER_HEIGHT: f32 = 32.;
 
 /// A rectangle of grid cells, from the cell first pressed to the one the pointer is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +125,9 @@ impl ResultsTable {
                 table_column
             })
             .collect();
+        if !self.columns.is_empty() {
+            self.columns.insert(0, row_number_column());
+        }
         self.result = result;
         self.filtered = None;
         self.sort = None;
@@ -177,6 +185,43 @@ impl ResultsTable {
         self.sort = Some((column_index, sort));
         self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
         self.clear_selected();
+    }
+
+    /// A press on a row number selects that whole row, or with Shift every row from the anchor.
+    fn press_row(&mut self, row: usize, extend: bool) {
+        let Some(last_column) = self.result.columns.len().checked_sub(1) else {
+            return;
+        };
+        let anchor_row = match self.cells {
+            Some(range) if extend => range.anchor.0,
+            Some(_) | None => row,
+        };
+        self.cells = Some(CellRange {
+            anchor: (anchor_row, 0),
+            focus: (row, last_column),
+        });
+        self.dragging = true;
+    }
+
+    /// Stretches a selection of whole rows to the row number under a dragging pointer.
+    fn drag_rows_to(&mut self, row: usize, button_down: bool) -> bool {
+        let last_column = self.result.columns.len().saturating_sub(1);
+        self.drag_to(row, last_column, button_down)
+    }
+
+    /// Selects every cell of the result, as the corner above the row numbers does.
+    fn select_all(&mut self) {
+        let (Some(last_row), Some(last_column)) = (
+            self.shown_count().checked_sub(1),
+            self.result.columns.len().checked_sub(1),
+        ) else {
+            return;
+        };
+        self.cells = Some(CellRange {
+            anchor: (0, 0),
+            focus: (last_row, last_column),
+        });
+        self.dragging = false;
     }
 
     fn clear_selected(&mut self) {
@@ -249,6 +294,42 @@ impl TableDelegate for ResultsTable {
             .unwrap_or_else(|| Column::new("missing", ""))
     }
 
+    fn render_th(
+        &mut self,
+        column_index: usize,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        if column_index != 0 {
+            return div()
+                .w_full()
+                .child(self.column(column_index, cx).name)
+                .into_any_element();
+        }
+        // The empty corner spreads over its padding so the whole square takes the click.
+        div()
+            .id("select-all")
+            .mx(px(-ROW_NUMBER_PADDING_X))
+            .my(px(-CELL_PADDING_Y))
+            .h(px(HEADER_HEIGHT))
+            .w(px(ROW_NUMBER_WIDTH))
+            .hover(|corner| corner.bg(cx.theme().list_hover))
+            .tooltip(|window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new("Select every cell; Ctrl+C copies them")
+                    .build(window, cx)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|table, _: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    table.delegate_mut().select_all();
+                    table.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_td(
         &mut self,
         row_index: usize,
@@ -256,6 +337,39 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
+        let Some(column_index) = data_column(column_index) else {
+            let in_selection = self
+                .cells
+                .is_some_and(|range| range.rows().contains(&row_index));
+            return div()
+                .mx(px(-ROW_NUMBER_PADDING_X))
+                .my(px(-CELL_PADDING_Y))
+                .px(px(ROW_NUMBER_PADDING_X))
+                .py(px(CELL_PADDING_Y))
+                .text_xs()
+                .text_color(if in_selection {
+                    cx.theme().foreground
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |table, event: &MouseDownEvent, window, cx| {
+                        let extend = event.modifiers.shift;
+                        table.delegate_mut().press_row(row_index, extend);
+                        table.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_move(cx.listener(move |table, event: &MouseMoveEvent, _, cx| {
+                    let button_down = event.pressed_button == Some(MouseButton::Left);
+                    if table.delegate_mut().drag_rows_to(row_index, button_down) {
+                        cx.notify();
+                    }
+                }))
+                .child((row_index + 1).to_string())
+                .into_any_element();
+        };
         let content = match self.value(row_index, column_index) {
             None | Some(Value::Null) => div().text_color(cx.theme().muted_foreground).child("NULL"),
             Some(value) => div().child(single_line(&value.to_string())),
@@ -301,9 +415,13 @@ impl TableDelegate for ResultsTable {
                 }
             }))
             .child(content)
+            .into_any_element()
     }
 
     fn cell_text(&self, row_index: usize, column_index: usize, _: &App) -> String {
+        let Some(column_index) = data_column(column_index) else {
+            return (row_index + 1).to_string();
+        };
         self.value(row_index, column_index)
             .map(ToString::to_string)
             .unwrap_or_default()
@@ -316,7 +434,9 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        self.sort_by(column_index, sort);
+        if let Some(column_index) = data_column(column_index) {
+            self.sort_by(column_index, sort);
+        }
         cx.notify();
     }
 
@@ -412,6 +532,28 @@ impl TableDelegate for ResultsTable {
             }),
         )
     }
+}
+
+/// The result column a grid column shows; `None` for the row numbers, which come first.
+fn data_column(table_column: usize) -> Option<usize> {
+    table_column.checked_sub(1)
+}
+
+/// The narrow, pinned column of row numbers in grid order; not data, so never sorted or copied.
+fn row_number_column() -> Column {
+    Column::new("row-number", "")
+        .width(px(ROW_NUMBER_WIDTH))
+        .paddings(gpui_kit::Edges {
+            top: px(CELL_PADDING_Y),
+            bottom: px(CELL_PADDING_Y),
+            left: px(ROW_NUMBER_PADDING_X),
+            right: px(ROW_NUMBER_PADDING_X),
+        })
+        .text_right()
+        .fixed_left()
+        .resizable(false)
+        .movable(false)
+        .selectable(false)
 }
 
 /// The row numbers the grid shows: the filtered rows, ordered by the sorted
@@ -542,6 +684,45 @@ mod tests {
         assert_eq!(table.cells.unwrap().anchor, (4, 2));
         table.press_cell(6, 1, false);
         assert_eq!(table.cells.unwrap().rows(), 6..=6);
+    }
+
+    #[test]
+    fn the_corner_selects_every_cell_and_row_numbers_lead() {
+        let mut table = ResultsTable::default();
+        table.select_all();
+        assert_eq!(table.cells, None);
+        table.set_result(Arc::new(ResultSet::new(
+            vec![
+                sql_db::Column {
+                    name: "a".to_owned(),
+                    type_name: "int".to_owned(),
+                },
+                sql_db::Column {
+                    name: "b".to_owned(),
+                    type_name: "int".to_owned(),
+                },
+            ],
+            vec![
+                vec![Value::Int(1), Value::Int(2)],
+                vec![Value::Int(3), Value::Int(4)],
+            ],
+        )));
+        assert_eq!(table.columns.len(), 3);
+        table.select_all();
+        assert_eq!(
+            table.copy_selected(Headers::Include),
+            CopiedRows::Text("a\tb\n1\t2\n3\t4\n".to_owned())
+        );
+        table.press_row(1, false);
+        assert_eq!(
+            table.copy_selected(Headers::Omit),
+            CopiedRows::Text("3\t4\n".to_owned())
+        );
+        table.press_row(0, true);
+        assert_eq!(table.cells.unwrap().rows(), 0..=1);
+        assert_eq!(table.cells.unwrap().columns(), 0..2);
+        table.set_result(Arc::new(ResultSet::default()));
+        assert!(table.columns.is_empty());
     }
 
     #[test]

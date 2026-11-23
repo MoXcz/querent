@@ -20,6 +20,8 @@ Above the grid sit a button per result set, Messages, and Export CSV and JSON.
 | Keep only matching rows | type in "Filter rows" under the grid |
 | Sort | click a column's sort arrow (NULL first, numbers by value) |
 | Select cells | click a cell, then drag or Shift-click to another; a border marks the rectangle |
+| Select whole rows | click a row number; drag down the numbers or Shift-click another for more |
+| Select the whole result | click the empty corner above the row numbers |
 | Copy the selected cells | `Ctrl+C`; `Ctrl+Shift+C` adds a line of their column names (Cmd on macOS), or right-click |
 | Copy a row, with or without column names, or every row | right-click a row |
 | See a value longer than 500 characters | right-click a row and view its full values; each has a Copy button |

@@ -2,6 +2,12 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.4.2
+
+- The results grid numbers its rows in a narrow column on the left, which stays in place when you scroll sideways. Large numbers are cut off so the column stays narrow.
+- Click the empty corner above the row numbers to select every cell, then `Ctrl+C` copies the whole result (`Ctrl+Shift+C` with column names).
+- Click a row number to select that row; drag down the numbers or Shift-click another to select several rows.
+
 ## 0.4.1
 
 - `Ctrl+Enter` now runs up to the next `;` or `GO` line, not the next blank line. A `delete from t` followed by a blank line and `where ...` runs with its `where`, and dbt models with blank lines run whole. Without any `;` in the tab it runs the whole tab; select a query to run only it.
