@@ -17,6 +17,7 @@ use crate::query_tab::{
 };
 use crate::settings;
 use crate::themes::{self, SelectTheme};
+use crate::updater::CheckForUpdates;
 use crate::workspace::{
     AddConnection, CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
 };
@@ -123,6 +124,27 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
             &["delete", "forget", "erase"],
             ClearHistory,
         ),
+    ];
+    commands.extend(settings_commands(cx));
+    let selected = themes::selected(cx);
+    for name in themes::names(cx) {
+        let label = if name == selected {
+            format!("Theme: {name} (current)")
+        } else {
+            format!("Theme: {name}")
+        };
+        commands.push(command(
+            "Themes",
+            label,
+            &["color", "appearance"],
+            SelectTheme(name),
+        ));
+    }
+    commands
+}
+
+fn settings_commands(cx: &App) -> Vec<PaletteCommand> {
+    vec![
         command(
             "Settings",
             if settings::get(cx).vim_mode {
@@ -145,26 +167,17 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
         ),
         command(
             "Settings",
+            "Check for updates",
+            &["upgrade", "version", "release", "new"],
+            CheckForUpdates,
+        ),
+        command(
+            "Settings",
             "Open settings",
             &["preferences", "options"],
             OpenSettings,
         ),
-    ];
-    let selected = themes::selected(cx);
-    for name in themes::names(cx) {
-        let label = if name == selected {
-            format!("Theme: {name} (current)")
-        } else {
-            format!("Theme: {name}")
-        };
-        commands.push(command(
-            "Themes",
-            label,
-            &["color", "appearance"],
-            SelectTheme(name),
-        ));
-    }
-    commands
+    ]
 }
 
 /// Runs the chosen command after the dialog closes, so tab commands reach the tab.
@@ -332,6 +345,24 @@ pub fn open_settings(window: &mut Window, cx: &mut App) {
                             ),
                         )
                         .description("Schema folders, or schema.name in one list."),
+                    ),
+                )
+                .group(
+                    SettingGroup::new().title("Updates").item(
+                        SettingItem::new(
+                            "Check for updates",
+                            SettingField::switch(
+                                |cx| settings::get(cx).check_for_updates,
+                                |enabled, cx| {
+                                    settings::update(cx, |settings| {
+                                        settings.check_for_updates = enabled;
+                                    });
+                                },
+                            ),
+                        )
+                        .description(
+                            "Ask GitHub for a newer release at startup; installing always asks first.",
+                        ),
                     ),
                 ),
         );

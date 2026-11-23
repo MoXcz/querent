@@ -25,6 +25,13 @@ tracing-subscriber.workspace = true
 lsp-types.workspace = true
 sql_lsp.workspace = true
 keyring.workspace = true
+reqwest.workspace = true
+semver.workspace = true
+minisign-verify.workspace = true
+self-replace.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

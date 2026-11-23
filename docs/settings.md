@@ -8,6 +8,12 @@ Built in: Solitude (the default), Catppuccin (Latte, Frappé, Macchiato, Mocha) 
 
 To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`. It loads without a restart, and a theme with the same name as a built-in one replaces it.
 
+## Updates
+
+At startup Querent asks GitHub for the latest release; turn this off with "Check for updates" in Settings, or run "Check for updates" from the command palette at any time. A newer release shows a notification. Click it for the release notes, or click **Update** to download the build for your system, check its minisign signature against the key built into the app, and replace the program. The new version runs after a restart.
+
+A copy installed with `cargo install`, a development build, or a copy in a folder Querent cannot write to (such as `/usr/bin`) only gets the notification.
+
 ## Language servers
 
 A language server adds its completions, hover and diagnostics to the built-in ones. It can also format SQL instead of the built-in formatter ("Use the language server" in Settings).

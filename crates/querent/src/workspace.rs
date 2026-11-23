@@ -107,6 +107,7 @@ impl Workspace {
             _sign_in_prompts: crate::sign_in::show_prompts(window, cx),
             _startup_notices: Self::show_unsaved_config(window, cx),
         };
+        crate::updater::check_on_start(window, cx);
         // Closing the last window may drop the workspace before quit hooks run.
         let closing = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
@@ -831,6 +832,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::reopen_closed_tab))
+            .on_action(
+                cx.listener(|_, _: &crate::updater::CheckForUpdates, window, cx| {
+                    crate::updater::check(true, window, cx);
+                }),
+            )
             .on_drop(cx.listener(|_, dropped: &ExternalPaths, window, cx| {
                 Self::open_paths(dropped.paths().to_vec(), window, cx);
             }))

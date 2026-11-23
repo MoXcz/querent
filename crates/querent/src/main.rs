@@ -18,6 +18,7 @@ mod sign_in;
 mod sql_language;
 mod themes;
 mod tokio_bridge;
+mod updater;
 mod workspace;
 
 use gpui_kit::base::actions::{SelectDown, SelectUp};
@@ -68,6 +69,7 @@ fn main() -> anyhow::Result<()> {
             lsp_servers::init(cx);
             themes::init(cx);
             command_palette::init(cx);
+            updater::init(cx);
             cx.on_action(|_: &ToggleVimMode, cx| {
                 settings::update(cx, |settings| settings.vim_mode = !settings.vim_mode);
                 cx.refresh_windows();

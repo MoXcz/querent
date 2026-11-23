@@ -10,6 +10,8 @@ Download a release for Linux (`.tar.gz`) or Windows (`.zip` with `querent.exe`) 
 cargo run --release
 ```
 
+A release copy offers to update itself when a new version is out ([Settings](docs/settings.md#updates)).
+
 On Linux the build needs Wayland and X11 headers, `libxkbcommon`, `fontconfig`, OpenSSL and a Vulkan driver.
 
 ## First query

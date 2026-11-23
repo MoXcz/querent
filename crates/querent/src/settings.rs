@@ -16,6 +16,10 @@ const SETTINGS_FILE: &str = "settings.toml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is an independent switch in settings.toml"
+)]
 pub struct Settings {
     /// Name of the theme to apply; `None` means the built-in default.
     pub theme: Option<String>,
@@ -31,6 +35,8 @@ pub struct Settings {
     pub format_with_language_server: bool,
     /// Rows kept per result set; 0 keeps every row.
     pub row_limit: usize,
+    /// Ask GitHub for a newer release at startup.
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -43,6 +49,7 @@ impl Default for Settings {
             formatter: FormatStyle::default(),
             format_with_language_server: false,
             row_limit: 50_000,
+            check_for_updates: true,
         }
     }
 }
@@ -233,6 +240,7 @@ mod tests {
             },
             format_with_language_server: true,
             row_limit: 1_000,
+            check_for_updates: false,
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         assert_eq!(toml::from_str::<Settings>(&text).unwrap(), settings);

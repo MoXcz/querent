@@ -30,6 +30,9 @@ Each file adapted from another project names the source and is listed here with 
 | sqlformat | MIT OR Apache-2.0 |
 | keyring, keyring-core and its platform stores | MIT OR Apache-2.0 |
 | reqwest, url, base64, sha2, getrandom | MIT OR Apache-2.0 |
+| minisign-verify, zip | MIT |
+| self-replace | Apache-2.0 |
+| semver, flate2, tar | MIT OR Apache-2.0 |
 | SQLite (bundled by libsqlite3-sys) | Public domain |
 
 Run `cargo tree --format "{p} {l}"` for the full list.
