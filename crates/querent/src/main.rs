@@ -38,6 +38,7 @@ use crate::query_tab::{
     CancelQuery, CopySelectionOrLine, CutSelectionOrLine, ExportCsv, FormatSql,
     PasteSelectionOrLine, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
 };
+use crate::results_table::{CopySelection, CopySelectionWithHeaders};
 use crate::workspace::{
     CloseTab, FindInFolders, NewTab, NextTab, OpenFile, OpenFolder, PreviousTab, ReopenClosedTab,
     ShowHistory, WORKSPACE_CONTEXT, Workspace,
@@ -46,6 +47,8 @@ use crate::workspace::{
 const KEY_CONTEXT: &str = "SqlEditor";
 /// gpui-kit's editor inside a query tab.
 const EDITOR_INPUT_CONTEXT: &str = "SqlEditor > Input";
+/// gpui-kit's results grid inside a query tab.
+const GRID_CONTEXT: &str = "SqlEditor > DataTable";
 /// gpui-kit's key context for `Command` lists.
 const PALETTE_CONTEXT: &str = "Command";
 
@@ -142,10 +145,10 @@ fn bind_keys(cx: &mut App) {
             "ctrl-shift-f",
         )
     };
-    let (copy, cut, paste) = if cfg!(target_os = "macos") {
-        ("cmd-c", "cmd-x", "cmd-v")
+    let (copy, copy_with_headers, cut, paste) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-shift-c", "cmd-x", "cmd-v")
     } else {
-        ("ctrl-c", "ctrl-x", "ctrl-v")
+        ("ctrl-c", "ctrl-shift-c", "ctrl-x", "ctrl-v")
     };
     // Registered after `gpui_kit::init` so these win over the editor's own ctrl-enter.
     cx.bind_keys([
@@ -173,6 +176,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(copy, CopySelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
         KeyBinding::new(cut, CutSelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
         KeyBinding::new(paste, PasteSelectionOrLine, Some(EDITOR_INPUT_CONTEXT)),
+        // In the grid these win over Cancel Query's ctrl-shift-c, bound on the whole tab.
+        KeyBinding::new(copy, CopySelection, Some(GRID_CONTEXT)),
+        KeyBinding::new(
+            copy_with_headers,
+            CopySelectionWithHeaders,
+            Some(GRID_CONTEXT),
+        ),
         // Vim-style list movement in the palette and the history list.
         KeyBinding::new("ctrl-n", SelectDown, Some(PALETTE_CONTEXT)),
         KeyBinding::new("ctrl-p", SelectUp, Some(PALETTE_CONTEXT)),

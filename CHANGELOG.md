@@ -2,6 +2,12 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.3.1
+
+- Select a block of cells in the results grid: click a cell, then drag or Shift-click to another. A border marks the selection.
+- `Ctrl+C` copies the selected cells and `Ctrl+Shift+C` adds a line of their column names (Cmd on macOS). They paste into Excel or Google Sheets one value per cell. Right-click also offers both.
+- Shift-click and Ctrl-click no longer select whole rows; select across every column instead, or right-click a row to copy it.
+
 ## 0.3.0
 
 ### Folders

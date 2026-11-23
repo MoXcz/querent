@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::ops::Range;
 
 use crate::{ResultSet, Value};
 
@@ -86,17 +87,34 @@ pub fn rows_as_tsv(
     rows: impl IntoIterator<Item = usize>,
     headers: Headers,
 ) -> String {
+    cells_as_tsv(result_set, rows, 0..result_set.columns.len(), headers)
+}
+
+/// The chosen rows, cut to `columns`, as tab-separated text, like [`rows_as_tsv`].
+#[must_use]
+pub fn cells_as_tsv(
+    result_set: &ResultSet,
+    rows: impl IntoIterator<Item = usize>,
+    columns: Range<usize>,
+    headers: Headers,
+) -> String {
     let mut writer = csv::WriterBuilder::new()
         .delimiter(b'\t')
         .from_writer(Vec::new());
     let mut written = match headers {
-        Headers::Include => {
-            writer.write_record(result_set.columns.iter().map(|column| column.name.as_str()))
-        }
+        Headers::Include => writer.write_record(
+            result_set
+                .columns
+                .get(columns.clone())
+                .unwrap_or_default()
+                .iter()
+                .map(|column| column.name.as_str()),
+        ),
         Headers::Omit => Ok(()),
     };
     for row in rows.into_iter().filter_map(|row| result_set.rows.get(row)) {
-        written = written.and_then(|()| writer.write_record(row.iter().map(csv_field)));
+        let cells = row.get(columns.clone()).unwrap_or_default();
+        written = written.and_then(|()| writer.write_record(cells.iter().map(csv_field)));
     }
     // Writing to memory cannot fail; an empty string is the fallback all the same.
     written
@@ -180,6 +198,10 @@ mod tests {
             "id\tnote\n3\t\n2\t\"a\tb\"\n"
         );
         assert_eq!(rows_as_tsv(&result_set, [0], Headers::Omit), "1\tplain\n");
+        assert_eq!(
+            cells_as_tsv(&result_set, [0, 1], 1..2, Headers::Include),
+            "note\nplain\n\"a\tb\"\n"
+        );
     }
 
     #[test]

@@ -236,7 +236,7 @@ impl QueryTab {
             }));
             lsp.hover_provider = Some(std::rc::Rc::new(SqlHover { target }));
         });
-        let results = cx.new(|cx| TableState::new(ResultsTable::default(), window, cx));
+        let results = cx.new(|cx| ResultsTable::new_grid(window, cx));
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter rows"));
         let vim_interceptor = Self::intercept_vim_keys(cx);
 
@@ -1073,7 +1073,6 @@ impl QueryTab {
             self.results.update(cx, |table, cx| {
                 table.delegate_mut().clear();
                 table.refresh(cx);
-                table.clear_selection(cx);
                 cx.notify();
             });
         }

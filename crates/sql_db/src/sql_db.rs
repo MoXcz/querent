@@ -22,7 +22,7 @@ pub use catalog::{
 pub use connection::{Connection, ConnectionConfig};
 pub use connection_settings::{AuthMethod, ConnectionSettings, DriverKind};
 pub use connection_string::{ConnectionStringError, parse_connection_string};
-pub use csv_export::{Headers, rows_as_tsv, write_csv, write_json};
+pub use csv_export::{Headers, cells_as_tsv, rows_as_tsv, write_csv, write_json};
 pub use postgres::{PgConfig, PgConnection};
 pub use snowflake::{SnowflakeConfig, SnowflakeConnection};
 pub use sqlite::{SqliteConfig, SqliteConnection};

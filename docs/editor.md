@@ -19,10 +19,12 @@ Above the grid sit a button per result set, Messages, and Export CSV and JSON.
 | --- | --- |
 | Keep only matching rows | type in "Filter rows" under the grid |
 | Sort | click a column's sort arrow (NULL first, numbers by value) |
+| Select cells | click a cell, then drag or Shift-click to another; a border marks the rectangle |
+| Copy the selected cells | `Ctrl+C`; `Ctrl+Shift+C` adds a line of their column names (Cmd on macOS), or right-click |
 | Copy a row, with or without column names, or every row | right-click a row |
 | See a value longer than 500 characters | right-click a row and view its full values; each has a Copy button |
 
-The exports and "Copy all rows" write the rows the grid shows, in its order. Copied rows are tab-separated, so they paste into a spreadsheet.
+The exports and "Copy all rows" write the rows the grid shows, in its order. Copied cells and rows are tab-separated, so they paste into Excel or Google Sheets one value per cell. In the grid, `Ctrl+Shift+C` copies; it cancels a running query everywhere else in the tab.
 
 ### Errors
 

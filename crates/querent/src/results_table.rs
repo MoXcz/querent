@@ -3,8 +3,9 @@ use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    App, ClipboardItem, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    App, ClipboardItem, Context, Focusable as _, InteractiveElement as _, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, actions, div, prelude::FluentBuilder as _, px,
 };
 use std::sync::Arc;
 
@@ -23,6 +24,51 @@ const MAX_COLUMN_WIDTH: f32 = 420.;
 /// Rows sampled to size columns; scanning all rows would stall large results.
 const WIDTH_SAMPLE_ROWS: usize = 200;
 
+actions!(
+    querent,
+    [
+        /// Copy the selected cells as tab-separated text, ready to paste into a spreadsheet.
+        CopySelection,
+        /// Copy the selected cells with a header line of their column names.
+        CopySelectionWithHeaders
+    ]
+);
+
+/// gpui-kit's padding around a cell at the grid's default size; a cell's own
+/// element spreads over it so the selection fills the cell.
+const CELL_PADDING_X: f32 = 8.;
+const CELL_PADDING_Y: f32 = 4.;
+
+/// A rectangle of grid cells, from the cell first pressed to the one the pointer is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellRange {
+    /// `(grid row, column)`.
+    anchor: (usize, usize),
+    focus: (usize, usize),
+}
+
+impl CellRange {
+    fn rows(&self) -> std::ops::RangeInclusive<usize> {
+        self.anchor.0.min(self.focus.0)..=self.anchor.0.max(self.focus.0)
+    }
+
+    fn columns(&self) -> std::ops::Range<usize> {
+        self.anchor.1.min(self.focus.1)..self.anchor.1.max(self.focus.1) + 1
+    }
+
+    fn contains(&self, row: usize, column: usize) -> bool {
+        self.rows().contains(&row) && self.columns().contains(&column)
+    }
+}
+
+/// The text a copy of the selected cells puts on the clipboard.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CopiedRows {
+    Nothing,
+    TooMany(usize),
+    Text(String),
+}
+
 #[derive(Default)]
 pub struct ResultsTable {
     result: Arc<ResultSet>,
@@ -32,6 +78,10 @@ pub struct ResultsTable {
     sort: Option<(usize, ColumnSort)>,
     /// Row numbers of `result` as the grid shows them, after the filter and the sort; the rows are not copied.
     order: Option<Arc<Vec<usize>>>,
+    /// Cells picked by pressing, dragging and Shift-clicking in the grid.
+    cells: Option<CellRange>,
+    /// The left button went down on a cell and has not been seen released.
+    dragging: bool,
 }
 
 impl ResultsTable {
@@ -74,12 +124,14 @@ impl ResultsTable {
         self.filtered = None;
         self.sort = None;
         self.order = None;
+        self.clear_selected();
     }
 
     /// Keeps only `rows` of the result, or every row for `None`.
     pub fn set_filtered(&mut self, rows: Option<Vec<usize>>) {
         self.filtered = rows.map(Arc::new);
         self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
+        self.clear_selected();
     }
 
     /// The rows the grid shows, in its order; `None` when that is every row as it arrived.
@@ -111,6 +163,74 @@ impl ResultsTable {
     pub fn clear(&mut self) {
         self.set_result(Arc::default());
     }
+
+    /// The grid for a tab; the delegate keeps its own cell selection instead of the table's rows.
+    pub fn new_grid(window: &mut Window, cx: &mut Context<TableState<Self>>) -> TableState<Self> {
+        TableState::new(Self::default(), window, cx)
+            .row_selectable(false)
+            .col_selectable(false)
+            // A moved column would leave `render_td`'s index and the copied columns out of step.
+            .col_movable(false)
+    }
+
+    fn sort_by(&mut self, column_index: usize, sort: ColumnSort) {
+        self.sort = Some((column_index, sort));
+        self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
+        self.clear_selected();
+    }
+
+    fn clear_selected(&mut self) {
+        self.cells = None;
+        self.dragging = false;
+    }
+
+    /// A left press on a cell starts a selection there, or with Shift stretches the current one.
+    fn press_cell(&mut self, row: usize, column: usize, extend: bool) {
+        self.cells = Some(match self.cells {
+            Some(range) if extend => CellRange {
+                focus: (row, column),
+                ..range
+            },
+            Some(_) | None => CellRange {
+                anchor: (row, column),
+                focus: (row, column),
+            },
+        });
+        self.dragging = true;
+    }
+
+    /// Stretches the selection to the cell under a dragging pointer; true when it changed.
+    fn drag_to(&mut self, row: usize, column: usize, button_down: bool) -> bool {
+        if !button_down {
+            self.dragging = false;
+        }
+        let Some(range) = self.cells.as_mut().filter(|_| self.dragging) else {
+            return false;
+        };
+        let changed = range.focus != (row, column);
+        range.focus = (row, column);
+        changed
+    }
+
+    /// The selected cells as tab-separated text, rows in the order the grid shows them.
+    pub fn copy_selected(&self, headers: Headers) -> CopiedRows {
+        let Some(range) = self.cells else {
+            return CopiedRows::Nothing;
+        };
+        let count = range.rows().count();
+        let total = self.result.rows.len().max(1);
+        let estimated_bytes = self.result.estimated_bytes() / total * count;
+        if count > MAX_COPIED_ROWS || estimated_bytes > MAX_COPIED_BYTES {
+            return CopiedRows::TooMany(count);
+        }
+        let rows = range.rows().map(|row_index| self.source_row(row_index));
+        CopiedRows::Text(sql_db::cells_as_tsv(
+            &self.result,
+            rows,
+            range.columns(),
+            headers,
+        ))
+    }
 }
 
 impl TableDelegate for ResultsTable {
@@ -136,10 +256,51 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        match self.value(row_index, column_index) {
+        let content = match self.value(row_index, column_index) {
             None | Some(Value::Null) => div().text_color(cx.theme().muted_foreground).child("NULL"),
             Some(value) => div().child(single_line(&value.to_string())),
-        }
+        };
+        let selected = self
+            .cells
+            .filter(|range| range.contains(row_index, column_index));
+        let border = cx.theme().table_active_border;
+        div()
+            .mx(px(-CELL_PADDING_X))
+            .my(px(-CELL_PADDING_Y))
+            .px(px(CELL_PADDING_X))
+            .py(px(CELL_PADDING_Y))
+            .when_some(selected, |cell, range| {
+                // The outline runs only along the rectangle's outer edges.
+                let rows = range.rows();
+                let columns = range.columns();
+                cell.bg(cx.theme().tokens.table_active)
+                    .border_color(border)
+                    .when(row_index == *rows.start(), Styled::border_t_1)
+                    .when(row_index == *rows.end(), Styled::border_b_1)
+                    .when(column_index == columns.start, Styled::border_l_1)
+                    .when(column_index + 1 == columns.end, Styled::border_r_1)
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |table, event: &MouseDownEvent, window, cx| {
+                    let extend = event.modifiers.shift;
+                    table
+                        .delegate_mut()
+                        .press_cell(row_index, column_index, extend);
+                    table.focus_handle(cx).focus(window, cx);
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(move |table, event: &MouseMoveEvent, _, cx| {
+                let button_down = event.pressed_button == Some(MouseButton::Left);
+                if table
+                    .delegate_mut()
+                    .drag_to(row_index, column_index, button_down)
+                {
+                    cx.notify();
+                }
+            }))
+            .child(content)
     }
 
     fn cell_text(&self, row_index: usize, column_index: usize, _: &App) -> String {
@@ -155,11 +316,8 @@ impl TableDelegate for ResultsTable {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        self.sort = Some((column_index, sort));
-        self.order = shown_order(&self.result, self.filtered.as_ref(), self.sort);
-        // The highlighted grid row now shows another row of the result.
-        let table = cx.entity();
-        cx.defer(move |cx| table.update(cx, TableState::clear_selection));
+        self.sort_by(column_index, sort);
+        cx.notify();
     }
 
     fn context_menu(
@@ -178,6 +336,14 @@ impl TableDelegate for ResultsTable {
             })
         };
         let mut menu = menu
+            .when(self.cells.is_some(), |menu| {
+                menu.menu("Copy selection", Box::new(CopySelection))
+                    .menu(
+                        "Copy selection with headers",
+                        Box::new(CopySelectionWithHeaders),
+                    )
+                    .separator()
+            })
             .item(copy_row("Copy row", Headers::Omit))
             .item(copy_row("Copy row with headers", Headers::Include));
         if self.result.rows.len() <= MAX_COPIED_ROWS
@@ -357,6 +523,57 @@ mod tests {
         assert_eq!(shown.chars().count(), MAX_CELL_CHARACTERS + 1);
         assert!(shown.ends_with('…'));
         assert_eq!(single_line("short"), "short");
+    }
+
+    #[test]
+    fn presses_and_drags_select_a_rectangle() {
+        let mut table = ResultsTable::default();
+        assert!(!table.drag_to(3, 3, true));
+        table.press_cell(4, 2, false);
+        assert!(table.drag_to(1, 0, true));
+        let range = table.cells.unwrap();
+        assert_eq!(range.rows(), 1..=4);
+        assert_eq!(range.columns(), 0..3);
+        assert!(range.contains(2, 1) && !range.contains(2, 3));
+        // A move with the button up ends the drag.
+        assert!(!table.drag_to(9, 9, false));
+        assert_eq!(table.cells.unwrap().focus, (1, 0));
+        table.press_cell(6, 1, true);
+        assert_eq!(table.cells.unwrap().anchor, (4, 2));
+        table.press_cell(6, 1, false);
+        assert_eq!(table.cells.unwrap().rows(), 6..=6);
+    }
+
+    #[test]
+    fn copies_selected_cells_in_grid_order() {
+        let column = |name: &str| sql_db::Column {
+            name: name.to_owned(),
+            type_name: "int".to_owned(),
+        };
+        let mut table = ResultsTable::default();
+        table.set_result(Arc::new(ResultSet::new(
+            vec![column("id"), column("name"), column("note")],
+            vec![
+                vec![Value::Int(1), Value::Text("a".to_owned()), Value::Null],
+                vec![Value::Int(2), Value::Null, Value::Null],
+                vec![Value::Int(3), Value::Text("c\td".to_owned()), Value::Null],
+            ],
+        )));
+        assert_eq!(table.copy_selected(Headers::Include), CopiedRows::Nothing);
+        table.press_cell(0, 0, false);
+        table.sort_by(0, ColumnSort::Descending);
+        // Sorting clears the selection: its grid rows now show other rows.
+        assert_eq!(table.copy_selected(Headers::Omit), CopiedRows::Nothing);
+        table.press_cell(0, 0, false);
+        table.drag_to(1, 1, true);
+        assert_eq!(
+            table.copy_selected(Headers::Include),
+            CopiedRows::Text("id\tname\n3\t\"c\td\"\n2\t\n".to_owned())
+        );
+        assert_eq!(
+            table.copy_selected(Headers::Omit),
+            CopiedRows::Text("3\t\"c\td\"\n2\t\n".to_owned())
+        );
     }
 
     #[test]

@@ -13,13 +13,13 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::{
-    AnyElement, AsyncApp, Context, IntoElement, ParentElement as _, Styled as _, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    AnyElement, AsyncApp, ClipboardItem, Context, InteractiveElement as _, IntoElement,
+    ParentElement as _, Styled as _, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
-use sql_db::{QueryOutput, ResultSet};
+use sql_db::{Headers, QueryOutput, ResultSet};
 
 use super::{CancelQuery, ExportCsv, ExportJson, QueryState, QueryTab};
-use crate::results_table::matching_rows;
+use crate::results_table::{CopiedRows, CopySelection, CopySelectionWithHeaders, matching_rows};
 
 /// Wait after the last key before the grid is filtered.
 const FILTER_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
@@ -64,8 +64,6 @@ impl QueryTab {
         self.results.update(cx, |table, cx| {
             table.delegate_mut().set_result(shown);
             table.refresh(cx);
-            // A selection would point at a row of the result shown before.
-            table.clear_selection(cx);
             cx.notify();
         });
         // The filter text stays while results change, so it applies to this one too.
@@ -110,11 +108,21 @@ impl QueryTab {
         }));
     }
 
+    /// Puts the selected grid cells on the clipboard as tab-separated text.
+    fn copy_rows(&mut self, headers: Headers, window: &mut Window, cx: &mut Context<Self>) {
+        match self.results.read(cx).delegate().copy_selected(headers) {
+            CopiedRows::Nothing => {}
+            CopiedRows::TooMany(count) => window.push_notification(
+                format!("{count} rows are too many to copy; use Export CSV."),
+                cx,
+            ),
+            CopiedRows::Text(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+        }
+    }
+
     fn apply_filter(&mut self, rows: Option<Vec<usize>>, cx: &mut Context<Self>) {
         self.results.update(cx, |table, cx| {
             table.delegate_mut().set_filtered(rows);
-            // A selection would point at another row now.
-            table.clear_selection(cx);
             cx.notify();
         });
         cx.notify();
@@ -402,6 +410,14 @@ impl QueryTab {
                         .min_h_0()
                         // The rows on screen are the previous run's until this one ends.
                         .when(self.is_running(), |grid| grid.opacity(0.35))
+                        .on_action(cx.listener(|this, _: &CopySelection, window, cx| {
+                            this.copy_rows(Headers::Omit, window, cx);
+                        }))
+                        .on_action(
+                            cx.listener(|this, _: &CopySelectionWithHeaders, window, cx| {
+                                this.copy_rows(Headers::Include, window, cx);
+                            }),
+                        )
                         .child(DataTable::new(&self.results).stripe(true).bordered(false)),
                 )
                 .children(self.render_results_footer(cx))
