@@ -19,7 +19,8 @@ use crate::settings;
 use crate::themes::{self, SelectTheme};
 use crate::updater::CheckForUpdates;
 use crate::workspace::{
-    AddConnection, CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
+    AddConnection, CloseTab, FindInFolders, NewTab, NextTab, OpenFile, OpenFolder, PreviousTab,
+    ReopenClosedTab, ShowHistory,
 };
 use sql_text::format::KeywordCase;
 
@@ -83,6 +84,18 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
         command("Query", "Format SQL", &["pretty", "indent"], FormatSql),
         command("Tabs", "New tab", &["open"], NewTab),
         command("Files", "Open file", &["sql", "load"], OpenFile),
+        command(
+            "Files",
+            "Open folder",
+            &["directory", "project", "tree"],
+            OpenFolder,
+        ),
+        command(
+            "Files",
+            "Find in folder",
+            &["search", "grep", "text"],
+            FindInFolders,
+        ),
         command("Files", "Save", &["file", "write"], SaveFile),
         command("Files", "Save as", &["file", "write", "copy"], SaveFileAs),
         command(

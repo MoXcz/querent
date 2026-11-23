@@ -90,6 +90,20 @@ impl QueryTab {
         cx.notify();
     }
 
+    /// The tab's file was renamed or moved; its text and saved state stay as they were.
+    pub fn move_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file.path = Some(path);
+        cx.notify();
+    }
+
+    /// The file is gone; the tab's text now counts as unsaved, so Save writes it back knowingly.
+    pub fn forget_saved_state(&mut self, cx: &mut Context<Self>) {
+        self.file.saved_fingerprint = None;
+        self.file.disk_modified = None;
+        self.file.modified = true;
+        cx.notify();
+    }
+
     /// Ties a tab restored from the session back to its file.
     pub fn restore_file(&mut self, path: PathBuf, modified: bool, cx: &mut Context<Self>) {
         self.file.path = Some(path);

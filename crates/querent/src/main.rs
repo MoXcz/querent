@@ -5,6 +5,9 @@ mod command_palette;
 mod connection_form;
 mod connections;
 mod database_picker;
+mod file_explorer;
+mod find_in_folder;
+mod folders;
 mod history;
 mod lsp_servers;
 mod object_explorer;
@@ -35,8 +38,8 @@ use crate::query_tab::{
     PasteSelectionOrLine, RunAll, RunQuery, SaveFile, SaveFileAs, ToggleVimMode,
 };
 use crate::workspace::{
-    CloseTab, NewTab, NextTab, OpenFile, PreviousTab, ReopenClosedTab, ShowHistory,
-    WORKSPACE_CONTEXT, Workspace,
+    CloseTab, FindInFolders, NewTab, NextTab, OpenFile, OpenFolder, PreviousTab, ReopenClosedTab,
+    ShowHistory, WORKSPACE_CONTEXT, Workspace,
 };
 
 const KEY_CONTEXT: &str = "SqlEditor";
@@ -110,6 +113,12 @@ fn bind_keys(cx: &mut App) {
     } else {
         ("ctrl-o", "ctrl-s", "ctrl-shift-s", "ctrl-shift-t")
     };
+    // ctrl-shift and alt chords pass vim's normal mode untouched.
+    let (open_folder, find_in_folders) = if cfg!(target_os = "macos") {
+        ("cmd-shift-o", "cmd-alt-f")
+    } else {
+        ("ctrl-shift-o", "ctrl-alt-f")
+    };
     let (palette, open_settings, history) = if cfg!(target_os = "macos") {
         ("cmd-shift-p", "cmd-,", "cmd-shift-h")
     } else {
@@ -150,6 +159,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new(save_as, SaveFileAs, Some(KEY_CONTEXT)),
         KeyBinding::new(open_file, OpenFile, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(reopen_tab, ReopenClosedTab, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(open_folder, OpenFolder, Some(WORKSPACE_CONTEXT)),
+        KeyBinding::new(find_in_folders, FindInFolders, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(new_tab, NewTab, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(palette, OpenCommandPalette, Some(WORKSPACE_CONTEXT)),
         KeyBinding::new(open_settings, OpenSettings, Some(WORKSPACE_CONTEXT)),

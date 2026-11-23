@@ -32,6 +32,9 @@ self-replace.workspace = true
 flate2.workspace = true
 tar.workspace = true
 zip.workspace = true
+ignore.workspace = true
+regex.workspace = true
+trash.workspace = true
 
 [lints]
 workspace = true

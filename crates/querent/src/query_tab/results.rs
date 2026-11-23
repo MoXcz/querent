@@ -121,7 +121,7 @@ impl QueryTab {
     }
 
     /// Puts the cursor at the start of a 1-based line of the editor.
-    fn go_to_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn go_to_line(&mut self, line: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
             let offset = editor.text().line_start_offset(line.saturating_sub(1));
             editor.set_selected_range(offset..offset, cx);

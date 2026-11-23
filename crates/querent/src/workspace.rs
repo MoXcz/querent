@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
@@ -18,11 +18,14 @@ use gpui_kit::{
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
 use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
+use crate::file_explorer::{FileExplorer, FileExplorerEvent};
+use crate::find_in_folder::{FindEvent, FindInFolder};
+use crate::folders;
 use crate::history::{self, HistoryEntry};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, FileText, QueryTab, read_sql_file};
-use crate::session::{self, SavedTab, Session};
+use crate::session::{self, SavedTab, Session, SidebarView};
 use crate::tokio_bridge;
 
 pub const WORKSPACE_CONTEXT: &str = "Workspace";
@@ -45,12 +48,26 @@ actions!(
         /// Open `.sql` files, each in a tab.
         OpenFile,
         /// Bring back the tab closed last.
-        ReopenClosedTab
+        ReopenClosedTab,
+        /// Open a folder in the sidebar's file tree.
+        OpenFolder,
+        /// Search the text of the files in the open folders.
+        FindInFolders
     ]
 );
 
+/// What to do once a file is open in a tab.
+#[derive(Debug, Clone, Copy, Default)]
+struct FileOpening {
+    run: bool,
+    /// 1-based line to put the cursor on.
+    line: Option<usize>,
+}
+
 struct OpenTab {
     view: Entity<QueryTab>,
+    /// Running when last observed, so the start of a run is seen once.
+    was_running: bool,
     _observation: Subscription,
 }
 
@@ -60,6 +77,12 @@ pub struct Workspace {
     next_tab_number: usize,
     explorer: Entity<ObjectExplorer>,
     _explorer_subscription: Subscription,
+    file_explorer: Entity<FileExplorer>,
+    _file_explorer_subscription: Subscription,
+    sidebar: SidebarView,
+    /// The open Find in Folder dialog's events.
+    find_subscription: Option<Subscription>,
+    open_folder_task: Option<Task<()>>,
     _servers_observation: Subscription,
     _quit_subscription: Subscription,
     /// Pending session write; tabs notify often, so writes are batched.
@@ -79,12 +102,20 @@ impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let explorer = cx.new(|cx| ObjectExplorer::new(window, cx));
         let explorer_subscription = cx.subscribe_in(&explorer, window, Self::on_explorer_event);
+        let file_explorer = cx.new(|cx| FileExplorer::new(window, cx));
+        let file_explorer_subscription =
+            cx.subscribe_in(&file_explorer, window, Self::on_file_explorer_event);
         let mut workspace = Self {
             tabs: Vec::new(),
             active_index: 0,
             next_tab_number: 1,
             explorer,
             _explorer_subscription: explorer_subscription,
+            file_explorer,
+            _file_explorer_subscription: file_explorer_subscription,
+            sidebar: SidebarView::default(),
+            find_subscription: None,
+            open_folder_task: None,
             // The status line shows the active tab's language server.
             _servers_observation: cx.observe_global::<LspServers>(|_, cx| cx.notify()),
             _quit_subscription: cx.on_app_quit(|workspace, cx| {
@@ -163,6 +194,9 @@ impl Workspace {
     /// Reopens the saved tabs; a connection deleted since is left unset.
     fn restore(&mut self, saved: Session, window: &mut Window, cx: &mut Context<Self>) {
         let active = saved.active;
+        self.sidebar = saved.sidebar;
+        self.file_explorer
+            .update(cx, |explorer, cx| explorer.restore(saved.folders, cx));
         for tab in saved.tabs {
             self.open_saved_tab(tab, window, cx);
         }
@@ -231,7 +265,7 @@ impl Workspace {
                 }
             };
             let opened = this.update_in(cx, |_, window, cx| {
-                Self::open_paths(paths, window, cx);
+                Self::open_paths(paths, FileOpening::default(), window, cx);
             });
             if let Err(error) = opened {
                 tracing::debug!(%error, "workspace closed before the files were chosen");
@@ -239,8 +273,158 @@ impl Workspace {
         }));
     }
 
-    /// Reads each file off the UI thread and shows it in a tab.
-    fn open_paths(paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_folder(&mut self, _: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: true,
+            prompt: Some("Open Folder".into()),
+        });
+        self.open_folder_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let paths = match chosen.await {
+                Ok(Ok(Some(paths))) => paths,
+                Ok(Ok(None)) | Err(_) => return,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "open folder dialog failed");
+                    return;
+                }
+            };
+            let opened = this.update(cx, |this, cx| {
+                for path in paths {
+                    this.show_folder(path, cx);
+                }
+            });
+            if let Err(error) = opened {
+                tracing::debug!(%error, "workspace closed before the folder was chosen");
+            }
+        }));
+    }
+
+    fn show_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.file_explorer
+            .update(cx, |explorer, cx| explorer.open_folder(path, cx));
+        self.sidebar = SidebarView::Files;
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
+    fn find_in_folders(&mut self, _: &FindInFolders, window: &mut Window, cx: &mut Context<Self>) {
+        let roots = self.file_explorer.read(cx).folder_paths();
+        self.open_find_dialog(roots, window, cx);
+    }
+
+    fn open_find_dialog(
+        &mut self,
+        roots: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if roots.is_empty() {
+            window.push_notification("Open a folder to search its files.", cx);
+            return;
+        }
+        let find = cx.new(|cx| FindInFolder::new(roots, window, cx));
+        self.find_subscription = Some(cx.subscribe_in(
+            &find,
+            window,
+            |_, _, event: &FindEvent, window, cx| match event {
+                FindEvent::Open { path, line } => {
+                    window.close_dialog(cx);
+                    let opening = FileOpening {
+                        run: false,
+                        line: Some(*line),
+                    };
+                    Self::open_paths(vec![path.clone()], opening, window, cx);
+                }
+            },
+        ));
+        let focus = find.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title("Find in folder")
+                .w(px(760.))
+                .child(find.clone())
+        });
+        window.defer(cx, move |window, cx| {
+            focus.update(cx, |find, cx| find.focus_input(window, cx));
+        });
+    }
+
+    fn on_file_explorer_event(
+        &mut self,
+        _: &Entity<FileExplorer>,
+        event: &FileExplorerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            FileExplorerEvent::Open { path, run } => {
+                let opening = FileOpening {
+                    run: *run,
+                    line: None,
+                };
+                Self::open_paths(vec![path.clone()], opening, window, cx);
+            }
+            FileExplorerEvent::Renamed { from, to } => {
+                for tab in &self.tabs {
+                    let moved = tab
+                        .view
+                        .read(cx)
+                        .file()
+                        .and_then(|file| folders::renamed_path(file, from, to));
+                    if let Some(path) = moved {
+                        tab.view.update(cx, |tab, cx| tab.move_file(path, cx));
+                    }
+                }
+            }
+            FileExplorerEvent::Deleted(path) => {
+                for tab in &self.tabs {
+                    let deleted = tab
+                        .view
+                        .read(cx)
+                        .file()
+                        .is_some_and(|file| file.starts_with(path));
+                    if deleted {
+                        tab.view.update(cx, QueryTab::forget_saved_state);
+                    }
+                }
+            }
+            FileExplorerEvent::FindInFolders(roots) => {
+                self.open_find_dialog(roots.clone(), window, cx);
+            }
+            FileExplorerEvent::OpenFolder => self.open_folder(&OpenFolder, window, cx),
+            FileExplorerEvent::FoldersChanged => self.schedule_session_save(cx),
+        }
+    }
+
+    /// When a run starts, notes the tab's connection on its file's folder for the next file opened there.
+    fn remember_folder_connection(&mut self, view: &Entity<QueryTab>, cx: &mut Context<Self>) {
+        let running = view.read(cx).is_running();
+        let Some(open) = self.tabs.iter_mut().find(|tab| tab.view == *view) else {
+            return;
+        };
+        let started = running && !open.was_running;
+        open.was_running = running;
+        if !started {
+            return;
+        }
+        let tab = view.read(cx);
+        let Some(file) = tab.file().map(Path::to_path_buf) else {
+            return;
+        };
+        let fields = tab.connection_fields(cx);
+        self.file_explorer.update(cx, |explorer, _| {
+            explorer.remember_connection(&file, &fields);
+        });
+    }
+
+    /// Reads each file off the UI thread and shows it in a tab; a folder opens in the file tree.
+    fn open_paths(
+        paths: Vec<PathBuf>,
+        opening: FileOpening,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Detached: a second drop must not stop the files of the first.
         cx.spawn_in(window, async move |this, cx| {
             for path in paths {
@@ -248,12 +432,13 @@ impl Workspace {
                     .background_executor()
                     .spawn({
                         let path = path.clone();
-                        async move { read_sql_file(&path) }
+                        async move { (!path.is_dir()).then(|| read_sql_file(&path)) }
                     })
                     .await;
                 let shown = this.update_in(cx, |this, window, cx| match read {
-                    Ok(file) => this.show_file(path, &file, window, cx),
-                    Err(message) => window.push_notification(message, cx),
+                    None => this.show_folder(path, cx),
+                    Some(Ok(file)) => this.show_file(path, &file, opening, window, cx),
+                    Some(Err(message)) => window.push_notification(message, cx),
                 });
                 if shown.is_err() {
                     return;
@@ -263,11 +448,12 @@ impl Workspace {
         .detach();
     }
 
-    /// Switches to the tab that has `path` open, or shows it in a blank or new tab.
+    /// Shows `path` in its tab, or a blank or new one on its folder's last connection.
     fn show_file(
         &mut self,
         path: PathBuf,
         file: &FileText,
+        opening: FileOpening,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -277,21 +463,39 @@ impl Workspace {
             .position(|tab| tab.view.read(cx).file() == Some(path.as_path()));
         if let Some(index) = already_open {
             self.activate(index, window, cx);
-            return;
-        }
-        let blank = self
-            .active_tab()
-            .is_some_and(|tab| tab.read(cx).is_blank(cx));
-        if !blank {
-            let fields = self
+        } else {
+            let folder_fields = self.file_explorer.read(cx).fields_for(&path);
+            let blank = self
                 .active_tab()
-                .map(|tab| tab.read(cx).connection_fields(cx))
-                .unwrap_or_default();
-            self.open_tab(fields, window, cx);
+                .is_some_and(|tab| tab.read(cx).is_blank(cx));
+            if blank {
+                if let (Some(fields), Some(tab)) = (&folder_fields, self.active_tab().cloned()) {
+                    tab.update(cx, |tab, cx| tab.use_fields(fields, window, cx));
+                }
+            } else {
+                let fields = folder_fields
+                    .or_else(|| {
+                        self.active_tab()
+                            .map(|tab| tab.read(cx).connection_fields(cx))
+                    })
+                    .unwrap_or_default();
+                self.open_tab(fields, window, cx);
+            }
+            if let Some(tab) = self.active_tab().cloned() {
+                tab.update(cx, |tab, cx| tab.open_file(path, file, window, cx));
+            }
         }
-        if let Some(tab) = self.active_tab().cloned() {
-            tab.update(cx, |tab, cx| tab.open_file(path, file, window, cx));
-        }
+        let Some(tab) = self.active_tab().cloned() else {
+            return;
+        };
+        tab.update(cx, |tab, cx| {
+            if let Some(line) = opening.line {
+                tab.go_to_line(line, window, cx);
+            }
+            if opening.run {
+                tab.run_everything(window, cx);
+            }
+        });
     }
 
     /// Cancels every running query on its server and waits briefly for the
@@ -322,6 +526,8 @@ impl Workspace {
                 .map(|tab| tab.view.read(cx).saved_tab(cx))
                 .collect(),
             active: self.active_index,
+            folders: self.file_explorer.read(cx).saved_folders(),
+            sidebar: self.sidebar,
         }
     }
 
@@ -556,12 +762,14 @@ impl Workspace {
         self.next_tab_number += 1;
         let view = cx.new(|cx| QueryTab::new(number, fields, window, cx));
         // Tab titles, the status line and the saved session come from the tab's state.
-        let observation = cx.observe(&view, |this, _, cx| {
+        let observation = cx.observe(&view, |this, view, cx| {
+            this.remember_folder_connection(&view, cx);
             cx.notify();
             this.schedule_session_save(cx);
         });
         self.tabs.push(OpenTab {
             view,
+            was_running: false,
             _observation: observation,
         });
         self.activate(self.tabs.len() - 1, window, cx);
@@ -765,6 +973,36 @@ impl Workspace {
             .suffix(div())
     }
 
+    fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let views = [SidebarView::Files, SidebarView::Database];
+        let selected = views
+            .iter()
+            .position(|view| *view == self.sidebar)
+            .unwrap_or_default();
+        let content = match self.sidebar {
+            SidebarView::Files => self.file_explorer.clone().into_any_element(),
+            SidebarView::Database => self.explorer.clone().into_any_element(),
+        };
+        v_flex()
+            .size_full()
+            .child(
+                TabBar::new("sidebar-views")
+                    .w_full()
+                    .xsmall()
+                    .selected_index(selected)
+                    .on_click(cx.listener(move |this, index: &usize, _, cx| {
+                        if let Some(view) = views.get(*index) {
+                            this.sidebar = *view;
+                            this.schedule_session_save(cx);
+                            cx.notify();
+                        }
+                    }))
+                    .child(Tab::new().label("Files"))
+                    .child(Tab::new().label("Database")),
+            )
+            .child(div().flex_1().min_h_0().child(content))
+    }
+
     fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status, vim_status, connection) = self
             .active_tab()
@@ -832,13 +1070,15 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::show_history))
             .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::reopen_closed_tab))
+            .on_action(cx.listener(Self::open_folder))
+            .on_action(cx.listener(Self::find_in_folders))
             .on_action(
                 cx.listener(|_, _: &crate::updater::CheckForUpdates, window, cx| {
                     crate::updater::check(true, window, cx);
                 }),
             )
             .on_drop(cx.listener(|_, dropped: &ExternalPaths, window, cx| {
-                Self::open_paths(dropped.paths().to_vec(), window, cx);
+                Self::open_paths(dropped.paths().to_vec(), FileOpening::default(), window, cx);
             }))
             .on_action(cx.listener(|_, _: &AddConnection, window, cx| {
                 Self::open_connection_dialog(None, window, cx);
@@ -863,7 +1103,7 @@ impl Render for Workspace {
                                         .size_full()
                                         .border_r_1()
                                         .border_color(cx.theme().border)
-                                        .child(self.explorer.clone()),
+                                        .child(self.render_sidebar(cx)),
                                 ),
                         )
                         .child(

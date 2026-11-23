@@ -14,6 +14,30 @@ const SESSION_FILE: &str = "session.json";
 pub struct Session {
     pub tabs: Vec<SavedTab>,
     pub active: usize,
+    /// Folders open in the sidebar, in the order they were opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub folders: Vec<SavedFolder>,
+    #[serde(default)]
+    pub sidebar: SidebarView,
+}
+
+/// What the sidebar shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarView {
+    Files,
+    #[default]
+    Database,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedFolder {
+    pub path: PathBuf,
+    /// The connection last used for a file in this folder; new tabs from it start there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub database: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +129,12 @@ mod tests {
                 modified: true,
             }],
             active: 0,
+            folders: vec![SavedFolder {
+                path: PathBuf::from("/tmp/reports"),
+                connection: Some("Fabric".to_owned()),
+                database: "analytics".to_owned(),
+            }],
+            sidebar: SidebarView::Files,
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
@@ -112,6 +142,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Session>(older).unwrap().tabs[0].sql,
             ""
+        );
+        assert_eq!(
+            serde_json::from_str::<Session>(older).unwrap().sidebar,
+            SidebarView::Database
         );
     }
 }

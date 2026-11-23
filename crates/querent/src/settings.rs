@@ -26,6 +26,8 @@ pub struct Settings {
     pub vim_mode: bool,
     /// Object explorer shows schema folders, or `schema.name` in one list.
     pub explorer_group_by_schema: bool,
+    /// The file tree shows hidden and git-ignored entries too.
+    pub files_show_all: bool,
     /// Optional language server per database kind, e.g.
     /// `[language_servers.postgres]` with `command = "sqls"`.
     pub language_servers: BTreeMap<DriverKind, LanguageServerSetting>,
@@ -45,6 +47,7 @@ impl Default for Settings {
             theme: None,
             vim_mode: true,
             explorer_group_by_schema: true,
+            files_show_all: false,
             language_servers: BTreeMap::new(),
             formatter: FormatStyle::default(),
             format_with_language_server: false,
@@ -225,6 +228,7 @@ mod tests {
             theme: Some("Solitude".to_owned()),
             vim_mode: false,
             explorer_group_by_schema: false,
+            files_show_all: true,
             language_servers: BTreeMap::from([(
                 DriverKind::Postgres,
                 LanguageServerSetting {

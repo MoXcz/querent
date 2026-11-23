@@ -347,6 +347,22 @@ impl QueryTab {
         self.fill_default_database(name, window, cx);
     }
 
+    /// Points this tab at the connection and database in `fields`.
+    pub fn use_fields(
+        &mut self,
+        fields: &ConnectionFields,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = &fields.connection else {
+            return;
+        };
+        self.use_connection(connection, window, cx);
+        if !fields.database.is_empty() {
+            self.set_database(&fields.database, window, cx);
+        }
+    }
+
     pub fn set_database(&mut self, database: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.fill_database_choices(database, window, cx);
         let value = SharedString::from(database.to_owned());

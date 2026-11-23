@@ -50,6 +50,9 @@ self-replace = "1.5"
 flate2 = "1"
 tar = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate"] }
+ignore = "0.4.34"
+regex = "1.13"
+trash = "5"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
