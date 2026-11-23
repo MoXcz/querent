@@ -44,6 +44,8 @@ With a row limit set in Settings, a single read-only statement stops on the serv
 
 While you type, a menu offers tables after `from` and `join`, the columns of `alias.`, and keywords. Hover over a table or column to see its columns or type.
 
+On SQL Server, Fabric and Snowflake, names can reach into another database on the same connection: after `from`, the menu also offers database names, `DBBI_RH.` offers that database's schemas, and `DBBI_RH.dbo.` its tables. Columns of `DBBI_RH.dbo.WB_Empleados e` complete after `e.`. The other database's names load the first time you use it, so the menu fills in a moment later.
+
 Tables and columns are read once per database in the background; "Refresh schema" in the command palette reads them again. PostgreSQL, SQLite and Snowflake tabs also underline syntax errors.
 
 A language server can add its own completions; see [Settings](settings.md#language-servers).

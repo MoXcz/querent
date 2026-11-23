@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{App, BorrowAppContext as _, Global, SharedString};
-use sql_db::{CatalogObject, ColumnInfo, Connection, Dialect, ObjectKind, SchemaColumn};
+use sql_db::{CatalogObject, ColumnInfo, Connection, ObjectKind, SchemaColumn};
 use sql_text::completion::TableRef;
 use tokio::sync::Mutex;
 
@@ -21,14 +21,13 @@ use crate::tokio_bridge;
 /// unquoted SQL do.
 #[derive(Debug, Default)]
 pub struct Schema {
-    pub dialect: Option<Dialect>,
     /// Tables and views.
     pub objects: Vec<CatalogObject>,
     columns: HashMap<(String, String), Vec<ColumnInfo>>,
 }
 
 impl Schema {
-    pub fn new(dialect: Dialect, objects: Vec<CatalogObject>, columns: Vec<SchemaColumn>) -> Self {
+    pub fn new(objects: Vec<CatalogObject>, columns: Vec<SchemaColumn>) -> Self {
         let mut by_table: HashMap<(String, String), Vec<ColumnInfo>> = HashMap::new();
         for entry in columns {
             by_table
@@ -37,7 +36,6 @@ impl Schema {
                 .push(entry.column);
         }
         Self {
-            dialect: Some(dialect),
             objects: objects
                 .into_iter()
                 .filter(|object| matches!(object.kind, ObjectKind::Table | ObjectKind::View))
@@ -253,7 +251,6 @@ fn load(cx: &mut App, entry_key: (SharedString, String)) {
     let Some(saved) = connections::find(cx, &connection_name) else {
         return;
     };
-    let dialect = saved.dialect();
     let Ok(config) = saved.config() else {
         return;
     };
@@ -279,7 +276,7 @@ fn load(cx: &mut App, entry_key: (SharedString, String)) {
         let entry = match task.await {
             Ok(Ok((objects, columns))) => {
                 tracing::debug!(objects = objects.len(), "schema loaded");
-                Entry::Loaded(Arc::new(Schema::new(dialect, objects, columns)))
+                Entry::Loaded(Arc::new(Schema::new(objects, columns)))
             }
             Ok(Err(error)) => {
                 tracing::debug!(%error, "schema load failed");
@@ -318,7 +315,6 @@ mod tests {
             }],
         );
         let schema = Schema {
-            dialect: Some(Dialect::TSql),
             objects: vec![CatalogObject {
                 schema: "dbo".to_owned(),
                 name: "Customers".to_owned(),
@@ -327,6 +323,7 @@ mod tests {
             columns,
         };
         let table = TableRef {
+            database: None,
             schema: None,
             name: "customers".to_owned(),
             alias: Some("c".to_owned()),

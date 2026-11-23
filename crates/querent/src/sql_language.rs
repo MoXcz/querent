@@ -1,6 +1,7 @@
 //! Completion and hover for the SQL editor, from the schema cache and
 //! `sql_text::completion`'s reading of the statement under the cursor.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -65,9 +66,60 @@ pub struct SqlHover {
     pub target: TabTarget,
 }
 
-/// The schema for the tab's connection and database, when loaded.
-fn tab_schema(target: &TabTarget, cx: &mut App) -> Option<Arc<Schema>> {
+/// The schemas completion and hover read: the tab's database, and the other
+/// databases the statement names, for dialects that reach across databases.
+#[derive(Default)]
+struct Catalog {
+    current_name: String,
+    current: Option<Arc<Schema>>,
+    /// Keyed by lowercase database name.
+    others: HashMap<String, Arc<Schema>>,
+    databases: Arc<Vec<SharedString>>,
+}
+
+impl Catalog {
+    /// The schema of `database`, or of the tab's database for `None`.
+    fn schema_of(&self, database: Option<&str>) -> Option<&Schema> {
+        match database {
+            None => self.current.as_deref(),
+            Some(name) if name.eq_ignore_ascii_case(&self.current_name) => self.current.as_deref(),
+            Some(name) => self.others.get(&name.to_lowercase()).map(Arc::as_ref),
+        }
+    }
+
+    fn resolve(&self, table: &TableRef) -> Option<(&sql_db::CatalogObject, &[ColumnInfo])> {
+        self.schema_of(table.database.as_deref())?.resolve(table)
+    }
+
+    fn database_named(&self, name: &str) -> Option<&SharedString> {
+        self.databases
+            .iter()
+            .find(|database| database.eq_ignore_ascii_case(name))
+    }
+}
+
+/// Other databases a statement may point at.
+#[derive(Default)]
+struct Wanted<'a> {
+    /// From three-part names, so certainly databases.
+    databases: Vec<&'a str>,
+    /// `name.` in a table clause: a database only if it is not a schema here.
+    maybe: Option<&'a str>,
+    /// Whether the list of database names is needed, to offer them after `from`.
+    list: bool,
+}
+
+/// Loads the tab's schema and those of `wanted` databases; any not loaded yet
+/// start loading and are missing until a later keystroke.
+fn tab_catalog(
+    target: &TabTarget,
+    wanted: &Wanted<'_>,
+    cx: &mut App,
+) -> Option<(Catalog, Dialect)> {
     let connection = target.connection_name(cx)?;
+    let saved = crate::connections::find(cx, &connection)?;
+    let dialect = saved.dialect();
+    let is_file = saved.settings.driver.is_file();
     let database = target
         .database
         .upgrade()?
@@ -75,13 +127,65 @@ fn tab_schema(target: &TabTarget, cx: &mut App) -> Option<Arc<Schema>> {
         .selected_value()
         .map(|database| database.trim().to_owned())
         .unwrap_or_default();
-    let database = match database.as_str() {
-        "" => crate::connections::find(cx, &connection)
-            .filter(|saved| saved.settings.driver.is_file())
-            .map(|_| "main".to_owned())?,
+    let current_name = match database.as_str() {
+        "" if is_file => "main".to_owned(),
+        "" => return None,
         database => database.to_owned(),
     };
-    schema_cache::get(cx, &connection, &database)
+    let mut catalog = Catalog {
+        current: schema_cache::get(cx, &connection, &current_name),
+        current_name,
+        ..Catalog::default()
+    };
+    let maybe = wanted.maybe.filter(|name| {
+        catalog.current.as_ref().is_none_or(|schema| {
+            !schema
+                .schemas()
+                .iter()
+                .any(|schema| schema.eq_ignore_ascii_case(name))
+        })
+    });
+    let needs_list = wanted.list || maybe.is_some() || !wanted.databases.is_empty();
+    if !needs_list || !matches!(dialect, Dialect::TSql | Dialect::Snowflake) {
+        return Some((catalog, dialect));
+    }
+    match schema_cache::databases(cx, &connection) {
+        Some(names) => catalog.databases = names,
+        None => schema_cache::load_databases(cx, &connection),
+    }
+    for &name in wanted.databases.iter().chain(&maybe) {
+        let Some(database) = catalog.database_named(name).cloned() else {
+            continue;
+        };
+        if database.eq_ignore_ascii_case(&catalog.current_name) {
+            continue;
+        }
+        if let Some(schema) = schema_cache::get(cx, &connection, &database) {
+            catalog.others.insert(database.to_lowercase(), schema);
+        }
+    }
+    Some((catalog, dialect))
+}
+
+/// The databases `context` may point at: three-part table names, and the
+/// qualifier typed before the cursor in a table clause.
+fn wanted_databases(context: &completion::CompletionContext) -> Wanted<'_> {
+    let mut wanted = Wanted {
+        databases: context
+            .tables
+            .iter()
+            .filter_map(|table| table.database.as_deref())
+            .collect(),
+        ..Wanted::default()
+    };
+    if let Expectation::Table { database, schema } = &context.expectation {
+        match (database, schema) {
+            (Some(database), _) => wanted.databases.push(database),
+            (None, Some(schema)) => wanted.maybe = Some(schema),
+            (None, None) => wanted.list = true,
+        }
+    }
+    wanted
 }
 
 impl CompletionProvider for SqlCompletions {
@@ -95,12 +199,9 @@ impl CompletionProvider for SqlCompletions {
     ) -> Task<Result<CompletionResponse>> {
         let source = text.to_string();
         let context = completion::context_at(&source, offset);
-        let schema = tab_schema(&self.target, cx);
-        let dialect = schema
-            .as_ref()
-            .and_then(|schema| schema.dialect)
-            .unwrap_or(Dialect::TSql);
-        let candidates = candidates(&context, schema.as_deref(), dialect);
+        let (catalog, dialect) = tab_catalog(&self.target, &wanted_databases(&context), cx)
+            .unwrap_or_else(|| (Catalog::default(), Dialect::TSql));
+        let candidates = candidates(&context, &catalog, dialect);
         let range = text.offset_to_position(context.replace.start)
             ..text.offset_to_position(context.replace.end);
         let prefix = context.prefix.to_lowercase();
@@ -192,59 +293,36 @@ impl CompletionProvider for SqlCompletions {
 /// Every name or keyword that fits `context`, before filtering by the prefix.
 fn candidates(
     context: &completion::CompletionContext,
-    schema: Option<&Schema>,
+    catalog: &Catalog,
     dialect: Dialect,
 ) -> Vec<Candidate> {
     let mut candidates: Vec<Candidate> = Vec::new();
     // A warehouse has thousands of names; only those the prefix fits are built.
     let prefix = context.prefix.to_lowercase();
-    match (&context.expectation, schema) {
-        (Expectation::Table { schema: wanted }, Some(schema)) => {
-            for object in &schema.objects {
-                if has_prefix(&object.name, &prefix)
-                    && wanted
-                        .as_deref()
-                        .is_none_or(|wanted| object.schema.eq_ignore_ascii_case(wanted))
-                {
-                    candidates.push(Candidate::named(
-                        dialect.name_in_sql(&object.name),
-                        CompletionItemKind::CLASS,
-                        format!(
-                            "{} {}",
-                            object.schema,
-                            object.kind.plural_label().to_lowercase()
-                        ),
-                    ));
-                }
-            }
-            if wanted.is_none() {
-                for name in schema.schemas() {
-                    candidates.push(Candidate::named(
-                        dialect.name_in_sql(name),
-                        CompletionItemKind::MODULE,
-                        "schema".to_owned(),
-                    ));
-                }
-            }
-        }
-        (
-            Expectation::Column {
-                qualifier: Some(qualifier),
-            },
-            Some(schema),
-        ) => {
+    match &context.expectation {
+        Expectation::Table { database, schema } => table_candidates(
+            &mut candidates,
+            context,
+            catalog,
+            dialect,
+            database.as_deref(),
+            schema.as_deref(),
+        ),
+        Expectation::Column {
+            qualifier: Some(qualifier),
+        } => {
             let table = context
                 .tables
                 .iter()
                 .find(|table| table.is_called(qualifier));
             let columns = table
-                .and_then(|table| schema.resolve(table))
+                .and_then(|table| catalog.resolve(table))
                 .map(|(_, columns)| columns);
             for column in columns.unwrap_or_default() {
                 candidates.push(column_candidate(dialect, column, None));
             }
         }
-        (Expectation::Column { qualifier: None }, Some(schema)) => {
+        Expectation::Column { qualifier: None } => {
             for table in &context.tables {
                 let name = table.alias.as_deref().unwrap_or(&table.name);
                 candidates.push(Candidate::named(
@@ -260,22 +338,89 @@ fn candidates(
                         table.name
                     ),
                 ));
-                if let Some((_, columns)) = schema.resolve(table) {
-                    for column in columns {
-                        if has_prefix(&column.name, &prefix) {
-                            candidates.push(column_candidate(dialect, column, Some(name)));
-                        }
+                let columns = catalog
+                    .resolve(table)
+                    .map_or(&[][..], |(_, columns)| columns);
+                for column in columns {
+                    if has_prefix(&column.name, &prefix) {
+                        candidates.push(column_candidate(dialect, column, Some(name)));
                     }
                 }
             }
             keyword_candidates(&mut candidates, &context.prefix);
         }
-        (Expectation::Table { .. } | Expectation::Column { .. }, None)
-        | (Expectation::Keyword, _) => {
-            keyword_candidates(&mut candidates, &context.prefix);
-        }
+        Expectation::Keyword => keyword_candidates(&mut candidates, &context.prefix),
     }
     candidates
+}
+
+/// Tables of the named or current database, then the schemas and databases
+/// the prefix could also start.
+fn table_candidates(
+    candidates: &mut Vec<Candidate>,
+    context: &completion::CompletionContext,
+    catalog: &Catalog,
+    dialect: Dialect,
+    database: Option<&str>,
+    wanted: Option<&str>,
+) {
+    let prefix = context.prefix.to_lowercase();
+    if let Some(schema) = catalog.schema_of(database) {
+        for object in &schema.objects {
+            if has_prefix(&object.name, &prefix)
+                && wanted.is_none_or(|wanted| object.schema.eq_ignore_ascii_case(wanted))
+            {
+                candidates.push(Candidate::named(
+                    dialect.name_in_sql(&object.name),
+                    CompletionItemKind::CLASS,
+                    format!(
+                        "{} {}",
+                        object.schema,
+                        object.kind.plural_label().to_lowercase()
+                    ),
+                ));
+            }
+        }
+    }
+    match (database, wanted) {
+        (None, None) => {
+            if let Some(schema) = catalog.schema_of(None) {
+                push_schemas(candidates, schema, dialect, "schema");
+            }
+            for name in catalog.databases.iter() {
+                if has_prefix(name, &prefix) {
+                    candidates.push(Candidate::named(
+                        dialect.name_in_sql(name),
+                        CompletionItemKind::FOLDER,
+                        "database".to_owned(),
+                    ));
+                }
+            }
+        }
+        // `name.` may be a database rather than a schema.
+        (None, Some(name)) => {
+            if let Some(schema) = catalog
+                .schema_of(Some(name))
+                .filter(|_| catalog.database_named(name).is_some())
+            {
+                push_schemas(candidates, schema, dialect, &format!("schema in {name}"));
+            }
+        }
+        (Some(_), _) => {}
+    }
+    if candidates.is_empty() && database.is_none() && wanted.is_none() {
+        keyword_candidates(candidates, &context.prefix);
+    }
+}
+
+fn push_schemas(candidates: &mut Vec<Candidate>, schema: &Schema, dialect: Dialect, detail: &str) {
+    for name in schema.schemas() {
+        candidates.push(Candidate::named(
+            dialect.name_in_sql(name),
+            CompletionItemKind::MODULE,
+            detail.to_owned(),
+        ));
+    }
 }
 
 /// Whether `name` starts with `lowered_prefix`, ignoring case, without allocating.
@@ -362,13 +507,25 @@ impl HoverProvider for SqlHover {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Option<Hover>>> {
-        let Some(schema) = tab_schema(&self.target, cx) else {
+        let source = text.to_string();
+        let tables = completion::tables_at(&source, offset);
+        let name = completion::name_at(&source, offset);
+        let mut wanted = Wanted {
+            databases: tables
+                .iter()
+                .filter_map(|table| table.database.as_deref())
+                .collect(),
+            ..Wanted::default()
+        };
+        if let Some((parts, _)) = &name
+            && let [database, _, _] = parts.as_slice()
+        {
+            wanted.databases.push(database);
+        }
+        let Some((catalog, _)) = tab_catalog(&self.target, &wanted, cx) else {
             return server_hover(&self.target, text, offset, cx);
         };
-        let source = text.to_string();
-        let markdown = completion::name_at(&source, offset).and_then(|(parts, _)| {
-            describe(&schema, &completion::tables_at(&source, offset), &parts)
-        });
+        let markdown = name.and_then(|(parts, _)| describe(&catalog, &tables, &parts));
         if let Some(value) = markdown {
             return Task::ready(Ok(Some(Hover {
                 contents: HoverContents::Markup(MarkupContent {
@@ -422,7 +579,7 @@ fn server_hover(
 }
 
 /// Markdown for the table or column `parts` names, if the schema knows it.
-fn describe(schema: &Schema, tables: &[TableRef], parts: &[String]) -> Option<String> {
+fn describe(catalog: &Catalog, tables: &[TableRef], parts: &[String]) -> Option<String> {
     let column_text = |table: &str, column: &ColumnInfo| {
         let null = if column.nullable { "null" } else { "not null" };
         format!(
@@ -446,9 +603,19 @@ fn describe(schema: &Schema, tables: &[TableRef], parts: &[String]) -> Option<St
         lines.join("\n")
     };
     match parts {
+        [database, schema, name] => {
+            let reference = TableRef {
+                database: Some(database.clone()),
+                schema: Some(schema.clone()),
+                name: name.clone(),
+                alias: None,
+            };
+            let (object, columns) = catalog.resolve(&reference)?;
+            Some(table_text(object, columns))
+        }
         [qualifier, name] => {
             if let Some(table) = tables.iter().find(|table| table.is_called(qualifier)) {
-                let (object, columns) = schema.resolve(table)?;
+                let (object, columns) = catalog.resolve(table)?;
                 let column = columns
                     .iter()
                     .find(|column| column.name.eq_ignore_ascii_case(name))?;
@@ -458,11 +625,12 @@ fn describe(schema: &Schema, tables: &[TableRef], parts: &[String]) -> Option<St
                 ));
             }
             let reference = TableRef {
+                database: None,
                 schema: Some(qualifier.clone()),
                 name: name.clone(),
                 alias: None,
             };
-            let (object, columns) = schema.resolve(&reference)?;
+            let (object, columns) = catalog.resolve(&reference)?;
             Some(table_text(object, columns))
         }
         [name] => {
@@ -471,15 +639,16 @@ fn describe(schema: &Schema, tables: &[TableRef], parts: &[String]) -> Option<St
                 .find(|table| table.is_called(name) || table.name.eq_ignore_ascii_case(name))
                 .cloned()
                 .unwrap_or_else(|| TableRef {
+                    database: None,
                     schema: None,
                     name: name.clone(),
                     alias: None,
                 });
-            if let Some((object, columns)) = schema.resolve(&as_table) {
+            if let Some((object, columns)) = catalog.resolve(&as_table) {
                 return Some(table_text(object, columns));
             }
             tables.iter().find_map(|table| {
-                let (object, columns) = schema.resolve(table)?;
+                let (object, columns) = catalog.resolve(table)?;
                 let column = columns
                     .iter()
                     .find(|column| column.name.eq_ignore_ascii_case(name))?;
@@ -510,7 +679,6 @@ mod tests {
             },
         };
         Schema::new(
-            Dialect::TSql,
             vec![
                 CatalogObject {
                     schema: "dbo".to_owned(),
@@ -531,9 +699,35 @@ mod tests {
         )
     }
 
+    /// The tab is on `Main`; `DBBI_RH` holds `dbo.WB_Empleados`.
+    fn catalog() -> Catalog {
+        let other = Schema::new(
+            vec![CatalogObject {
+                schema: "dbo".to_owned(),
+                name: "WB_Empleados".to_owned(),
+                kind: ObjectKind::Table,
+            }],
+            vec![SchemaColumn {
+                schema: "dbo".to_owned(),
+                table: "WB_Empleados".to_owned(),
+                column: ColumnInfo {
+                    name: "Nombre".to_owned(),
+                    type_name: "nvarchar".to_owned(),
+                    nullable: true,
+                },
+            }],
+        );
+        Catalog {
+            current_name: "Main".to_owned(),
+            current: Some(Arc::new(schema())),
+            others: HashMap::from([("dbbi_rh".to_owned(), Arc::new(other))]),
+            databases: Arc::new(vec!["Main".into(), "DBBI_RH".into()]),
+        }
+    }
+
     fn labels(text: &str, cursor: usize) -> Vec<String> {
         let context = completion::context_at(text, cursor);
-        candidates(&context, Some(&schema()), Dialect::TSql)
+        candidates(&context, &catalog(), Dialect::TSql)
             .into_iter()
             .map(|candidate| candidate.label)
             .collect()
@@ -574,14 +768,29 @@ mod tests {
         let found = labels("select * from ", 14);
         assert!(found.contains(&"customers".to_owned()), "{found:?}");
         assert!(found.contains(&"dbo".to_owned()), "{found:?}");
+        assert!(found.contains(&"DBBI_RH".to_owned()), "{found:?}");
+    }
+
+    #[test]
+    fn completes_names_in_another_database() {
+        let text = "select * from DBBI_RH.";
+        assert_eq!(labels(text, text.len()), vec!["dbo"]);
+        let text = "select * from DBBI_RH.dbo.";
+        assert_eq!(labels(text, text.len()), vec!["WB_Empleados"]);
+        let text = "select e. from DBBI_RH.dbo.WB_Empleados e";
+        assert_eq!(labels(text, "select e.".len()), vec!["Nombre"]);
+        let tables = completion::tables_at(text, 0);
+        let parts = ["DBBI_RH", "dbo", "WB_Empleados"].map(ToOwned::to_owned);
+        let table = describe(&catalog(), &tables, &parts).unwrap();
+        assert!(table.contains("dbo.WB_Empleados"), "{table}");
     }
 
     #[test]
     fn describes_columns_and_tables_on_hover() {
         let tables = completion::tables_at("select c.name from customers c", 0);
-        let column = describe(&schema(), &tables, &["c".to_owned(), "name".to_owned()]).unwrap();
+        let column = describe(&catalog(), &tables, &["c".to_owned(), "name".to_owned()]).unwrap();
         assert!(column.contains("**name**"), "{column}");
-        let table = describe(&schema(), &tables, &["customers".to_owned()]).unwrap();
+        let table = describe(&catalog(), &tables, &["customers".to_owned()]).unwrap();
         assert!(table.contains("dbo.customers"), "{table}");
     }
 }

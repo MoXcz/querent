@@ -109,6 +109,8 @@ const RESERVED: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRef {
+    /// Set for a three-part name, `database.schema.table`.
+    pub database: Option<String>,
     pub schema: Option<String>,
     pub name: String,
     pub alias: Option<String>,
@@ -127,8 +129,11 @@ impl TableRef {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expectation {
-    /// After `from`, `join`, `into`, `update`; `schema` when typed as `schema.`.
+    /// After `from`, `join`, `into`, `update`; `schema` when typed as `name.`,
+    /// where the name may also be a database, and `database` as well for
+    /// `database.schema.`.
     Table {
+        database: Option<String>,
         schema: Option<String>,
     },
     /// In a select list, `where`, `on`, `set`, `group by`, `order by`;
@@ -222,11 +227,21 @@ pub fn context_at(text: &str, cursor: usize) -> CompletionContext {
         .iter()
         .filter(|token| token.range.end <= replace_start)
         .collect();
-    let qualifier = match before.as_slice() {
-        [.., name, dot] if dot.kind == Kind::Dot && dot.range.end == replace_start => {
-            name.word().map(ToOwned::to_owned)
+    let (outer, qualifier) = match before.as_slice() {
+        [.., outer, outer_dot, name, dot]
+            if dot.kind == Kind::Dot
+                && dot.range.end == replace_start
+                && outer_dot.kind == Kind::Dot =>
+        {
+            (
+                outer.word().map(ToOwned::to_owned),
+                name.word().map(ToOwned::to_owned),
+            )
         }
-        _ => None,
+        [.., name, dot] if dot.kind == Kind::Dot && dot.range.end == replace_start => {
+            (None, name.word().map(ToOwned::to_owned))
+        }
+        _ => (None, None),
     };
     let expectation = match (clause_before(&before), qualifier) {
         (Clause::Table, schema) => {
@@ -236,7 +251,10 @@ pub fn context_at(text: &str, cursor: usize) -> CompletionContext {
             if after_name && schema.is_none() {
                 Expectation::Keyword
             } else {
-                Expectation::Table { schema }
+                Expectation::Table {
+                    database: outer.filter(|_| schema.is_some()),
+                    schema,
+                }
             }
         }
         (Clause::Column, qualifier) => Expectation::Column { qualifier },
@@ -379,6 +397,7 @@ fn table_ref(tokens: &[Token], start: usize) -> Option<(TableRef, usize)> {
     }
     let name = parts.pop()?;
     let schema = parts.pop();
+    let database = parts.pop();
     if tokens
         .get(index)
         .is_some_and(|token| token.is_keyword("as"))
@@ -394,6 +413,7 @@ fn table_ref(tokens: &[Token], start: usize) -> Option<(TableRef, usize)> {
     };
     Some((
         TableRef {
+            database,
             schema,
             name,
             alias,
@@ -550,11 +570,13 @@ mod tests {
             context.tables,
             vec![
                 TableRef {
+                    database: None,
                     schema: None,
                     name: "customers".to_owned(),
                     alias: Some("c".to_owned()),
                 },
                 TableRef {
+                    database: None,
                     schema: Some("sales".to_owned()),
                     name: "orders".to_owned(),
                     alias: Some("o".to_owned()),
@@ -566,12 +588,19 @@ mod tests {
     #[test]
     fn tables_after_from_and_join() {
         let context = at_end("select * from cus");
-        assert_eq!(context.expectation, Expectation::Table { schema: None });
+        assert_eq!(
+            context.expectation,
+            Expectation::Table {
+                database: None,
+                schema: None
+            }
+        );
         assert_eq!(context.prefix, "cus");
         assert_eq!(context.replace, 14..17);
         assert_eq!(
             at_end("select * from a join [dbo].").expectation,
             Expectation::Table {
+                database: None,
                 schema: Some("dbo".to_owned())
             }
         );
@@ -581,7 +610,10 @@ mod tests {
         );
         assert_eq!(
             at_end("select * from a, ").expectation,
-            Expectation::Table { schema: None }
+            Expectation::Table {
+                database: None,
+                schema: None
+            }
         );
     }
 
@@ -630,6 +662,7 @@ mod tests {
         assert_eq!(
             context_at("select * from [dbo].[", 21).expectation,
             Expectation::Table {
+                database: None,
                 schema: Some("dbo".to_owned())
             }
         );
@@ -637,6 +670,29 @@ mod tests {
         assert_eq!(tables[0].name, "cus");
         let tables = tables_at("select * from [dbé", 0);
         assert_eq!(tables[0].name, "dbé");
+    }
+
+    #[test]
+    fn database_qualified_tables() {
+        assert_eq!(
+            at_end("select * from DBBI_RH.dbo.WB").expectation,
+            Expectation::Table {
+                database: Some("DBBI_RH".to_owned()),
+                schema: Some("dbo".to_owned())
+            }
+        );
+        assert_eq!(
+            at_end("select * from [DBBI_RH].").expectation,
+            Expectation::Table {
+                database: None,
+                schema: Some("DBBI_RH".to_owned())
+            }
+        );
+        let tables = tables_at("select e. from DBBI_RH.dbo.WB_Empleados e", 0);
+        assert_eq!(tables[0].database.as_deref(), Some("DBBI_RH"));
+        assert_eq!(tables[0].schema.as_deref(), Some("dbo"));
+        assert_eq!(tables[0].name, "WB_Empleados");
+        assert_eq!(tables[0].alias.as_deref(), Some("e"));
     }
 
     #[test]
