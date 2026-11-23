@@ -1,3 +1,6 @@
+// Without this, Windows opens a console window next to the app.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod command_palette;
 mod connection_form;
 mod connections;

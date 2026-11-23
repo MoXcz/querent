@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag such as v0.2.0 builds the Linux binary and publishes a GitHub release.
+# Pushing a tag such as v0.2.0 builds the Linux and Windows binaries and publishes a GitHub release.
 on:
   push:
     tags: ["v*"]
@@ -9,21 +9,32 @@ permissions:
   contents: write
 
 jobs:
-  linux:
-    # The oldest runner image, so the binary also runs on older glibc.
-    runs-on: ubuntu-22.04
+  build:
+    strategy:
+      matrix:
+        include:
+          # The oldest Ubuntu runner image, so the binary also runs on older glibc.
+          - os: ubuntu-22.04
+            target: x86_64-linux
+          - os: windows-2022
+            target: x86_64-windows
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Check that the tag matches the workspace version
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1 | tr -d '\r')
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
             exit 1
           fi
 
       - name: Install build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
@@ -42,13 +53,40 @@ jobs:
       - name: Build
         run: cargo build --release --locked --package querent
 
-      - name: Package
+      - name: Package for Linux
+        if: runner.os == 'Linux'
         run: |
-          name="querent-$GITHUB_REF_NAME-x86_64-linux"
+          name="querent-$GITHUB_REF_NAME-${{ matrix.target }}"
           mkdir "$name"
           cp target/release/querent README.md LICENSE NOTICE.md "$name/"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Package for Windows
+        if: runner.os == 'Windows'
+        run: |
+          name="querent-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$name"
+          cp target/release/querent.exe README.md LICENSE NOTICE.md "$name/"
+          7z a "$name.zip" "$name"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: querent-${{ matrix.target }}
+          path: |
+            querent-*.tar.gz
+            querent-*.zip
+            querent-*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
 
       - name: Publish the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
@@ -57,4 +95,5 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             querent-*.tar.gz
-            querent-*.tar.gz.sha256
+            querent-*.zip
+            querent-*.sha256
