@@ -2,6 +2,21 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.4.0
+
+### dbt projects
+
+- A folder with a dbt project (`dbt_project.yml`, up to four folders down) adds a **dbt** view to the sidebar, read from `target/manifest.json`. No dbt install is needed.
+- Models, sources, seeds, snapshots, tests, analyses, macros and exposures, grouped by folder, with each model's materialization and tags. Filter by name, `tag:x` or `group:x`.
+- Expand a model to see what it reads and what reads it; click one to jump there.
+- Right-click a model to open its file or its compiled SQL, preview its rows, select from its table or view, or show it in the Database view. Preview Database on the project switches previews to another database, such as `analytics_dev`.
+- Models edited since dbt last ran are marked **changed**.
+- Completion inside `ref('` and `source('` offers the project's models and sources.
+
+### Fixes
+
+- Vim normal mode shows a solid block cursor, with the character under it in the background color, and the block shows on empty lines too.
+
 ## 0.3.1
 
 - Select a block of cells in the results grid: click a cell, then drag or Shift-click to another. A border marks the selection.

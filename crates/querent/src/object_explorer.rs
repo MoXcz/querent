@@ -11,9 +11,9 @@ use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, UniformListScrollHandle,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use sql_db::{
     CatalogObject, ColumnInfo, Connection, ConnectionConfig, Dialect, ObjectKind, QueryError,
@@ -149,6 +149,9 @@ pub struct ObjectExplorer {
     tree_version: u64,
     /// The filter, grouping and tree version `rows` was built from.
     rows_built_for: Option<(String, bool, u64)>,
+    scroll: UniformListScrollHandle,
+    /// A node `reveal` asked for, scrolled to once its row exists.
+    pending_reveal: Option<NodeId>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -175,6 +178,8 @@ impl ObjectExplorer {
             rows: Vec::new(),
             tree_version: 0,
             rows_built_for: None,
+            scroll: UniformListScrollHandle::new(),
+            pending_reveal: None,
             _subscriptions: subscriptions,
         }
     }
@@ -191,6 +196,56 @@ impl ObjectExplorer {
         self.generation += 1;
         self.tree_version += 1;
         cx.notify();
+    }
+
+    /// Opens the tree down to an object, loading each level, then selects and scrolls to it.
+    pub fn reveal(
+        &mut self,
+        connection: SharedString,
+        database: SharedString,
+        object: &CatalogObject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let kind = object.kind;
+        let schema = SharedString::from(object.schema.clone());
+        let path = [
+            NodeId::Connection(connection.clone()),
+            NodeId::Database(connection.clone(), database.clone()),
+            NodeId::Group(connection.clone(), database.clone(), kind),
+            NodeId::Schema(connection.clone(), database.clone(), kind, schema.clone()),
+        ];
+        for id in path {
+            self.expanded.insert(id.clone());
+            self.ensure_loaded(&id, cx);
+        }
+        let target = NodeId::Object(ObjectKey {
+            connection,
+            database,
+            schema,
+            name: object.name.clone().into(),
+            kind,
+        });
+        self.selected = Some(target.clone());
+        self.pending_reveal = Some(target);
+        self.filter_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.tree_version += 1;
+        cx.notify();
+    }
+
+    /// Whether a level on the way to `target` is still loading.
+    fn is_loading_toward(&self, target: &NodeId) -> bool {
+        let NodeId::Object(key) = target else {
+            return false;
+        };
+        let databases = self.databases.get(&key.connection);
+        let objects = self
+            .objects
+            .get(&(key.connection.clone(), key.database.clone()));
+        matches!(databases, None | Some(Load::Loading))
+            || (matches!(databases, Some(Load::Loaded(_)))
+                && matches!(objects, None | Some(Load::Loading)))
     }
 
     fn catalog_connection(&mut self, name: &SharedString) -> CatalogConnection {
@@ -215,6 +270,7 @@ impl ObjectExplorer {
 
     fn toggle(&mut self, id: &NodeId, cx: &mut Context<Self>) {
         self.tree_version += 1;
+        self.pending_reveal = None;
         if self.expanded.remove(id) {
             cx.notify();
             return;
@@ -897,6 +953,19 @@ impl Render for ObjectExplorer {
             self.rows = self.build_rows(cx);
             self.rows_built_for = Some(built_for);
         }
+        if let Some(target) = &self.pending_reveal {
+            let index = self
+                .rows
+                .iter()
+                .position(|row| matches!(&row.content, RowContent::Node(id) if id == target));
+            if let Some(index) = index {
+                self.scroll.scroll_to_item(index, ScrollStrategy::Center);
+                self.pending_reveal = None;
+            } else if !self.is_loading_toward(target) {
+                // Loaded without it, or failed: a later load must not scroll there.
+                self.pending_reveal = None;
+            }
+        }
         let row_count = self.rows.len();
         v_flex()
             .size_full()
@@ -959,6 +1028,7 @@ impl Render for ObjectExplorer {
                     row_count,
                     cx.processor(|this, range: Range<usize>, _, cx| this.render_rows(range, cx)),
                 )
+                .track_scroll(&self.scroll)
                 .flex_1()
                 .min_h_0(),
             )

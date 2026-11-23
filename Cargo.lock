@@ -5671,6 +5671,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sql_db",
+ "sql_dbt",
  "sql_lsp",
  "sql_text",
  "tar",
@@ -7084,6 +7085,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "sql_dbt"
+version = "0.3.1"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

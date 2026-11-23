@@ -198,6 +198,9 @@ impl CompletionProvider for SqlCompletions {
         cx: &mut App,
     ) -> Task<Result<CompletionResponse>> {
         let source = text.to_string();
+        if let Some(items) = dbt_items(text, &source, offset, cx) {
+            return Task::ready(Ok(CompletionResponse::Array(items)));
+        }
         let context = completion::context_at(&source, offset);
         let (catalog, dialect) = tab_catalog(&self.target, &wanted_databases(&context), cx)
             .unwrap_or_else(|| (Catalog::default(), Dialect::TSql));
@@ -288,6 +291,36 @@ impl CompletionProvider for SqlCompletions {
                 .chars()
                 .all(|character| character.is_alphanumeric() || matches!(character, '_' | '.'))
     }
+}
+
+/// Model and source names inside `ref('` and `source('`; `None` outside them.
+fn dbt_items(text: &Rope, source: &str, offset: usize, cx: &App) -> Option<Vec<CompletionItem>> {
+    let (start, names) = crate::dbt_explorer::completion_names(source, offset, cx)?;
+    let prefix = source.get(start..offset)?.to_lowercase();
+    let range = lsp_types::Range {
+        start: text.offset_to_position(start),
+        end: text.offset_to_position(offset),
+    };
+    Some(
+        names
+            .into_iter()
+            .filter(|(name, _)| name.to_lowercase().starts_with(&prefix))
+            .take(MAX_ITEMS)
+            .enumerate()
+            .map(|(index, (name, detail))| CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::REFERENCE),
+                detail: Some(detail.to_owned()),
+                sort_text: Some(format!("{index:04}")),
+                filter_text: Some(name.clone()),
+                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+                    range,
+                    new_text: name,
+                })),
+                ..CompletionItem::default()
+            })
+            .collect(),
+    )
 }
 
 /// Every name or keyword that fits `context`, before filtering by the prefix.

@@ -18,6 +18,7 @@ use gpui_kit::{
 use crate::command_palette::{self, OpenCommandPalette, OpenSettings};
 use crate::connection_form::ConnectionForm;
 use crate::connections::{self, SavedConnection};
+use crate::dbt_explorer::{DbtEvent, DbtExplorer, Relation};
 use crate::file_explorer::{FileExplorer, FileExplorerEvent};
 use crate::find_in_folder::{FindEvent, FindInFolder};
 use crate::folders;
@@ -80,6 +81,8 @@ pub struct Workspace {
     _explorer_subscription: Subscription,
     file_explorer: Entity<FileExplorer>,
     _file_explorer_subscription: Subscription,
+    dbt_explorer: Entity<DbtExplorer>,
+    _dbt_subscription: Subscription,
     sidebar: SidebarView,
     /// The open Find in Folder dialog's events.
     find_subscription: Option<Subscription>,
@@ -106,6 +109,8 @@ impl Workspace {
         let file_explorer = cx.new(|cx| FileExplorer::new(window, cx));
         let file_explorer_subscription =
             cx.subscribe_in(&file_explorer, window, Self::on_file_explorer_event);
+        let dbt_explorer = cx.new(|cx| DbtExplorer::new(window, cx));
+        let dbt_subscription = cx.subscribe_in(&dbt_explorer, window, Self::on_dbt_event);
         let mut workspace = Self {
             tabs: Vec::new(),
             active_index: 0,
@@ -114,6 +119,8 @@ impl Workspace {
             _explorer_subscription: explorer_subscription,
             file_explorer,
             _file_explorer_subscription: file_explorer_subscription,
+            dbt_explorer,
+            _dbt_subscription: dbt_subscription,
             sidebar: SidebarView::default(),
             find_subscription: None,
             open_folder_task: None,
@@ -230,6 +237,10 @@ impl Workspace {
         self.sidebar = saved.sidebar;
         self.file_explorer
             .update(cx, |explorer, cx| explorer.restore(saved.folders, cx));
+        self.dbt_explorer.update(cx, |explorer, _| {
+            explorer.set_preview_databases(saved.dbt_databases);
+        });
+        self.sync_dbt_folders(cx);
         for tab in saved.tabs {
             self.open_saved_tab(tab, window, cx);
         }
@@ -336,6 +347,7 @@ impl Workspace {
     fn show_folder(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.file_explorer
             .update(cx, |explorer, cx| explorer.open_folder(path, cx));
+        self.sync_dbt_folders(cx);
         self.sidebar = SidebarView::Files;
         self.schedule_session_save(cx);
         cx.notify();
@@ -426,8 +438,117 @@ impl Workspace {
                 self.open_find_dialog(roots.clone(), window, cx);
             }
             FileExplorerEvent::OpenFolder => self.open_folder(&OpenFolder, window, cx),
-            FileExplorerEvent::FoldersChanged => self.schedule_session_save(cx),
+            FileExplorerEvent::FoldersChanged => {
+                self.sync_dbt_folders(cx);
+                self.schedule_session_save(cx);
+            }
         }
+    }
+
+    fn sync_dbt_folders(&self, cx: &mut Context<Self>) {
+        let folders = self.file_explorer.read(cx).folder_paths();
+        self.dbt_explorer
+            .update(cx, |explorer, cx| explorer.set_folders(folders, cx));
+    }
+
+    /// The connection a dbt project's queries use: its folder's last one, else the active tab's.
+    fn project_fields(&self, project: &Path, cx: &App) -> ConnectionFields {
+        self.file_explorer
+            .read(cx)
+            .fields_for(project)
+            .or_else(|| {
+                self.active_tab()
+                    .map(|tab| tab.read(cx).connection_fields(cx))
+            })
+            .unwrap_or_default()
+    }
+
+    fn on_dbt_event(
+        &mut self,
+        _: &Entity<DbtExplorer>,
+        event: &DbtEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DbtEvent::OpenFile(path) => {
+                Self::open_paths(vec![path.clone()], FileOpening::default(), window, cx);
+            }
+            DbtEvent::OpenSql {
+                project,
+                sql,
+                database,
+                run,
+            } => {
+                let fields = self.project_fields(project, cx);
+                self.open_query_tab(fields, database.as_deref(), sql, *run, window, cx);
+            }
+            DbtEvent::SelectTop { project, relation } => {
+                let fields = self.project_fields(project, cx);
+                let dialect = fields
+                    .connection
+                    .as_ref()
+                    .and_then(|name| connections::find(cx, name))
+                    .map_or(sql_db::Dialect::TSql, SavedConnection::dialect);
+                let sql = sql_db::select_script(
+                    dialect,
+                    &relation_object(relation),
+                    None,
+                    Some(SELECT_TOP_ROWS),
+                );
+                self.open_query_tab(fields, Some(&relation.database), &sql, true, window, cx);
+            }
+            DbtEvent::ShowInDatabase { project, relation } => {
+                let Some(connection) = self.project_fields(project, cx).connection else {
+                    window.push_notification(
+                        "Pick a connection in a tab, or run a file from this folder, to show it in the database.",
+                        cx,
+                    );
+                    return;
+                };
+                self.sidebar = SidebarView::Database;
+                let object = relation_object(relation);
+                self.explorer.update(cx, |explorer, cx| {
+                    explorer.reveal(
+                        connection,
+                        relation.database.clone().into(),
+                        &object,
+                        window,
+                        cx,
+                    );
+                });
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
+            DbtEvent::ProjectsChanged => {
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_query_tab(
+        &mut self,
+        fields: ConnectionFields,
+        database: Option<&str>,
+        sql: &str,
+        run: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab(fields, window, cx);
+        let Some(tab) = self.active_tab().cloned() else {
+            return;
+        };
+        tab.update(cx, |tab, cx| {
+            if let Some(database) = database {
+                tab.set_database(database, window, cx);
+            }
+            tab.set_sql(sql, window, cx);
+            if run {
+                tab.run_everything(window, cx);
+            }
+        });
     }
 
     /// When a run starts, notes the tab's connection on its file's folder for the next file opened there.
@@ -562,6 +683,7 @@ impl Workspace {
             folders: self.file_explorer.read(cx).saved_folders(),
             sidebar: self.sidebar,
             last_version: Some(crate::release_notes::CURRENT_VERSION.to_owned()),
+            dbt_databases: self.dbt_explorer.read(cx).preview_databases(),
         }
     }
 
@@ -1008,15 +1130,32 @@ impl Workspace {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let views = [SidebarView::Files, SidebarView::Database];
+        // The dbt view is offered once a project is found, or while it is shown.
+        let show_dbt =
+            self.dbt_explorer.read(cx).has_projects() || self.sidebar == SidebarView::Dbt;
+        let views: Vec<SidebarView> = [SidebarView::Files, SidebarView::Dbt, SidebarView::Database]
+            .into_iter()
+            .filter(|view| *view != SidebarView::Dbt || show_dbt)
+            .collect();
         let selected = views
             .iter()
             .position(|view| *view == self.sidebar)
             .unwrap_or_default();
         let content = match self.sidebar {
             SidebarView::Files => self.file_explorer.clone().into_any_element(),
+            SidebarView::Dbt => self.dbt_explorer.clone().into_any_element(),
             SidebarView::Database => self.explorer.clone().into_any_element(),
         };
+        let tabs: Vec<Tab> = views
+            .iter()
+            .map(|view| {
+                Tab::new().label(match view {
+                    SidebarView::Files => "Files",
+                    SidebarView::Dbt => "dbt",
+                    SidebarView::Database => "Database",
+                })
+            })
+            .collect();
         v_flex()
             .size_full()
             .child(
@@ -1031,8 +1170,7 @@ impl Workspace {
                             cx.notify();
                         }
                     }))
-                    .child(Tab::new().label("Files"))
-                    .child(Tab::new().label("Database")),
+                    .children(tabs),
             )
             .child(div().flex_1().min_h_0().child(content))
     }
@@ -1189,6 +1327,22 @@ fn close_question(title: &str, modified: bool, open_transaction: bool) -> Option
         ),
     };
     Some(CloseQuestion { title, description })
+}
+
+/// Rows "Select Top" reads from a dbt model, as in the object explorer.
+const SELECT_TOP_ROWS: usize = 1000;
+
+/// The catalog object a dbt relation names; anything not a view is a table.
+fn relation_object(relation: &Relation) -> sql_db::CatalogObject {
+    sql_db::CatalogObject {
+        schema: relation.schema.clone(),
+        name: relation.name.clone(),
+        kind: if relation.is_view {
+            sql_db::ObjectKind::View
+        } else {
+            sql_db::ObjectKind::Table
+        },
+    }
 }
 
 /// Closed tabs kept for reopening.

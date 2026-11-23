@@ -61,6 +61,7 @@ Vim keys are on by default; turn them off in Settings or with "Vim mode" in the 
 | --- | --- |
 | [Connections](docs/connections.md) | sign-in methods, connection strings, encryption, Production and Read-only, where secrets are stored |
 | [Editor](docs/editor.md) | the explorer, results grid, completion, files, session and history, running without the UI |
+| [dbt](docs/dbt.md) | the dbt view: models, lineage, compiled SQL, previews |
 | [Settings](docs/settings.md) | themes, language servers, config files |
 | [Vim](docs/vim.md) | supported modes, motions and operators |
 

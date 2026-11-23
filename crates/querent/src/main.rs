@@ -5,6 +5,7 @@ mod command_palette;
 mod connection_form;
 mod connections;
 mod database_picker;
+mod dbt_explorer;
 mod file_explorer;
 mod find_in_folder;
 mod folders;
@@ -73,6 +74,7 @@ fn main() -> anyhow::Result<()> {
             connections::init(cx);
             schema_cache::init(cx);
             history::init(cx);
+            dbt_explorer::init(cx);
             lsp_servers::init(cx);
             themes::init(cx);
             command_palette::init(cx);

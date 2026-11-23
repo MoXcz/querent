@@ -1,5 +1,6 @@
 //! Open tabs and their text in `<config dir>/session.json`, restored at start.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use gpui_kit::App;
@@ -22,6 +23,9 @@ pub struct Session {
     /// The Querent version that wrote the session; a newer one shows its release notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_version: Option<String>,
+    /// Per dbt project, the database previews read instead of the manifest's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub dbt_databases: BTreeMap<PathBuf, String>,
 }
 
 /// What the sidebar shows.
@@ -29,6 +33,7 @@ pub struct Session {
 #[serde(rename_all = "snake_case")]
 pub enum SidebarView {
     Files,
+    Dbt,
     #[default]
     Database,
 }
@@ -139,6 +144,10 @@ mod tests {
             }],
             sidebar: SidebarView::Files,
             last_version: Some("0.3.0".to_owned()),
+            dbt_databases: BTreeMap::from([(
+                PathBuf::from("/tmp/reports/dbt"),
+                "analytics_dev".to_owned(),
+            )]),
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);
