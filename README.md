@@ -8,6 +8,8 @@ A desktop SQL editor written in Rust on [gpui](https://www.gpui.rs). It runs que
 cargo run --release
 ```
 
+Release builds for Linux (`.tar.gz`) and Windows (`.zip` with `querent.exe`) are attached to each GitHub release.
+
 Add a connection with `+` in the Connections sidebar. Pick the driver (SQL Server, Microsoft Fabric, PostgreSQL, SQLite or Snowflake), fill in the server, database and sign-in method, and the form asks only for that method's values:
 
 | Sign-in | Fields |
@@ -131,7 +133,7 @@ Supported:
 
 ## Themes
 
-Solitude is built in and is the default. Pick a theme in Settings (`Ctrl+,`) or type "Theme" in the command palette (`Ctrl+Shift+P`); the choice is saved in `~/.config/querent/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
+Solitude (the default), Catppuccin (Latte, Frappé, Macchiato, Mocha) and Solarized (Dark, Light) are built in. Pick a theme in Settings (`Ctrl+,`) or type "Theme" in the command palette (`Ctrl+Shift+P`); the choice is saved in `~/.config/querent/settings.toml`. To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`; it loads without a restart. A theme with the same name as a built-in one replaces it.
 
 ## Linux build dependencies
 

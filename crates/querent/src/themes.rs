@@ -15,8 +15,11 @@ use notify::Watcher as _;
 use crate::settings;
 
 pub const DEFAULT_THEME: &str = "Solitude";
-const BUILT_IN_THEMES: [(&str, &str); 1] =
-    [("solitude.json", include_str!("../themes/solitude.json"))];
+const BUILT_IN_THEMES: [(&str, &str); 3] = [
+    ("solitude.json", include_str!("../themes/solitude.json")),
+    ("catppuccin.json", include_str!("../themes/catppuccin.json")),
+    ("solarized.json", include_str!("../themes/solarized.json")),
+];
 /// Editors often write a file in several steps; wait for them to settle.
 const RELOAD_DEBOUNCE: Duration = Duration::from_millis(200);
 
@@ -183,6 +186,16 @@ mod tests {
         let solitude = configs.get(DEFAULT_THEME).expect("Solitude is built in");
         assert!(solitude.mode.is_dark());
         assert!(solitude.highlight.is_some());
+        for name in [
+            "Catppuccin Latte",
+            "Catppuccin Frappé",
+            "Catppuccin Macchiato",
+            "Catppuccin Mocha",
+            "Solarized Dark",
+            "Solarized Light",
+        ] {
+            assert!(configs.contains_key(name), "{name} is built in");
+        }
     }
 
     #[test]
