@@ -23,6 +23,7 @@ use crate::workspace::{
     AddConnection, CloseTab, FindInFolders, NewTab, NextTab, OpenFile, OpenFolder, PreviousTab,
     ReopenClosedTab, ShowHistory,
 };
+use sql_text::StatementEnd;
 use sql_text::format::KeywordCase;
 
 actions!(
@@ -482,7 +483,36 @@ fn results_group() -> SettingGroup {
             .iter()
             .map(|value| (SharedString::from(*value), SharedString::from(*value)))
             .collect();
-    SettingGroup::new().title("Results").item(
+    let statement_ends: Vec<(SharedString, SharedString)> = [
+        ("semicolon", "At ; or GO only"),
+        ("blank_line", "Also at a blank line"),
+    ]
+    .iter()
+    .map(|(value, label)| (SharedString::from(*value), SharedString::from(*label)))
+    .collect();
+    SettingGroup::new()
+        .title("Results")
+        .item(
+            SettingItem::new(
+                "Ctrl+Enter runs up to",
+                SettingField::dropdown(
+                    statement_ends,
+                    |cx| match settings::get(cx).run_statement_ends_at {
+                        StatementEnd::Semicolon => SharedString::from("semicolon"),
+                        StatementEnd::BlankLine => SharedString::from("blank_line"),
+                    },
+                    |value, cx| {
+                        let end = match value.as_ref() {
+                            "blank_line" => StatementEnd::BlankLine,
+                            _ => StatementEnd::Semicolon,
+                        };
+                        settings::update(cx, |settings| settings.run_statement_ends_at = end);
+                    },
+                ),
+            )
+            .description("With ; or GO only, a statement is never cut short, such as a delete before its where on a later line."),
+        )
+        .item(
         SettingItem::new(
             "Row limit",
             SettingField::dropdown(

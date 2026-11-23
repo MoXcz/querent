@@ -8,6 +8,7 @@ use anyhow::Context as _;
 use gpui_kit::{App, Global};
 use serde::{Deserialize, Serialize};
 use sql_db::DriverKind;
+use sql_text::StatementEnd;
 use sql_text::format::FormatStyle;
 
 use crate::lsp_servers::LanguageServerSetting;
@@ -37,6 +38,8 @@ pub struct Settings {
     pub format_with_language_server: bool,
     /// Rows kept per result set; 0 keeps every row.
     pub row_limit: usize,
+    /// What ends the statement Ctrl+Enter runs, besides `;` and `GO`.
+    pub run_statement_ends_at: StatementEnd,
     /// Ask GitHub for a newer release at startup.
     pub check_for_updates: bool,
 }
@@ -52,6 +55,7 @@ impl Default for Settings {
             formatter: FormatStyle::default(),
             format_with_language_server: false,
             row_limit: 50_000,
+            run_statement_ends_at: StatementEnd::Semicolon,
             check_for_updates: true,
         }
     }
@@ -244,6 +248,7 @@ mod tests {
             },
             format_with_language_server: true,
             row_limit: 1_000,
+            run_statement_ends_at: StatementEnd::BlankLine,
             check_for_updates: false,
         };
         let text = toml::to_string_pretty(&settings).unwrap();

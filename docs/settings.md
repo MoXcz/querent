@@ -8,6 +8,17 @@ Built in: Solitude (the default), Catppuccin (Latte, Frappé, Macchiato, Mocha) 
 
 To add a theme, drop a [gpui-kit theme file](https://github.com/longbridge/gpui-kit/tree/main/themes) into `~/.config/querent/themes/`. It loads without a restart, and a theme with the same name as a built-in one replaces it.
 
+## Running statements
+
+`Ctrl+Enter` runs the selection, or else the statement under the cursor. "Ctrl+Enter runs up to" in Settings (`run_statement_ends_at` in `settings.toml`) sets where that statement ends:
+
+| Value | A statement ends at | Use it when |
+| --- | --- | --- |
+| `semicolon` (default) | `;` or a line holding only `GO` | statements end in `;`; a `delete from t` can never run without the `where` on a later line |
+| `blank_line` | also a blank line after a complete statement | a tab holds several queries without `;` |
+
+With `blank_line`, a blank line inside parentheses, after a comma or a word such as `from`, `where` or `as`, or in a `with` before its main `select` does not end the statement, so dbt-formatted models run whole. Without any `;` in the tab, `semicolon` runs the whole tab; select a query to run only it.
+
 ## Updates
 
 At startup Querent asks GitHub for the latest release; turn this off with "Check for updates" in Settings, or run "Check for updates" from the command palette at any time. A newer release shows a notification. Click it for the release notes, or click **Update** to download the build for your system, check its minisign signature against the key built into the app, and replace the program. The new version runs after a restart.

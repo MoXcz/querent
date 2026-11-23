@@ -8,13 +8,26 @@ pub mod vim;
 
 use std::ops::Range;
 
+/// What ends the statement Ctrl+Enter runs, besides `;` and a `GO` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatementEnd {
+    /// Nothing else, so a `delete` never loses the `where` on a later line.
+    #[default]
+    Semicolon,
+    /// Also a blank line after a complete statement.
+    BlankLine,
+}
+
 /// What ends a statement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delimiters {
-    /// `;`, a line holding only `GO`, or a blank line: what the editor runs under the cursor.
+    /// `;`, a `GO` line, or a blank line after a complete statement: what syntax checks read.
     Editor,
     /// `;` only: what a server takes as one statement.
     Semicolon,
+    /// `;` or a line holding only `GO`.
+    SemicolonOrGo,
     /// A line holding only `GO`: the batches SQL Server tools send one by one.
     GoLine,
 }
@@ -22,28 +35,26 @@ pub enum Delimiters {
 impl Delimiters {
     fn splits_at_semicolon(self) -> bool {
         match self {
-            Self::Editor | Self::Semicolon => true,
+            Self::Editor | Self::Semicolon | Self::SemicolonOrGo => true,
             Self::GoLine => false,
         }
     }
 
-    fn splits_at_line(self, line: &str) -> bool {
+    /// Whether `line` ends `segment`; a blank line ends only a complete one.
+    fn splits_at_line(self, line: &str, segment: &Segment, next_starts_statement: bool) -> bool {
         let line = line.trim();
         match self {
-            Self::Editor => line.is_empty() || line.eq_ignore_ascii_case("go"),
+            Self::Editor => {
+                line.eq_ignore_ascii_case("go")
+                    || (line.is_empty() && segment.is_complete(next_starts_statement))
+            }
             Self::Semicolon => false,
-            Self::GoLine => line.eq_ignore_ascii_case("go"),
+            Self::SemicolonOrGo | Self::GoLine => line.eq_ignore_ascii_case("go"),
         }
     }
 }
 
-/// Byte ranges of the statements in `text`, trimmed of surrounding whitespace.
-///
-/// A statement ends at `;`, at a line holding only `GO`, or at a blank line,
-/// unless that delimiter is inside a string, quoted identifier, comment, or a
-/// dollar-quoted body (`$$ ... $$`, `$tag$ ... $tag$`) as PostgreSQL and
-/// Snowflake write function bodies.
-/// Comment-only segments are skipped.
+/// Byte ranges of the statements in `text` with [`Delimiters::Editor`], trimmed; comment-only ones are skipped.
 #[must_use]
 pub fn statements(text: &str) -> Vec<Range<usize>> {
     split(text, Delimiters::Editor)
@@ -63,12 +74,32 @@ pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
             b'\'' | b'"' => {
                 index = skip_quoted(bytes, index, byte).0;
                 segment.has_code = true;
+                segment.last = Last::Other;
                 continue;
             }
             b'[' => {
                 index = skip_quoted(bytes, index, b']').0;
                 segment.has_code = true;
+                segment.last = Last::Other;
                 continue;
+            }
+            byte if byte.is_ascii_alphabetic() || byte == b'_' => {
+                index = segment.read_word(text, index);
+                continue;
+            }
+            b'(' => {
+                segment.depth += 1;
+                segment.has_code = true;
+                segment.last = Last::Open;
+            }
+            b')' => {
+                segment.depth = segment.depth.saturating_sub(1);
+                segment.has_code = true;
+                segment.last = Last::Other;
+            }
+            b',' => {
+                segment.has_code = true;
+                segment.last = Last::Comma;
             }
             b'$' => {
                 if let Some(end) = skip_dollar_quoted(bytes, index) {
@@ -78,9 +109,11 @@ pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
                     }
                     index = end;
                     segment.has_code = true;
+                    segment.last = Last::Other;
                     continue;
                 }
                 segment.has_code = true;
+                segment.last = Last::Other;
             }
             b'-' if bytes.get(index + 1) == Some(&b'-') => {
                 index = skip_line_comment(bytes, index);
@@ -95,20 +128,27 @@ pub fn split(text: &str, delimiters: Delimiters) -> Vec<Range<usize>> {
                 segment = Segment::new(index + 1);
             }
             b'\n' => {
-                if delimiters.splits_at_line(text.get(line_start..index).unwrap_or_default()) {
+                let line = text.get(line_start..index).unwrap_or_default();
+                let next_starts_statement = segment.depth > 0
+                    && line.trim().is_empty()
+                    && starts_statement(text.get(index + 1..).unwrap_or_default());
+                if delimiters.splits_at_line(line, &segment, next_starts_statement) {
                     segment.finish(text, line_start, &mut statements);
                     segment = Segment::new(index + 1);
                 }
                 line_start = index + 1;
             }
-            byte if !byte.is_ascii_whitespace() => segment.has_code = true,
+            byte if !byte.is_ascii_whitespace() => {
+                segment.has_code = true;
+                segment.last = Last::Other;
+            }
             _ => {}
         }
         index += 1;
     }
 
     let last_line = text.get(line_start..).unwrap_or_default();
-    let end = if delimiters.splits_at_line(last_line) {
+    let end = if delimiters.splits_at_line(last_line, &segment, false) {
         line_start
     } else {
         text.len()
@@ -235,8 +275,12 @@ pub fn line_clip(text: &str, line: Range<usize>) -> String {
 /// one that ends on the same line before it (the usual spot after typing `;`),
 /// then the one that starts on the same line after it.
 #[must_use]
-pub fn statement_at(text: &str, cursor: usize) -> Option<Range<usize>> {
-    let statements = statements(text);
+pub fn statement_at(text: &str, cursor: usize, end: StatementEnd) -> Option<Range<usize>> {
+    let delimiters = match end {
+        StatementEnd::Semicolon => Delimiters::SemicolonOrGo,
+        StatementEnd::BlankLine => Delimiters::Editor,
+    };
+    let statements = split(text, delimiters);
     if let Some(containing) = statements
         .iter()
         .find(|range| range.start <= cursor && cursor <= range.end)
@@ -258,9 +302,86 @@ pub fn statement_at(text: &str, cursor: usize) -> Option<Range<usize>> {
         .cloned()
 }
 
+/// Words after which a statement cannot end.
+const CONTINUING_WORDS: [&str; 33] = [
+    "with",
+    "select",
+    "from",
+    "join",
+    "on",
+    "and",
+    "or",
+    "as",
+    "where",
+    "by",
+    "union",
+    "except",
+    "intersect",
+    "all",
+    "distinct",
+    "into",
+    "set",
+    "values",
+    "in",
+    "not",
+    "is",
+    "like",
+    "between",
+    "having",
+    "case",
+    "when",
+    "then",
+    "else",
+    "left",
+    "right",
+    "inner",
+    "outer",
+    "cross",
+];
+/// Words that start a statement; at the start of a line after a blank one they end an open parenthesis.
+const STATEMENT_STARTS: [&str; 13] = [
+    "select", "insert", "update", "delete", "merge", "with", "create", "alter", "drop", "exec",
+    "execute", "declare", "truncate",
+];
+
+/// Whether the first non-blank line of `rest` starts at its first column with a statement word.
+fn starts_statement(rest: &str) -> bool {
+    let Some(line) = rest.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    let word: String = line.chars().take_while(char::is_ascii_alphabetic).collect();
+    STATEMENT_STARTS
+        .iter()
+        .any(|start| word.eq_ignore_ascii_case(start))
+}
+/// Words that start the main statement after a `with` list.
+const MAIN_STATEMENTS: [&str; 5] = ["select", "insert", "update", "delete", "merge"];
+
+/// The last code a segment has seen.
+#[derive(Debug, PartialEq, Eq)]
+enum Last {
+    Nothing,
+    Comma,
+    /// A continuing word such as `from`.
+    Continuing,
+    /// `(`: a statement word on the next line opens a subquery, not a new statement.
+    Open,
+    Other,
+}
+
 struct Segment {
     start: usize,
     has_code: bool,
+    depth: usize,
+    last: Last,
+    /// The segment starts with `with` and its main statement has not started.
+    in_with_list: bool,
+    /// `set nocount on` and the like end with `on` and are complete.
+    starts_with_set: bool,
+    words: usize,
 }
 
 impl Segment {
@@ -268,7 +389,69 @@ impl Segment {
         Self {
             start,
             has_code: false,
+            depth: 0,
+            last: Last::Nothing,
+            in_with_list: false,
+            starts_with_set: false,
+            words: 0,
         }
+    }
+
+    /// Reads the word starting at `start` and returns where it ends.
+    fn read_word(&mut self, text: &str, start: usize) -> usize {
+        let bytes = text.as_bytes();
+        let end = bytes
+            .get(start..)
+            .and_then(|rest| {
+                rest.iter()
+                    .position(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+            })
+            .map_or(bytes.len(), |length| start + length);
+        // `t.on`, `@and`, `#as` and the end of `éfrom` are names, not keywords.
+        let is_name = start
+            .checked_sub(1)
+            .and_then(|previous| bytes.get(previous))
+            .is_some_and(|previous| {
+                matches!(previous, b'.' | b'@' | b'#' | b':' | b'$') || !previous.is_ascii()
+            });
+        if is_name {
+            self.has_code = true;
+            self.last = Last::Other;
+            self.words += 1;
+        } else {
+            self.add_word(text.get(start..end).unwrap_or_default());
+        }
+        end
+    }
+
+    fn add_word(&mut self, word: &str) {
+        let is = |candidates: &[&str]| {
+            candidates
+                .iter()
+                .any(|candidate| word.eq_ignore_ascii_case(candidate))
+        };
+        if self.words == 0 {
+            self.in_with_list = word.eq_ignore_ascii_case("with");
+            self.starts_with_set = word.eq_ignore_ascii_case("set");
+        } else if self.depth == 0 && is(&MAIN_STATEMENTS) {
+            self.in_with_list = false;
+        }
+        self.words += 1;
+        self.has_code = true;
+        let ends_set_option = self.starts_with_set && word.eq_ignore_ascii_case("on");
+        self.last = if is(&CONTINUING_WORDS) && !ends_set_option {
+            Last::Continuing
+        } else {
+            Last::Other
+        };
+    }
+
+    /// Whether a blank line here may end the statement.
+    fn is_complete(&self, next_starts_statement: bool) -> bool {
+        if self.depth > 0 {
+            return next_starts_statement && self.last != Last::Open;
+        }
+        !self.in_with_list && matches!(self.last, Last::Nothing | Last::Other)
     }
 
     fn finish(&self, text: &str, end: usize, statements: &mut Vec<Range<usize>>) {
@@ -412,9 +595,15 @@ mod tests {
     fn a_cursor_inside_a_multibyte_character_or_past_the_end_is_safe() {
         let text = "select 'é';\r\nselect 2";
         let inside = text.find('é').unwrap() + 1;
-        assert_eq!(statement_at(text, inside), Some(0..11));
-        assert_eq!(statement_at(text, text.len() + 10), None);
-        assert_eq!(statement_at("", 0), None);
+        assert_eq!(
+            statement_at(text, inside, StatementEnd::BlankLine),
+            Some(0..11)
+        );
+        assert_eq!(
+            statement_at(text, text.len() + 10, StatementEnd::BlankLine),
+            None
+        );
+        assert_eq!(statement_at("", 0, StatementEnd::Semicolon), None);
     }
 
     #[test]
@@ -442,6 +631,95 @@ mod tests {
     fn a_fingerprint_ignores_how_the_text_is_cut() {
         assert_eq!(fingerprint(["select 1"]), fingerprint(["sel", "", "ect 1"]));
         assert_ne!(fingerprint(["select 1"]), fingerprint(["select 2"]));
+    }
+
+    #[test]
+    fn by_default_only_a_semicolon_or_go_ends_the_statement_to_run() {
+        let at = |text: &'static str, cursor: usize| {
+            statement_at(text, cursor, StatementEnd::Semicolon).map(|range| &text[range])
+        };
+        let delete = "delete from t\n\nwhere id = 1;\nselect 1";
+        assert_eq!(at(delete, 3), Some("delete from t\n\nwhere id = 1"));
+        assert_eq!(
+            statement_at(delete, 3, StatementEnd::BlankLine).map(|range| &delete[range]),
+            Some("delete from t")
+        );
+        let script = "select 1\n\nselect 2\ngo\nselect 3";
+        assert_eq!(at(script, 0), Some("select 1\n\nselect 2"));
+        assert_eq!(at(script, script.len()), Some("select 3"));
+    }
+
+    #[test]
+    fn a_blank_line_ends_only_a_complete_statement() {
+        let found = |text: &'static str| -> Vec<&'static str> {
+            statements(text)
+                .into_iter()
+                .map(|range| &text[range])
+                .collect()
+        };
+        let model = "-- models/stg.sql (compiled)\nwith\n\nsource as (\n\n    select * from [raw].[sap].[contracts]\n\n),\n\nrenamed as (\n\n    select contract_id\n\n    from source\n\n)\n\nselect * from renamed";
+        assert_eq!(found(model), vec![model]);
+        // Two complete statements still run one at a time.
+        assert_eq!(found("select 1\n\nselect 2"), vec!["select 1", "select 2"]);
+        assert_eq!(
+            found("select a,\n\n  b\nfrom t\n\nwhere x = 1"),
+            vec!["select a,\n\n  b\nfrom t", "where x = 1"]
+        );
+        assert_eq!(found("select *\nfrom\n\nt"), vec!["select *\nfrom\n\nt"]);
+        assert_eq!(found("select f(\n\n1)"), vec!["select f(\n\n1)"]);
+        // A word that only contains a continuing word does not continue.
+        assert_eq!(found("select fromage\n\nselect 2").len(), 2);
+        // `GO` and `;` still end a `with` that never reached its select.
+        assert_eq!(found("with a as (select 1)\ngo\nselect 2").len(), 2);
+        assert_eq!(found("with a as (select 1);\n\nselect 2").len(), 2);
+        assert_eq!(
+            found("insert into t\nwith c as (select 1)\nselect * from c\n\nselect 3").len(),
+            2
+        );
+        for unfinished in [
+            "select 1 union all",
+            "insert into",
+            "update t set",
+            "select 1 where x in",
+            "select 1 where a is not",
+            "select 1 where a like",
+            "select 1 where a between",
+            "select a from t group by a having",
+            "select case when",
+            "select a from t left",
+            "select distinct",
+        ] {
+            let text = format!("{unfinished}\n\nx");
+            assert_eq!(statements(&text).len(), 1, "{unfinished}");
+        }
+        // Names that look like keywords do not hold the statement open.
+        for complete in [
+            "select t.on",
+            "select @and",
+            "select #as",
+            "select éfrom",
+            "select [from]",
+        ] {
+            let text = format!("{complete}\n\nselect 2");
+            assert_eq!(statements(&text).len(), 2, "{complete}");
+        }
+        // Delimiters inside strings and comments are not counted.
+        assert_eq!(found("select '('\n\nselect 2").len(), 2);
+        assert_eq!(found("select 1 -- (\n\nselect 2").len(), 2);
+        assert_eq!(found("select 1 from\n-- c\n\nt").len(), 1);
+        // An open parenthesis ends at `GO`, or at a statement starting a line after a blank one.
+        assert_eq!(found("select (1\ngo\nselect 2").len(), 2);
+        assert_eq!(found("select f(1,\n\nselect 2").len(), 2);
+        assert_eq!(found("select f(\n\n    select 2)").len(), 1);
+        // A subquery or CTE body right after `(` stays, even at column 0.
+        assert_eq!(
+            found("with a as (\n\nselect * from t\n\n)\nselect * from a").len(),
+            1
+        );
+        assert_eq!(found("select 1 where x in (\n\nselect 1)").len(), 1);
+        // `set ... on` is complete; `join ... on` is not.
+        assert_eq!(found("set nocount on\n\nselect 1").len(), 2);
+        assert_eq!(found("select * from a join b on\n\na.id = b.id").len(), 1);
     }
 
     #[test]
@@ -507,7 +785,7 @@ mod tests {
     }
 
     fn at(text: &str, cursor: usize) -> Option<&str> {
-        statement_at(text, cursor).map(|range| &text[range])
+        statement_at(text, cursor, StatementEnd::BlankLine).map(|range| &text[range])
     }
 
     #[test]

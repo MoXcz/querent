@@ -836,7 +836,11 @@ impl QueryTab {
         let text = editor.value();
         let selection = editor.selected_range();
         let range = if selection.is_empty() {
-            sql_text::statement_at(&text, editor.cursor())?
+            sql_text::statement_at(
+                &text,
+                editor.cursor(),
+                settings::get(cx).run_statement_ends_at,
+            )?
         } else {
             selection
         };

@@ -2,6 +2,11 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.4.1
+
+- `Ctrl+Enter` now runs up to the next `;` or `GO` line, not the next blank line. A `delete from t` followed by a blank line and `where ...` runs with its `where`, and dbt models with blank lines run whole. Without any `;` in the tab it runs the whole tab; select a query to run only it.
+- To end statements at blank lines again, set "Ctrl+Enter runs up to" in Settings to "Also at a blank line". Even then, a blank line inside parentheses, after a comma or a word such as `from`, or in a `with` before its main `select` no longer cuts the statement.
+
 ## 0.4.0
 
 ### dbt projects

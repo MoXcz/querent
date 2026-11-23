@@ -35,7 +35,7 @@ Fabric object names are case-sensitive: `INFORMATION_SCHEMA.TABLES`, not `inform
 
 | Key | Action |
 | --- | --- |
-| `Ctrl+Enter` | Run the selection, or the statement under the cursor |
+| `Ctrl+Enter` | Run the selection, or the statement under the cursor, up to `;` or `GO` ([or a blank line](docs/settings.md#running-statements)) |
 | `Ctrl+Shift+Enter` | Run everything in the tab |
 | `Ctrl+Shift+C` | Cancel the running query; in the results grid, copy the selected cells with column names |
 | `Ctrl+C` in the results grid | Copy the selected cells, ready to paste into Excel or Sheets |
