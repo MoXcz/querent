@@ -475,6 +475,7 @@ impl QueryTab {
         };
         self.show_messages = false;
         self.ran_lines = None;
+        self.last_run = None;
         self.show_result_set(&output, 0, cx);
         self.state = QueryState::Done {
             output,

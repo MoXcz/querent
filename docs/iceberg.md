@@ -28,6 +28,9 @@ lake                                   http://localhost:8181
 | To | Do |
 | --- | --- |
 | Follow a table's metadata | expand it, then Snapshots, a snapshot, a manifest |
+| See a table's rows | right-click the table > Preview Rows; up to the row limit in Settings, with deleted rows left out |
+| See the rows as of an earlier snapshot | right-click the snapshot > Preview Rows at This Snapshot |
+| See what one data file holds | right-click the file > Preview Rows; rows a delete file removed are left out |
 | See every snapshot with its summary counts | right-click the table > Open Snapshots in Grid |
 | List the files a snapshot reads | right-click the snapshot > Open Files in Grid |
 | See the schema as a table | right-click the table > Open Schema in Grid |

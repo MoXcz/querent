@@ -1,6 +1,8 @@
 //! Iceberg REST catalogs, read-only: namespaces, tables, and each table's metadata
 //! down to its manifests and files. Needs a tokio runtime; no UI.
 
+mod preview;
+
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -17,12 +19,16 @@ use iceberg_catalog_rest::{
 };
 use sql_db::{Column, ResultSet, Value};
 
+pub use preview::PreviewScope;
+
 #[derive(Debug, thiserror::Error)]
 pub enum IcebergError {
     #[error(transparent)]
     Iceberg(#[from] iceberg::Error),
     #[error("table has no snapshot {0}")]
     NoSnapshot(i64),
+    #[error("{0} is not a data file of that snapshot")]
+    NotADataFile(String),
     #[error("snapshot {snapshot} has no manifest {path}")]
     NoManifest { snapshot: i64, path: String },
 }

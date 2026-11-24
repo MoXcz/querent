@@ -293,6 +293,8 @@ impl QueryTab {
             format!("{shown} of {} rows", result.rows.len())
         };
         let truncated = result.truncated;
+        // Results shown without a query, such as an Iceberg preview, have nothing to run again.
+        let can_rerun = truncated && self.last_run.is_some();
         if truncated {
             summary.push_str(
                 " (first rows only: the row limit or the 1 GB result budget was reached)",
@@ -314,7 +316,7 @@ impl QueryTab {
                             .child(Input::new(&self.filter_input).xsmall()),
                     ),
                 )
-                .children(truncated.then(|| {
+                .children(can_rerun.then(|| {
                     Button::new("rerun-without-limit")
                         .ghost()
                         .xsmall()

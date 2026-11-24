@@ -2,6 +2,10 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.5.1
+
+- **Preview Rows** on an Iceberg table shows its first rows in the grid, up to the row limit, with rows removed by delete files left out. On a snapshot it shows the table as it was then; on a data file, what that file holds.
+
 ## 0.5.0
 
 ### Iceberg catalogs

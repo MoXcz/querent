@@ -19,7 +19,9 @@ use gpui_kit::{
     Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use sql_db::ResultSet;
-use sql_iceberg::{Catalog, CatalogConfig, FileInfo, ManifestInfo, SnapshotInfo, TableInfo};
+use sql_iceberg::{
+    Catalog, CatalogConfig, FileInfo, ManifestInfo, PreviewScope, SnapshotInfo, TableInfo,
+};
 
 use crate::session::SavedCatalog;
 use crate::{secrets, tokio_bridge};
@@ -76,7 +78,13 @@ enum TreeId {
     Section(TableKey, Section),
     Snapshot(TableKey, i64),
     Manifest(TableKey, i64, String),
-    File(TableKey, String),
+    /// A file of a snapshot; `holds_rows` is false for delete files.
+    File {
+        table: TableKey,
+        snapshot: i64,
+        path: String,
+        holds_rows: bool,
+    },
 }
 
 impl TreeId {
@@ -87,7 +95,7 @@ impl TreeId {
             | TreeId::Section(key, _)
             | TreeId::Snapshot(key, _)
             | TreeId::Manifest(key, _, _)
-            | TreeId::File(key, _) => &key.catalog,
+            | TreeId::File { table: key, .. } => &key.catalog,
         }
     }
 }
@@ -367,7 +375,7 @@ impl IcebergExplorer {
                     self.files.remove(&key);
                 }
             }
-            TreeId::Section(..) | TreeId::File(..) => {}
+            TreeId::Section(..) | TreeId::File { .. } => {}
         }
     }
 
@@ -633,6 +641,39 @@ impl IcebergExplorer {
                     .map(|manifests| sql_iceberg::manifests_result(&manifests))
             }
         });
+        Self::show_when_read(title, task, window, cx);
+    }
+
+    /// Reads up to the row limit from the table, a snapshot of it, or one data file.
+    fn preview(
+        &mut self,
+        key: &TableKey,
+        scope: PreviewScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(table) = self.table(key) else {
+            return;
+        };
+        let title = match &scope {
+            PreviewScope::Current => format!("{} rows", key.qualified()),
+            PreviewScope::Snapshot(snapshot) => {
+                format!("{} rows at snapshot {snapshot}", key.qualified())
+            }
+            PreviewScope::File { path, .. } => {
+                format!(
+                    "{} rows in {}",
+                    key.qualified(),
+                    sql_iceberg::file_name(path)
+                )
+            }
+        };
+        // 0 in Settings means no limit, as for queries.
+        let limit = match crate::settings::get(cx).row_limit {
+            0 => usize::MAX,
+            limit => limit,
+        };
+        let task = tokio_bridge::spawn(cx, async move { table.preview(&scope, limit).await });
         Self::show_when_read(title, task, window, cx);
     }
 
@@ -908,7 +949,15 @@ impl IcebergExplorer {
             TreeId::Section(..) => menu,
             TreeId::Snapshot(key, snapshot) => {
                 let (manifests, files, snapshot) = (key.clone(), key.clone(), *snapshot);
+                let preview = key.clone();
                 menu.item(item(
+                    "Preview Rows at This Snapshot",
+                    Box::new(move |this, window, cx| {
+                        this.preview(&preview, PreviewScope::Snapshot(snapshot), window, cx);
+                    }),
+                ))
+                .separator()
+                .item(item(
                     "Open Manifests in Grid",
                     Box::new(move |this, window, cx| {
                         this.show_snapshot(&manifests, snapshot, false, window, cx);
@@ -934,16 +983,47 @@ impl IcebergExplorer {
                 .separator()
                 .item(copy_item("Copy Path", path.clone()))
             }
-            TreeId::File(_, path) => {
-                let menu = menu.item(copy_item("Copy Path", path.clone()));
-                match local_path(path) {
-                    Some(local) => menu.item(
-                        PopupMenuItem::new("Reveal in File Manager")
-                            .on_click(move |_, _, cx| cx.reveal_path(&local)),
-                    ),
-                    None => menu,
-                }
-            }
+            TreeId::File {
+                table,
+                snapshot,
+                path,
+                holds_rows,
+            } => Self::file_menu(table, *snapshot, path, *holds_rows, menu, explorer),
+        }
+    }
+
+    fn file_menu(
+        table: &TableKey,
+        snapshot: i64,
+        path: &str,
+        holds_rows: bool,
+        menu: PopupMenu,
+        explorer: &WeakEntity<Self>,
+    ) -> PopupMenu {
+        let item = |label: &'static str, action: MenuAction| menu_item(explorer, label, action);
+        let mut menu = menu;
+        if holds_rows {
+            let scope = PreviewScope::File {
+                snapshot,
+                path: path.to_owned(),
+            };
+            let table = table.clone();
+            menu = menu
+                .item(item(
+                    "Preview Rows",
+                    Box::new(move |this, window, cx| {
+                        this.preview(&table, scope.clone(), window, cx);
+                    }),
+                ))
+                .separator();
+        }
+        let menu = menu.item(copy_item("Copy Path", path.to_owned()));
+        match local_path(path) {
+            Some(local) => menu.item(
+                PopupMenuItem::new("Reveal in File Manager")
+                    .on_click(move |_, _, cx| cx.reveal_path(&local)),
+            ),
+            None => menu,
         }
     }
 
@@ -957,6 +1037,17 @@ impl IcebergExplorer {
         let mut menu = menu;
         if let Some(table) = self.table(key) {
             let (schema, snapshots, files) = (key.clone(), key.clone(), key.clone());
+            if table.current_snapshot.is_some() {
+                let preview = key.clone();
+                menu = menu
+                    .item(item(
+                        "Preview Rows",
+                        Box::new(move |this, window, cx| {
+                            this.preview(&preview, PreviewScope::Current, window, cx);
+                        }),
+                    ))
+                    .separator();
+            }
             menu = menu
                 .item(item(
                     "Open Schema in Grid",
@@ -1370,7 +1461,7 @@ impl IcebergExplorer {
             }
             Some(Listing::Loaded(files)) => {
                 for file in files.iter() {
-                    rows.push(file_row(key, file, depth));
+                    rows.push(file_row(key, snapshot, file, depth));
                 }
             }
         }
@@ -1600,7 +1691,7 @@ fn value_row(depth: usize, label: &str, detail: Option<String>, copy: &str) -> R
     }
 }
 
-fn file_row(key: &TableKey, file: &FileInfo, depth: usize) -> Row {
+fn file_row(key: &TableKey, snapshot: i64, file: &FileInfo, depth: usize) -> Row {
     let mut detail = Vec::new();
     if file.content != "data" {
         detail.push(file.content.to_owned());
@@ -1614,7 +1705,12 @@ fn file_row(key: &TableKey, file: &FileInfo, depth: usize) -> Row {
         detail.push("removed".to_owned());
     }
     Row {
-        content: RowContent::Tree(TreeId::File(key.clone(), file.path.clone())),
+        content: RowContent::Tree(TreeId::File {
+            table: key.clone(),
+            snapshot,
+            path: file.path.clone(),
+            holds_rows: file.content == "data" && file.status != "deleted",
+        }),
         depth,
         label: sql_iceberg::file_name(&file.path).to_owned().into(),
         detail: Some(detail.join(" · ").into()),

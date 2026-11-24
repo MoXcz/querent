@@ -1,7 +1,7 @@
 //! Reads a running REST catalog. Set `ICEBERG_REST_URI` (such as `http://localhost:8181`)
 //! and run with `--ignored`; the catalog needs at least one table with a snapshot.
 
-use sql_iceberg::{Catalog, CatalogConfig};
+use sql_iceberg::{Catalog, CatalogConfig, PreviewScope};
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a running Iceberg REST catalog"]
@@ -36,4 +36,45 @@ async fn follows_a_table_down_to_its_files() {
             file.status, file.content, file.partition, file.record_count
         );
     }
+
+    let all = table
+        .preview(&PreviewScope::Current, usize::MAX)
+        .await
+        .unwrap();
+    let expected: u64 = files
+        .iter()
+        .filter(|file| file.content == "data" && file.status != "deleted")
+        .map(|file| file.record_count)
+        .sum();
+    let deleted: u64 = files
+        .iter()
+        .filter(|file| file.content == "position deletes" && file.status != "deleted")
+        .map(|file| file.record_count)
+        .sum();
+    eprintln!("rows {} = {expected} - {deleted}", all.rows.len());
+    assert_eq!(all.rows.len() as u64, expected - deleted);
+    assert!(!all.truncated);
+
+    let first = table.preview(&PreviewScope::Current, 5).await.unwrap();
+    assert_eq!(first.rows.len(), 5);
+    assert!(first.truncated);
+
+    let data_file = files.iter().find(|file| file.content == "data").unwrap();
+    let one = table
+        .preview(
+            &PreviewScope::File {
+                snapshot,
+                path: data_file.path.clone(),
+            },
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    assert!(one.rows.len() as u64 <= data_file.record_count);
+
+    let oldest = table.snapshots.first().unwrap().id;
+    table
+        .preview(&PreviewScope::Snapshot(oldest), 10)
+        .await
+        .unwrap();
 }
