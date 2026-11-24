@@ -10,12 +10,24 @@ cima
 │           └── fact_estado_resultados    table · finanzas
 ├── Sources (71)
 ├── Seeds, Snapshots, Tests, Analyses, Macros, Exposures
+────────────────────────────────────────────
+fact_estado_resultados · model     Back  Direct  Show in tree
+Reads from (3)
+    stg_sap__contracts             model
+    erp.gl_entries                 source
+Read by (1)
+    rpt_finanzas                   model
 ```
+
+Under the tree, the lineage panel shows what the selected model or source reads and what reads it.
 
 | To | Do |
 | --- | --- |
 | Find a model | type in the filter: part of a name, `tag:finanzas` or `group:ventas` |
-| See what a model reads and what reads it | expand it: `↑` rows are upstream, `↓` downstream; click one to jump to it |
+| See what a model reads and what reads it | select it; the panel under the tree lists both |
+| Follow the lineage further | click an entry in the panel to show its lineage there; the tree does not move. Back returns to the one before |
+| See every step, not only direct reads | click Direct in the panel to switch to All steps; each entry says how many steps away it is |
+| Find a lineage entry in the tree | double-click it, or Show in tree: opens only the folders that lead to it |
 | Open its file | double-click it, or right-click > Open File |
 | See its SQL with refs resolved | right-click > Open Compiled SQL |
 | Run it | right-click > Preview: runs the compiled SQL under the row limit |

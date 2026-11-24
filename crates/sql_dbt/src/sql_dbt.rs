@@ -3,7 +3,7 @@
 mod jinja;
 mod manifest;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -267,6 +267,34 @@ impl Project {
         nodes
     }
 
+    /// Every node reachable upstream or downstream, each with its distance in steps
+    /// (1 for a direct parent or child), nearest first.
+    #[must_use]
+    pub fn lineage_all(&self, unique_id: &str, direction: Direction) -> Vec<(&Node, usize)> {
+        let mut distances: HashMap<&str, usize> = HashMap::from([(unique_id, 0)]);
+        let mut found = Vec::new();
+        let mut frontier = vec![unique_id];
+        let mut distance = 0;
+        while !frontier.is_empty() {
+            distance += 1;
+            let mut next = Vec::new();
+            for id in frontier {
+                for node in self.lineage(id, direction) {
+                    let node_id = node.unique_id.as_str();
+                    if distances.contains_key(node_id) {
+                        continue;
+                    }
+                    distances.insert(node_id, distance);
+                    found.push((node, distance));
+                    next.push(node_id);
+                }
+            }
+            frontier = next;
+        }
+        found.sort_by_cached_key(|(node, distance)| (*distance, node.display_name()));
+        found
+    }
+
     /// The project's own nodes of `kind`; installed packages are left out.
     pub fn nodes_of(&self, kind: ResourceType) -> impl Iterator<Item = &Node> {
         self.manifest
@@ -401,9 +429,74 @@ mod tests {
             project.lineage("model.cima.a", Direction::Downstream)[0].name,
             "b"
         );
+        assert_eq!(
+            project
+                .lineage_all("model.cima.b", Direction::Downstream)
+                .len(),
+            0
+        );
         // Written after the manifest, so marked as changed since the parse.
         std::thread::sleep(std::time::Duration::from_millis(20));
         write(&root.join("models/b.sql"), "select 2");
         assert!(load(root).unwrap().stale.contains("model.cima.b"));
+    }
+
+    #[test]
+    fn follows_lineage_through_every_step_once() {
+        let folder = temp("lineage");
+        let root = &folder.0;
+        write(&root.join("dbt_project.yml"), "name: p\n");
+        // raw -> stg -> mart -> report, raw -> mart directly, and a test on stg that is left out.
+        write(
+            &root.join("target/manifest.json"),
+            r#"{"metadata": {"project_name": "p"}, "nodes": {
+                "model.p.stg": {"resource_type": "model", "name": "stg", "package_name": "p"},
+                "model.p.mart": {"resource_type": "model", "name": "mart", "package_name": "p"},
+                "model.p.report": {"resource_type": "model", "name": "report", "package_name": "p"},
+                "test.p.not_null": {"resource_type": "test", "name": "not_null", "package_name": "p"}
+            }, "sources": {
+                "source.p.erp.raw": {"resource_type": "source", "name": "raw", "source_name": "erp", "package_name": "p"}
+            }, "parent_map": {
+                "model.p.stg": ["source.p.erp.raw"],
+                "model.p.mart": ["model.p.stg", "source.p.erp.raw"],
+                "model.p.report": ["model.p.mart"],
+                "test.p.not_null": ["model.p.stg"]
+            }, "child_map": {
+                "model.p.mart": ["model.p.report"],
+                "source.p.erp.raw": ["model.p.stg", "model.p.mart"],
+                "model.p.stg": ["model.p.mart", "test.p.not_null"]
+            }}"#,
+        );
+        let project = load(root).unwrap();
+        let names = |found: Vec<(&Node, usize)>| -> Vec<(String, usize)> {
+            found
+                .into_iter()
+                .map(|(node, distance)| (node.name.clone(), distance))
+                .collect()
+        };
+        assert_eq!(
+            names(project.lineage_all("model.p.mart", Direction::Upstream)),
+            [("raw".to_owned(), 1), ("stg".to_owned(), 1)]
+        );
+        assert_eq!(
+            names(project.lineage_all("source.p.erp.raw", Direction::Downstream)),
+            [
+                ("mart".to_owned(), 1),
+                ("stg".to_owned(), 1),
+                ("report".to_owned(), 2)
+            ]
+        );
+        assert_eq!(
+            names(project.lineage_all("model.p.report", Direction::Upstream)),
+            [
+                ("mart".to_owned(), 1),
+                ("raw".to_owned(), 2),
+                ("stg".to_owned(), 2)
+            ]
+        );
+        assert_eq!(
+            names(project.lineage_all("model.p.stg", Direction::Downstream)),
+            [("mart".to_owned(), 1), ("report".to_owned(), 2)]
+        );
     }
 }

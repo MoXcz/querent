@@ -41,4 +41,15 @@ fn loads_a_real_project_and_previews_every_model() {
         project.has_catalog,
     );
     assert!(with_parents > 0);
+    let started = std::time::Instant::now();
+    let deepest = models
+        .iter()
+        .flat_map(|model| project.lineage_all(&model.unique_id, Direction::Upstream))
+        .map(|(_, distance)| distance)
+        .max()
+        .unwrap_or_default();
+    eprintln!(
+        "all upstream lineage of every model in {:?}, deepest {deepest} steps",
+        started.elapsed()
+    );
 }

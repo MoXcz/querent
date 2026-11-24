@@ -10,7 +10,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dialog::{DialogAction, DialogClose, DialogFooter};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Entity, EventEmitter,
     Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy,
@@ -22,6 +24,10 @@ use notify::Watcher as _;
 use sql_dbt::{Direction, Node, Project, ResourceType, SqlOrigin};
 
 const ROW_INDENT: f32 = 12.;
+/// The lineage panel keeps one height, so moving through it never shifts the tree.
+const LINEAGE_HEIGHT: f32 = 240.;
+/// Back steps kept; clicking through the panel would otherwise grow the list without end.
+const FOCUS_HISTORY_LIMIT: usize = 50;
 /// A dbt project often sits a few folders into a repository, such as `dags/dbt/analytics`.
 const PROJECT_SEARCH_DEPTH: usize = 4;
 /// dbt rewrites `target/` in a burst of files; the project reloads once per burst.
@@ -84,13 +90,22 @@ enum TreeId {
 
 enum RowContent {
     Tree(TreeId),
-    /// A node upstream or downstream of the node above it; a click jumps to it.
-    Link {
-        project: PathBuf,
-        unique_id: String,
-    },
     Info,
     Error,
+}
+
+/// A node whose lineage the panel under the tree shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Focus {
+    project: PathBuf,
+    unique_id: String,
+}
+
+/// How far the lineage panel follows reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageReach {
+    Direct,
+    All,
 }
 
 struct Row {
@@ -118,6 +133,11 @@ pub struct DbtExplorer {
     tree_version: u64,
     rows_built_for: Option<(String, u64)>,
     scroll: UniformListScrollHandle,
+    /// The node the lineage panel shows; moving through the panel leaves the tree as it is.
+    focus: Option<Focus>,
+    /// Nodes the panel showed before, for Back.
+    focus_history: Vec<Focus>,
+    reach: LineageReach,
     /// Bumped on every search for projects, so an older answer is dropped.
     search: u64,
     watcher: Option<notify::RecommendedWatcher>,
@@ -197,6 +217,9 @@ impl DbtExplorer {
             tree_version: 0,
             rows_built_for: None,
             scroll: UniformListScrollHandle::new(),
+            focus: None,
+            focus_history: Vec::new(),
+            reach: LineageReach::Direct,
             search: 0,
             watcher,
             _watch_task: watch_task,
@@ -248,6 +271,7 @@ impl DbtExplorer {
             self.unwatch(gone);
         }
         self.projects.retain(|(root, _)| roots.contains(root));
+        self.prune_focus();
         for root in roots {
             if !known.contains(&root) {
                 self.expanded.insert(TreeId::Project(root.clone()));
@@ -285,6 +309,7 @@ impl DbtExplorer {
                     Ok(project) => Load::Loaded(Arc::new(project)),
                     Err(error) => Load::Failed(error.to_string().into()),
                 };
+                this.prune_focus();
                 this.watch(root, target, watched);
                 this.publish_names(cx);
                 this.tree_version += 1;
@@ -419,39 +444,30 @@ impl DbtExplorer {
         cx.notify();
     }
 
-    fn on_row_click(
-        &mut self,
-        index: usize,
-        event: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_row_click(&mut self, index: usize, event: &ClickEvent, cx: &mut Context<Self>) {
         let Some(row) = self.rows.get(index) else {
             return;
         };
         match &row.content {
             RowContent::Tree(id) => {
                 let id = id.clone();
+                let expandable = row.expanded.is_some();
                 self.selected = Some(id.clone());
-                if let TreeId::Node(root, unique_id) = &id
-                    && event.click_count() == 2
-                {
-                    // The double click's first click expanded or collapsed the node.
-                    if row.expanded.is_some() {
-                        self.toggle(&id, cx);
+                if let TreeId::Node(root, unique_id) = &id {
+                    self.focus_history.clear();
+                    self.focus = Some(Focus {
+                        project: root.clone(),
+                        unique_id: unique_id.clone(),
+                    });
+                    if event.click_count() == 2 {
+                        self.open_file(root, unique_id, cx);
                     }
-                    self.open_file(root, unique_id, cx);
-                    return;
                 }
-                if row.expanded.is_some() {
+                if expandable {
                     self.toggle(&id, cx);
                 }
                 self.tree_version += 1;
                 cx.notify();
-            }
-            RowContent::Link { project, unique_id } => {
-                let (project, unique_id) = (project.clone(), unique_id.clone());
-                self.reveal(&project, &unique_id, window, cx);
             }
             RowContent::Info | RowContent::Error => {}
         }
@@ -483,8 +499,11 @@ impl DbtExplorer {
             return;
         }
         let kind = node.resource_type;
-        self.filter_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
+        // Only a filter that hides the node is cleared.
+        if !sql_dbt::matches_filter(node, &self.filter_text(cx)) {
+            self.filter_input
+                .update(cx, |input, cx| input.set_value("", window, cx));
+        }
         self.expanded.insert(TreeId::Project(root.to_path_buf()));
         self.expanded
             .insert(TreeId::Group(root.to_path_buf(), kind));
@@ -913,15 +932,12 @@ impl DbtExplorer {
                 continue;
             }
             for node in nodes {
-                self.push_node(project, node, 2 + parts.len(), rows);
+                Self::push_node(project, node, 2 + parts.len(), rows);
             }
         }
     }
 
-    fn push_node(&self, project: &Project, node: &Node, depth: usize, rows: &mut Vec<Row>) {
-        let id = TreeId::Node(project.root.clone(), node.unique_id.clone());
-        let has_lineage = node.resource_type != ResourceType::Macro;
-        let expanded = has_lineage && self.expanded.contains(&id);
+    fn push_node(project: &Project, node: &Node, depth: usize, rows: &mut Vec<Row>) {
         let mut detail: Vec<String> = Vec::new();
         if let Some(materialized) = &node.materialized
             && node.resource_type == ResourceType::Model
@@ -929,46 +945,260 @@ impl DbtExplorer {
             detail.push(materialized.clone());
         }
         detail.extend(node.tags.iter().cloned());
-        let stale = project.stale.contains(&node.unique_id);
         rows.push(Row {
-            content: RowContent::Tree(id),
+            content: RowContent::Tree(TreeId::Node(project.root.clone(), node.unique_id.clone())),
             depth,
             label: node.display_name().into(),
             detail: (!detail.is_empty()).then(|| detail.join(" · ").into()),
-            stale,
-            expanded: has_lineage.then_some(expanded),
+            stale: project.stale.contains(&node.unique_id),
+            expanded: None,
         });
-        if !expanded {
+    }
+
+    /// Shows `focus` in the lineage panel; the node shown before goes on the Back list.
+    fn focus_on(&mut self, focus: Focus, cx: &mut Context<Self>) {
+        if self.focus.as_ref() == Some(&focus) {
             return;
         }
-        for (direction, arrow) in [(Direction::Upstream, "↑"), (Direction::Downstream, "↓")] {
-            for linked in project.lineage(&node.unique_id, direction) {
-                rows.push(Row {
-                    content: RowContent::Link {
-                        project: project.root.clone(),
-                        unique_id: linked.unique_id.clone(),
-                    },
-                    depth: depth + 1,
-                    label: format!("{arrow} {}", linked.display_name()).into(),
-                    detail: Some(linked.resource_type.singular_label().into()),
-                    stale: false,
-                    expanded: None,
-                });
+        if let Some(previous) = self.focus.replace(focus)
+            && self.focus_history.last() != Some(&previous)
+        {
+            self.focus_history.push(previous);
+            if self.focus_history.len() > FOCUS_HISTORY_LIMIT {
+                self.focus_history.remove(0);
             }
         }
-        if project
-            .lineage(&node.unique_id, Direction::Upstream)
-            .is_empty()
-            && project
-                .lineage(&node.unique_id, Direction::Downstream)
-                .is_empty()
-        {
-            rows.push(info_row(
-                RowContent::Info,
-                depth + 1,
-                "Nothing upstream or downstream",
-            ));
+        cx.notify();
+    }
+
+    fn focus_back(&mut self, cx: &mut Context<Self>) {
+        while let Some(previous) = self.focus_history.pop() {
+            if !self.focus_gone(&previous) {
+                self.focus = Some(previous);
+                break;
+            }
         }
+        cx.notify();
+    }
+
+    /// Whether the node is known to be gone; a project still loading or failing to load
+    /// may bring it back, so its nodes are kept.
+    fn focus_gone(&self, focus: &Focus) -> bool {
+        match self
+            .projects
+            .iter()
+            .find(|(root, _)| *root == focus.project)
+        {
+            None => true,
+            Some((_, Load::Loaded(project))) => {
+                !project.manifest.nodes.contains_key(&focus.unique_id)
+            }
+            Some((_, Load::Loading | Load::Failed(_))) => false,
+        }
+    }
+
+    /// Forgets lineage panel nodes a reload or a closed folder took away.
+    fn prune_focus(&mut self) {
+        let history = std::mem::take(&mut self.focus_history);
+        self.focus_history = history
+            .into_iter()
+            .filter(|focus| !self.focus_gone(focus))
+            .collect();
+        if self
+            .focus
+            .as_ref()
+            .is_some_and(|focus| self.focus_gone(focus))
+        {
+            self.focus = None;
+        }
+    }
+
+    fn show_focus_in_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.focus.clone() {
+            self.reveal(&focus.project, &focus.unique_id, window, cx);
+        }
+    }
+
+    /// What the focused node reads and what reads it, nearest first.
+    fn lineage_of<'project>(
+        &self,
+        project: &'project Project,
+        unique_id: &str,
+        direction: Direction,
+    ) -> Vec<(&'project Node, usize)> {
+        match self.reach {
+            LineageReach::Direct => project
+                .lineage(unique_id, direction)
+                .into_iter()
+                .map(|node| (node, 1))
+                .collect(),
+            LineageReach::All => project.lineage_all(unique_id, direction),
+        }
+    }
+
+    fn lineage_row(
+        index: usize,
+        target: Focus,
+        name: String,
+        detail: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .id(("dbt-lineage", index))
+            .w_full()
+            .h(px(22.))
+            .pl(px(ROW_INDENT + 8.))
+            .pr_1()
+            .gap_1()
+            .text_sm()
+            .hover(|row| row.bg(cx.theme().list_hover))
+            .child(div().flex_shrink_0().max_w_full().truncate().child(name))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(detail),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.focus_on(target.clone(), cx);
+                if event.click_count() == 2 {
+                    this.show_focus_in_tree(window, cx);
+                }
+            }))
+    }
+
+    fn render_lineage_header(&self, title: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let reach_label = match self.reach {
+            LineageReach::Direct => "Direct",
+            LineageReach::All => "All steps",
+        };
+        h_flex()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .child(div().flex_1().min_w_0().truncate().text_sm().child(title))
+            .child(
+                Button::new("dbt-lineage-back")
+                    .label("Back")
+                    .ghost()
+                    .xsmall()
+                    .disabled(self.focus_history.is_empty())
+                    .on_click(cx.listener(|this, _, _, cx| this.focus_back(cx))),
+            )
+            .child(
+                Button::new("dbt-lineage-reach")
+                    .label(reach_label)
+                    .ghost()
+                    .xsmall()
+                    .tooltip("Direct reads only, or every step up and down")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reach = match this.reach {
+                            LineageReach::Direct => LineageReach::All,
+                            LineageReach::All => LineageReach::Direct,
+                        };
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("dbt-lineage-reveal")
+                    .label("Show in tree")
+                    .ghost()
+                    .xsmall()
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.show_focus_in_tree(window, cx)),
+                    ),
+            )
+    }
+
+    fn render_lineage(&self, cx: &mut Context<Self>) -> AnyElement {
+        let panel = v_flex()
+            .h(px(LINEAGE_HEIGHT))
+            .flex_shrink_0()
+            .border_t_1()
+            .border_color(cx.theme().border);
+        let shown = self.focus.as_ref().and_then(|focus| {
+            let project = self.project(&focus.project)?;
+            let node = project.manifest.nodes.get(&focus.unique_id)?;
+            let title = format!(
+                "{} · {}",
+                node.display_name(),
+                node.resource_type.singular_label()
+            );
+            Some((focus.clone(), project, title))
+        });
+        let Some((focus, project, title)) = shown else {
+            return panel
+                .child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("LINEAGE"),
+                )
+                .child(
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Select a model or source to see what it reads and what reads it."),
+                )
+                .into_any_element();
+        };
+        let mut list = v_flex()
+            .id("dbt-lineage-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .pb_1();
+        let mut index: usize = 0;
+        for (direction, title) in [
+            (Direction::Upstream, "Reads from"),
+            (Direction::Downstream, "Read by"),
+        ] {
+            let found = self.lineage_of(&project, &focus.unique_id, direction);
+            list = list.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("{title} ({})", found.len())),
+            );
+            if found.is_empty() {
+                list = list.child(
+                    div()
+                        .pl(px(ROW_INDENT + 8.))
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Nothing"),
+                );
+            }
+            for (linked, distance) in found {
+                let target = Focus {
+                    project: focus.project.clone(),
+                    unique_id: linked.unique_id.clone(),
+                };
+                let kind = linked.resource_type.singular_label();
+                let detail = if distance > 1 {
+                    format!("{kind} · {distance} steps")
+                } else {
+                    kind.to_owned()
+                };
+                list = list.child(Self::lineage_row(
+                    index,
+                    target,
+                    linked.display_name(),
+                    detail,
+                    cx,
+                ));
+                index += 1;
+            }
+        }
+        let header = self.render_lineage_header(title, cx);
+        panel.child(header).child(list).into_any_element()
     }
 
     fn render_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -986,7 +1216,7 @@ impl DbtExplorer {
                 let text_color = match &row.content {
                     RowContent::Error => cx.theme().danger,
                     RowContent::Info => cx.theme().muted_foreground,
-                    RowContent::Tree(_) | RowContent::Link { .. } => cx.theme().foreground,
+                    RowContent::Tree(_) => cx.theme().foreground,
                 };
                 let base = h_flex()
                     .id(("dbt-row", index))
@@ -1025,8 +1255,8 @@ impl DbtExplorer {
                             .text_color(cx.theme().muted_foreground)
                             .child(detail)
                     }))
-                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                        this.on_row_click(index, event, window, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.on_row_click(index, event, cx);
                     }));
                 let element = match &row.content {
                     RowContent::Tree(id) => {
@@ -1043,7 +1273,7 @@ impl DbtExplorer {
                         })
                         .into_any_element()
                     }
-                    RowContent::Link { .. } | RowContent::Info | RowContent::Error => base.into_any_element(),
+                    RowContent::Info | RowContent::Error => base.into_any_element(),
                 };
                 Some(element)
             })
@@ -1097,6 +1327,9 @@ impl Render for DbtExplorer {
                 .flex_1()
                 .min_h_0(),
             )
+            .when(!self.projects.is_empty(), |sidebar| {
+                sidebar.child(self.render_lineage(cx))
+            })
     }
 }
 

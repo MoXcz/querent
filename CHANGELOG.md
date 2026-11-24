@@ -2,6 +2,12 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.6.0
+
+- The dbt view shows lineage in a panel under the tree instead of inside it. Select a model or source to see what it reads and what reads it; models no longer expand into `↑` and `↓` rows.
+- Clicking an entry in the panel shows that node's lineage without moving the tree. **Back** returns to the previous one, **All steps** lists everything upstream and downstream with how many steps away it is, and **Show in tree** (or a double-click) opens only the folders that lead to it.
+- Show in tree keeps the filter when it already matches the node.
+
 ## 0.5.1
 
 - **Preview Rows** on an Iceberg table shows its first rows in the grid, up to the row limit, with rows removed by delete files left out. On a snapshot it shows the table as it was then; on a data file, what that file holds.
