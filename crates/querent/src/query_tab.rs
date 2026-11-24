@@ -467,6 +467,24 @@ impl QueryTab {
         self.schedule_syntax_check(cx);
     }
 
+    /// Shows a result read without a query, such as Iceberg metadata, as if a run returned it.
+    pub fn show_output(&mut self, result: ResultSet, cx: &mut Context<Self>) {
+        let output = QueryOutput {
+            result_sets: vec![Arc::new(result)],
+            ..QueryOutput::default()
+        };
+        self.show_messages = false;
+        self.ran_lines = None;
+        self.show_result_set(&output, 0, cx);
+        self.state = QueryState::Done {
+            output,
+            elapsed: Duration::ZERO,
+            failed: false,
+            error_line: None,
+        };
+        cx.notify();
+    }
+
     /// Inserts at the editor's cursor, replacing any selection.
     pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {

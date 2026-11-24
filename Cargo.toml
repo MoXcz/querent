@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sql_db", "crates/querent", "crates/sql_lsp", "crates/sql_text", "crates/sql_dbt"]
+members = ["crates/sql_db", "crates/querent", "crates/sql_lsp", "crates/sql_text", "crates/sql_dbt", "crates/sql_iceberg"]
 
 [workspace.package]
 edition = "2024"
@@ -13,6 +13,7 @@ sql_db = { path = "crates/sql_db" }
 sql_text = { path = "crates/sql_text" }
 sql_lsp = { path = "crates/sql_lsp" }
 sql_dbt = { path = "crates/sql_dbt" }
+sql_iceberg = { path = "crates/sql_iceberg" }
 anyhow = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
@@ -54,6 +55,9 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 ignore = "0.4.34"
 regex = "1.13"
 trash = "5"
+iceberg = "0.11"
+iceberg-catalog-rest = "0.11"
+reqwest-rest-catalog = { package = "reqwest", version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

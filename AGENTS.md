@@ -42,9 +42,10 @@ crates/
   sql_text/                # pure logic: statement under cursor, vim state machine
   sql_lsp/                 # language server client over stdio, no UI
   sql_dbt/                 # dbt project from target/manifest.json: nodes, lineage, ref() rendering; no UI
+  sql_iceberg/             # Iceberg REST catalogs: tables, snapshots, manifests, files; no UI
 ```
 
-`sql_text`, `sql_db`, `sql_lsp` and `sql_dbt` never depend on gpui. Logic that can be tested without a window goes in `sql_text`.
+`sql_text`, `sql_db`, `sql_lsp`, `sql_dbt` and `sql_iceberg` never depend on gpui. Logic that can be tested without a window goes in `sql_text`.
 
 ## Project rules
 

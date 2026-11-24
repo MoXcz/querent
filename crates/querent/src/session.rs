@@ -26,6 +26,17 @@ pub struct Session {
     /// Per dbt project, the database previews read instead of the manifest's.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dbt_databases: BTreeMap<PathBuf, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iceberg_catalogs: Vec<SavedCatalog>,
+}
+
+/// An Iceberg REST catalog in the sidebar; its credential is in the keychain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedCatalog {
+    pub name: String,
+    pub uri: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub warehouse: String,
 }
 
 /// What the sidebar shows.
@@ -34,6 +45,7 @@ pub struct Session {
 pub enum SidebarView {
     Files,
     Dbt,
+    Iceberg,
     #[default]
     Database,
 }
@@ -142,12 +154,17 @@ mod tests {
                 connection: Some("Fabric".to_owned()),
                 database: "analytics".to_owned(),
             }],
-            sidebar: SidebarView::Files,
+            sidebar: SidebarView::Iceberg,
             last_version: Some("0.3.0".to_owned()),
             dbt_databases: BTreeMap::from([(
                 PathBuf::from("/tmp/reports/dbt"),
                 "analytics_dev".to_owned(),
             )]),
+            iceberg_catalogs: vec![SavedCatalog {
+                name: "lake".to_owned(),
+                uri: "http://localhost:8181".to_owned(),
+                warehouse: String::new(),
+            }],
         };
         let text = serde_json::to_string(&session).unwrap();
         assert_eq!(serde_json::from_str::<Session>(&text).unwrap(), session);

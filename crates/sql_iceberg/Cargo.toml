@@ -1,0 +1,23 @@
+[package]
+name = "sql_iceberg"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/sql_iceberg.rs"
+
+[dependencies]
+iceberg.workspace = true
+iceberg-catalog-rest.workspace = true
+# The REST catalog's own reqwest has no TLS; this turns it on for `https://` catalogs.
+reqwest-rest-catalog.workspace = true
+sql_db.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true

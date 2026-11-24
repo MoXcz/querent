@@ -20,8 +20,8 @@ use crate::settings;
 use crate::themes::{self, SelectTheme};
 use crate::updater::CheckForUpdates;
 use crate::workspace::{
-    AddConnection, CloseTab, FindInFolders, NewTab, NextTab, OpenFile, OpenFolder, PreviousTab,
-    ReopenClosedTab, ShowHistory,
+    AddConnection, AddIcebergCatalog, CloseTab, FindInFolders, NewTab, NextTab, OpenFile,
+    OpenFolder, PreviousTab, ReopenClosedTab, ShowHistory,
 };
 use sql_text::StatementEnd;
 use sql_text::format::KeywordCase;
@@ -97,6 +97,12 @@ fn commands(cx: &App) -> Vec<PaletteCommand> {
             "Find in folder",
             &["search", "grep", "text"],
             FindInFolders,
+        ),
+        command(
+            "Files",
+            "Add Iceberg catalog",
+            &["lake", "lakehouse", "rest", "table", "snapshot", "manifest"],
+            AddIcebergCatalog,
         ),
         command("Files", "Save", &["file", "write"], SaveFile),
         command("Files", "Save as", &["file", "write", "copy"], SaveFileAs),

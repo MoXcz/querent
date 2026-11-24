@@ -2,6 +2,15 @@
 
 Querent shows a version's section once, at the first start after an update, and under "What's new" in the command palette. The release job copies the same section into the GitHub release, and fails when the tag has no section here.
 
+## 0.5.0
+
+### Iceberg catalogs
+
+- An **Iceberg** view in the sidebar shows the tables of an Iceberg REST catalog. Add one with "Add Iceberg catalog" in the command palette, or **Add** in the view; a token or client credential is kept in the system keychain.
+- Expand a table to see its location, schema, partitioning, properties, metadata files and snapshots. Expand a snapshot to see its manifests, and a manifest to see its data and delete files with their partition, row count and size.
+- Right-click a table, snapshot or manifest to open its schema, snapshots, manifests or files in the results grid, where they can be filtered, copied and exported.
+- Manifests and data files are read from local disk for now; tables on object storage show their snapshots but not their files.
+
 ## 0.4.4
 
 - Selections are easier to see: every built-in theme now selects in its blue at 40% opacity on dark themes and 25% on light ones, where it was a grey close to the background. Selected text in the editor, selected cells in the results grid and the selected row in the sidebar trees all use it.

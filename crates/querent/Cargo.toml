@@ -25,6 +25,7 @@ tracing-subscriber.workspace = true
 lsp-types.workspace = true
 sql_lsp.workspace = true
 sql_dbt.workspace = true
+sql_iceberg.workspace = true
 keyring.workspace = true
 reqwest.workspace = true
 semver.workspace = true

@@ -10,6 +10,7 @@ mod file_explorer;
 mod find_in_folder;
 mod folders;
 mod history;
+mod iceberg_explorer;
 mod lsp_servers;
 mod object_explorer;
 mod query_tab;

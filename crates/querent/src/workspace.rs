@@ -24,6 +24,7 @@ use crate::file_explorer::{FileExplorer, FileExplorerEvent};
 use crate::find_in_folder::{FindEvent, FindInFolder};
 use crate::folders;
 use crate::history::{self, HistoryEntry};
+use crate::iceberg_explorer::{IcebergEvent, IcebergExplorer};
 use crate::lsp_servers::{self, LspServers, ServerStatus};
 use crate::object_explorer::{ExplorerEvent, ObjectExplorer};
 use crate::query_tab::{ConnectionFields, FileText, QueryTab, read_sql_file};
@@ -55,7 +56,9 @@ actions!(
         /// Open a folder in the sidebar's file tree.
         OpenFolder,
         /// Search the text of the files in the open folders.
-        FindInFolders
+        FindInFolders,
+        /// Add an Iceberg REST catalog to the sidebar.
+        AddIcebergCatalog
     ]
 );
 
@@ -84,6 +87,8 @@ pub struct Workspace {
     _file_explorer_subscription: Subscription,
     dbt_explorer: Entity<DbtExplorer>,
     _dbt_subscription: Subscription,
+    iceberg_explorer: Entity<IcebergExplorer>,
+    _iceberg_subscription: Subscription,
     sidebar: SidebarView,
     /// The open Find in Folder dialog's events.
     find_subscription: Option<Subscription>,
@@ -112,6 +117,9 @@ impl Workspace {
             cx.subscribe_in(&file_explorer, window, Self::on_file_explorer_event);
         let dbt_explorer = cx.new(|cx| DbtExplorer::new(window, cx));
         let dbt_subscription = cx.subscribe_in(&dbt_explorer, window, Self::on_dbt_event);
+        let iceberg_explorer = cx.new(|_| IcebergExplorer::new());
+        let iceberg_subscription =
+            cx.subscribe_in(&iceberg_explorer, window, Self::on_iceberg_event);
         let mut workspace = Self {
             tabs: Vec::new(),
             active_index: 0,
@@ -122,6 +130,8 @@ impl Workspace {
             _file_explorer_subscription: file_explorer_subscription,
             dbt_explorer,
             _dbt_subscription: dbt_subscription,
+            iceberg_explorer,
+            _iceberg_subscription: iceberg_subscription,
             sidebar: SidebarView::default(),
             find_subscription: None,
             open_folder_task: None,
@@ -242,6 +252,9 @@ impl Workspace {
             explorer.set_preview_databases(saved.dbt_databases);
         });
         self.sync_dbt_folders(cx);
+        self.iceberg_explorer.update(cx, |explorer, cx| {
+            explorer.restore(saved.iceberg_catalogs, cx);
+        });
         for tab in saved.tabs {
             self.open_saved_tab(tab, window, cx);
         }
@@ -528,6 +541,45 @@ impl Workspace {
         }
     }
 
+    fn on_iceberg_event(
+        &mut self,
+        _: &Entity<IcebergExplorer>,
+        event: &IcebergEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            IcebergEvent::ShowResult { title, result } => {
+                self.open_tab(ConnectionFields::default(), window, cx);
+                let Some(tab) = self.active_tab().cloned() else {
+                    return;
+                };
+                tab.update(cx, |tab, cx| {
+                    tab.set_sql(&format!("-- Iceberg: {title}\n"), window, cx);
+                    tab.show_output(result.clone(), cx);
+                });
+            }
+            IcebergEvent::CatalogsChanged => {
+                self.schedule_session_save(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn add_iceberg_catalog(
+        &mut self,
+        _: &AddIcebergCatalog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar = SidebarView::Iceberg;
+        self.iceberg_explorer.update(cx, |_, cx| {
+            IcebergExplorer::ask_catalog(None, window, cx);
+        });
+        self.schedule_session_save(cx);
+        cx.notify();
+    }
+
     fn open_query_tab(
         &mut self,
         fields: ConnectionFields,
@@ -685,6 +737,7 @@ impl Workspace {
             sidebar: self.sidebar,
             last_version: Some(crate::release_notes::CURRENT_VERSION.to_owned()),
             dbt_databases: self.dbt_explorer.read(cx).preview_databases(),
+            iceberg_catalogs: self.iceberg_explorer.read(cx).saved_catalogs(),
         }
     }
 
@@ -1134,10 +1187,21 @@ impl Workspace {
         // The dbt view is offered once a project is found, or while it is shown.
         let show_dbt =
             self.dbt_explorer.read(cx).has_projects() || self.sidebar == SidebarView::Dbt;
-        let views: Vec<SidebarView> = [SidebarView::Files, SidebarView::Dbt, SidebarView::Database]
-            .into_iter()
-            .filter(|view| *view != SidebarView::Dbt || show_dbt)
-            .collect();
+        let show_iceberg =
+            self.iceberg_explorer.read(cx).has_catalogs() || self.sidebar == SidebarView::Iceberg;
+        let views: Vec<SidebarView> = [
+            SidebarView::Files,
+            SidebarView::Dbt,
+            SidebarView::Iceberg,
+            SidebarView::Database,
+        ]
+        .into_iter()
+        .filter(|view| match view {
+            SidebarView::Dbt => show_dbt,
+            SidebarView::Iceberg => show_iceberg,
+            SidebarView::Files | SidebarView::Database => true,
+        })
+        .collect();
         let selected = views
             .iter()
             .position(|view| *view == self.sidebar)
@@ -1145,6 +1209,7 @@ impl Workspace {
         let content = match self.sidebar {
             SidebarView::Files => self.file_explorer.clone().into_any_element(),
             SidebarView::Dbt => self.dbt_explorer.clone().into_any_element(),
+            SidebarView::Iceberg => self.iceberg_explorer.clone().into_any_element(),
             SidebarView::Database => self.explorer.clone().into_any_element(),
         };
         let tabs: Vec<Tab> = views
@@ -1153,6 +1218,7 @@ impl Workspace {
                 Tab::new().label(match view {
                     SidebarView::Files => "Files",
                     SidebarView::Dbt => "dbt",
+                    SidebarView::Iceberg => "Iceberg",
                     SidebarView::Database => "Database",
                 })
             })
@@ -1250,6 +1316,7 @@ impl Render for Workspace {
                 },
             ))
             .on_action(cx.listener(Self::find_in_folders))
+            .on_action(cx.listener(Self::add_iceberg_catalog))
             .on_action(
                 cx.listener(|_, _: &crate::updater::CheckForUpdates, window, cx| {
                     crate::updater::check(true, window, cx);
