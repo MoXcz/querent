@@ -6524,7 +6524,7 @@ checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
 
 [[package]]
 name = "querent"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -8051,7 +8051,7 @@ dependencies = [
 
 [[package]]
 name = "sql_db"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "azure_core",
@@ -8082,7 +8082,7 @@ dependencies = [
 
 [[package]]
 name = "sql_dbt"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "regex",
  "serde",
@@ -8092,7 +8092,7 @@ dependencies = [
 
 [[package]]
 name = "sql_iceberg"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "arrow-array",
  "arrow-cast",
@@ -8108,7 +8108,7 @@ dependencies = [
 
 [[package]]
 name = "sql_lsp"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "lsp-types",
  "serde",
@@ -8120,7 +8120,7 @@ dependencies = [
 
 [[package]]
 name = "sql_text"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "sqlformat",
